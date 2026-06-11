@@ -81,6 +81,9 @@ export function Sidebar({
         <Item active={ws.view.kind === "docs"} onClick={() => ws.setView({ kind: "docs" })}>
           📄 文档
         </Item>
+        <Item active={ws.view.kind === "team"} onClick={() => ws.setView({ kind: "team" })}>
+          👥 团队
+        </Item>
 
         <SectionTitle onAdd={onNewChannel}>频道</SectionTitle>
         {channels.map((c) => (

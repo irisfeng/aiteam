@@ -78,4 +78,9 @@ export interface AgentStatus {
   state: "thinking" | "tool" | "responding" | "idle";
   detail?: string;
 }
-export type View = { kind: "channel"; id: string } | { kind: "tasks" } | { kind: "inbox" } | { kind: "docs" };
+export type View =
+  | { kind: "channel"; id: string }
+  | { kind: "tasks" }
+  | { kind: "inbox" }
+  | { kind: "docs" }
+  | { kind: "team" };

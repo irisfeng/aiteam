@@ -16,8 +16,8 @@ import {
   updateTask,
 } from "./db.js";
 import { broadcast } from "./bus.js";
-import { listDocuments, listProjects } from "./db.js";
-import { isMockMode, onMessage, onTaskAssigned, onTaskDelivered, triggerAgent } from "./agents/engine.js";
+import { deleteRoutine, listDocuments, listProjects, listRoutines } from "./db.js";
+import { isMockMode, onMessage, onTaskAssigned, onTaskDelivered, teamStatus, triggerAgent } from "./agents/engine.js";
 
 export const api = Router();
 
@@ -133,6 +133,13 @@ api.patch("/tasks/:id", (req, res) => {
 });
 
 api.get("/documents", (_req, res) => res.json(listDocuments()));
+
+api.get("/team", (_req, res) => res.json({ members: teamStatus(), routines: listRoutines() }));
+
+api.delete("/routines/:id", (req, res) => {
+  deleteRoutine(req.params.id);
+  res.json({ ok: true });
+});
 
 api.post("/approvals/:id/resolve", (req, res) => {
   const approve = Boolean(req.body?.approve);

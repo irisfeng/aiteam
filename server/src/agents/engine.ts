@@ -3,8 +3,13 @@ import {
   Agent,
   Channel,
   Message,
+  Routine,
   Task,
+  agentDailyStats,
   appendMemory,
+  createRoutine,
+  listRoutines,
+  markRoutineRun,
   createApproval,
   createDocument,
   createProject,
@@ -128,6 +133,8 @@ async function runChat(agent: Agent, channel: Channel, depth: number, extraSyste
 
 const runningTasks = new Set<string>();
 const agentQueues = new Map<string, Promise<void>>();
+const currentWork = new Map<string, string>(); // agentId -> 正在执行的 taskId
+const queuedCount = new Map<string, number>(); // agentId -> 排队中的任务数
 
 function depsSatisfied(task: Task): boolean {
   return taskDependsOn(task).every((id) => {
@@ -149,16 +156,44 @@ export function onTaskAssigned(task: Task) {
     return;
   }
   runningTasks.add(task.id);
+  queuedCount.set(agent.id, (queuedCount.get(agent.id) ?? 0) + 1);
   const prev = agentQueues.get(agent.id) ?? Promise.resolve();
   const next = prev
-    .then(() => runTaskWork(agent, task.id))
+    .then(() => {
+      queuedCount.set(agent.id, Math.max(0, (queuedCount.get(agent.id) ?? 1) - 1));
+      currentWork.set(agent.id, task.id);
+      return runTaskWork(agent, task.id);
+    })
     .catch((err) => {
       const t = getTask(task.id);
       if (t?.channel_id) audit(t.channel_id, `⚠️ ${agent.name} 处理任务「${task.title}」失败：${err?.message ?? err}`);
       console.error(`[engine] task work failed:`, err);
     })
-    .finally(() => runningTasks.delete(task.id));
+    .finally(() => {
+      runningTasks.delete(task.id);
+      if (currentWork.get(agent.id) === task.id) currentWork.delete(agent.id);
+    });
   agentQueues.set(agent.id, next);
+}
+
+/** 团队视图：每位 AI 同事的实时工作状态与今日产出。 */
+export function teamStatus() {
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+  const stats = agentDailyStats(startOfDay.getTime());
+  return listAgents().map((a) => {
+    const taskId = currentWork.get(a.id);
+    const task = taskId ? getTask(taskId) : undefined;
+    const s = stats.get(a.id);
+    return {
+      agent_id: a.id,
+      state: task ? "working" : "idle",
+      current_task: task ? { id: task.id, title: task.title } : null,
+      queued: queuedCount.get(a.id) ?? 0,
+      delivered_today: s?.delivered ?? 0,
+      tokens_today: { input: s?.input ?? 0, output: s?.output ?? 0 },
+    };
+  });
 }
 
 /** 任务交付（review/done）后调用：解锁依赖它的任务，并检查项目是否可汇总。 */
@@ -571,6 +606,19 @@ const TOOLS: Anthropic.ToolUnion[] = [
     },
   },
   {
+    name: "schedule_routine",
+    description:
+      "创建一个每天定时执行的例行职责（如每日站会汇总、定期数据汇报、监控提醒）。到点后你会被自动唤起，在频道里执行该职责。",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        time: { type: "string", description: '每日触发时刻，24 小时制 "HH:MM"（Asia/Shanghai）' },
+        instruction: { type: "string", description: "到点后要执行的职责描述（写给未来的你）" },
+      },
+      required: ["time", "instruction"],
+    },
+  },
+  {
     name: "save_memory",
     description:
       "把一条值得长期记住的「核实过的事实」或「通用规则」写入你的记忆（如：用户偏好、项目背景、验证过的打法）。不要记未经验证的猜测或流水账；如与旧记忆冲突，写明修正。",
@@ -706,6 +754,18 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
       appendMemory(agent.id, String(input.note ?? ""));
       return "已写入记忆。";
     }
+    case "schedule_routine": {
+      const time = String(input.time ?? "");
+      if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) return '错误：time 必须是 24 小时制 "HH:MM"。';
+      const routine = createRoutine({
+        channel_id: channel.id,
+        agent_id: agent.id,
+        time,
+        instruction: String(input.instruction ?? ""),
+      });
+      audit(channel.id, `⏰ ${agent.name} 设置了每日 ${time} 的例行任务：${routine.instruction.slice(0, 80)}`);
+      return `例行任务已创建（id: ${routine.id}），每天 ${time}（Asia/Shanghai）自动执行。`;
+    }
     case "submit_verdict": {
       const result = input.result === "revise" ? "revise" : "pass";
       ctx.verdict = { result, reasons: String(input.reasons ?? "") };
@@ -714,6 +774,56 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
     default:
       return `未知工具：${name}`;
   }
+}
+
+// ---------------------------------------------------------------------------
+// 例行任务调度：每分钟检查一次，到点唤起对应 Agent 执行职责
+// ---------------------------------------------------------------------------
+
+function shanghaiNow(): { hhmm: string; date: string } {
+  const parts = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date());
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+  return { hhmm: `${get("hour")}:${get("minute")}`, date: `${get("year")}-${get("month")}-${get("day")}` };
+}
+
+export function startScheduler() {
+  setInterval(() => {
+    const { hhmm, date } = shanghaiNow();
+    for (const routine of listRoutines()) {
+      if (routine.time !== hhmm || routine.last_run_date === date) continue;
+      markRoutineRun(routine.id, date);
+      void runRoutine(routine).catch((err) => console.error("[engine] routine failed:", err));
+    }
+  }, 30_000);
+}
+
+async function runRoutine(routine: Routine) {
+  const agent = getAgent(routine.agent_id);
+  const channel = getChannel(routine.channel_id);
+  if (!agent || !channel) return;
+  audit(channel.id, `⏰ 例行任务触发（每日 ${routine.time}）：${agent.name} 开始执行`);
+  const ctx = newCtx(agent, channel, "chat");
+  const transcript = buildTranscript(channel.id, 20);
+  const prompt = [
+    `现在是你的例行任务时间（每日 ${routine.time}）。请执行以下职责，并把结果直接发到频道：`,
+    ``,
+    routine.instruction,
+    ``,
+    `<transcript>（频道近况，供参考）`,
+    transcript,
+    `</transcript>`,
+    ``,
+    `注意：上下文里有当前的任务看板与文档列表；如职责涉及汇总进展，请以看板与最新讨论为准，实事求是。`,
+  ].join("\n");
+  await streamRun(ctx, prompt, 6);
 }
 
 function toolLabel(name: string): string {
@@ -725,6 +835,7 @@ function toolLabel(name: string): string {
     case "read_document": return "正在查阅文档…";
     case "request_approval": return "正在发起审批请求…";
     case "save_memory": return "正在沉淀经验…";
+    case "schedule_routine": return "正在设置例行任务…";
     case "submit_verdict": return "正在提交验收裁决…";
     default: return `正在使用 ${name}…`;
   }

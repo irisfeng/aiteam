@@ -81,6 +81,15 @@ CREATE TABLE IF NOT EXISTS documents (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS routines (
+  id TEXT PRIMARY KEY,
+  channel_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  time TEXT NOT NULL,
+  instruction TEXT NOT NULL,
+  last_run_date TEXT,
+  created_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY,
   channel_id TEXT,
@@ -464,6 +473,71 @@ export function updateDocument(id: string, fields: { title?: string; content?: s
     next.title, next.content, next.updated_at, id
   );
   return next;
+}
+
+// ---- routines（例行任务）----
+export interface Routine {
+  id: string;
+  channel_id: string;
+  agent_id: string;
+  /** 每日触发时刻 "HH:MM"（Asia/Shanghai） */
+  time: string;
+  instruction: string;
+  last_run_date: string | null;
+  created_at: number;
+}
+export function listRoutines(): Routine[] {
+  return db.prepare("SELECT * FROM routines ORDER BY time").all() as Routine[];
+}
+export function createRoutine(r: { channel_id: string; agent_id: string; time: string; instruction: string }): Routine {
+  const routine: Routine = {
+    id: nanoid(10),
+    channel_id: r.channel_id,
+    agent_id: r.agent_id,
+    time: r.time,
+    instruction: r.instruction,
+    last_run_date: null,
+    created_at: now(),
+  };
+  db.prepare(
+    "INSERT INTO routines (id, channel_id, agent_id, time, instruction, last_run_date, created_at) VALUES (@id, @channel_id, @agent_id, @time, @instruction, @last_run_date, @created_at)"
+  ).run(routine);
+  return routine;
+}
+export function deleteRoutine(id: string) {
+  db.prepare("DELETE FROM routines WHERE id = ?").run(id);
+}
+export function markRoutineRun(id: string, date: string) {
+  db.prepare("UPDATE routines SET last_run_date = ? WHERE id = ?").run(date, id);
+}
+
+/** 今日各 Agent 的消息用量（tokens）与交付数，供团队视图使用 */
+export function agentDailyStats(sinceTs: number): Map<string, { input: number; output: number; delivered: number }> {
+  const stats = new Map<string, { input: number; output: number; delivered: number }>();
+  const rows = db
+    .prepare("SELECT author_id, usage_json FROM messages WHERE author_type = 'agent' AND created_at >= ?")
+    .all(sinceTs) as { author_id: string; usage_json: string | null }[];
+  for (const r of rows) {
+    if (!r.author_id || !r.usage_json) continue;
+    const s = stats.get(r.author_id) ?? { input: 0, output: 0, delivered: 0 };
+    try {
+      const u = JSON.parse(r.usage_json);
+      s.input += u.input_tokens ?? 0;
+      s.output += u.output_tokens ?? 0;
+    } catch { /* ignore */ }
+    stats.set(r.author_id, s);
+  }
+  const delivered = db
+    .prepare(
+      "SELECT assignee_agent_id AS id, COUNT(*) AS n FROM tasks WHERE assignee_agent_id IS NOT NULL AND status IN ('review','done') AND updated_at >= ? GROUP BY assignee_agent_id"
+    )
+    .all(sinceTs) as { id: string; n: number }[];
+  for (const d of delivered) {
+    const s = stats.get(d.id) ?? { input: 0, output: 0, delivered: 0 };
+    s.delivered = d.n;
+    stats.set(d.id, s);
+  }
+  return stats;
 }
 
 // ---- memory ----
