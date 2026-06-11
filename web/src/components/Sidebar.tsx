@@ -47,9 +47,11 @@ function Item({
 export function Sidebar({
   onNewChannel,
   onNewAgent,
+  onSettings,
 }: {
   onNewChannel: () => void;
   onNewAgent: () => void;
+  onSettings: () => void;
 }) {
   const ws = useWorkspace();
   const pending = ws.approvals.filter((a) => a.status === "pending").length;
@@ -127,7 +129,10 @@ export function Sidebar({
 
       <div className="flex items-center gap-2 border-t border-line px-4 py-3 text-[13px] text-ink-2">
         <span className="h-2 w-2 rounded-full bg-green-500" />
-        {ws.user.name}
+        <span className="flex-1">{ws.user.name}</span>
+        <button onClick={onSettings} className="rounded px-1 text-ink-3 hover:bg-line hover:text-ink" title="模型供应商设置">
+          ⚙
+        </button>
       </div>
     </aside>
   );

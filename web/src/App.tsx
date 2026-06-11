@@ -6,11 +6,11 @@ import { TasksBoard } from "./components/TasksBoard";
 import { InboxView } from "./components/InboxView";
 import { DocsView } from "./components/DocsView";
 import { TeamView } from "./components/TeamView";
-import { NewAgentModal, NewChannelModal } from "./components/Modals";
+import { NewAgentModal, NewChannelModal, SettingsModal } from "./components/Modals";
 
 export default function App() {
   const ws = useWorkspace();
-  const [modal, setModal] = useState<"channel" | "agent" | null>(null);
+  const [modal, setModal] = useState<"channel" | "agent" | "settings" | null>(null);
 
   if (!ws.ready) {
     return <div className="flex h-full items-center justify-center text-ink-3">加载中…</div>;
@@ -18,7 +18,11 @@ export default function App() {
 
   return (
     <div className="flex h-full">
-      <Sidebar onNewChannel={() => setModal("channel")} onNewAgent={() => setModal("agent")} />
+      <Sidebar
+        onNewChannel={() => setModal("channel")}
+        onNewAgent={() => setModal("agent")}
+        onSettings={() => setModal("settings")}
+      />
       <main className="flex h-full min-w-0 flex-1">
         {ws.view.kind === "channel" && <ChannelView channelId={ws.view.id} />}
         {ws.view.kind === "tasks" && <TasksBoard />}
@@ -28,6 +32,7 @@ export default function App() {
       </main>
       {modal === "channel" && <NewChannelModal onClose={() => setModal(null)} />}
       {modal === "agent" && <NewAgentModal onClose={() => setModal(null)} />}
+      {modal === "settings" && <SettingsModal onClose={() => setModal(null)} />}
     </div>
   );
 }

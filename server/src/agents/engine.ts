@@ -8,6 +8,8 @@ import {
   agentDailyStats,
   appendMemory,
   createRoutine,
+  getProvider,
+  listProviders,
   listRoutines,
   markRoutineRun,
   createApproval,
@@ -39,9 +41,36 @@ const TRANSCRIPT_WINDOW = 40;
 const MAX_WORK_ITERATIONS = 8;
 const MAX_CONCURRENT_WORK = 8;
 
-const apiKey = process.env.ANTHROPIC_API_KEY;
-const client = apiKey ? new Anthropic({ apiKey }) : null;
-export const isMockMode = !client;
+const envKey = process.env.ANTHROPIC_API_KEY;
+const envClient = envKey ? new Anthropic({ apiKey: envKey }) : null;
+
+/** 全局 Mock：既无官方环境变量 key，也没有任何带 key 的自定义 provider。 */
+export function isMock(): boolean {
+  return !envClient && !listProviders().some((p) => p.api_key);
+}
+
+/** 单次运行的模型通道：client、是否官方（决定服务端工具/缓存可用性）、模型与输出上限。 */
+interface Runtime {
+  client: Anthropic | null;
+  official: boolean;
+  model: string;
+  maxTokens: number;
+}
+
+function resolveRuntime(agent: Agent): Runtime {
+  if (agent.provider_id) {
+    const p = getProvider(agent.provider_id);
+    if (p?.api_key) {
+      return {
+        client: new Anthropic({ apiKey: p.api_key, baseURL: p.base_url || undefined }),
+        official: !p.base_url, // 自定义 base_url 一律按"非官方"做能力门控
+        model: agent.model || p.default_model || "claude-opus-4-8",
+        maxTokens: p.max_tokens || 16000,
+      };
+    }
+  }
+  return { client: envClient, official: true, model: agent.model || "claude-opus-4-8", maxTokens: 16000 };
+}
 
 function supportsAdaptiveThinking(model: string): boolean {
   return /fable|mythos|opus-4-[678]|sonnet-4-6/.test(model);
@@ -331,7 +360,7 @@ async function runVerification(
 ): Promise<{ result: "pass" | "revise"; reasons: string }> {
   const task = getTask(taskId);
   if (!task) return { result: "pass", reasons: "" };
-  if (!client) return { result: "pass", reasons: "" }; // Mock 模式跳过验收
+  if (isMock()) return { result: "pass", reasons: "" }; // 全局 Mock 跳过验收
 
   const others = channelAgents(channel).filter((a) => a.id !== worker.id);
   if (others.length === 0) return { result: "pass", reasons: "" };
@@ -882,10 +911,11 @@ async function streamRun(
 
   try {
     let usage = { input_tokens: 0, output_tokens: 0 };
-    if (!client) {
+    const rt = resolveRuntime(agent);
+    if (!rt.client) {
       await mockRun(ctx, emit);
     } else {
-      usage = await llmLoop(ctx, userPrompt, maxIterations, emit, extraSystem, toolsOverride);
+      usage = await llmLoop(ctx, rt, userPrompt, maxIterations, emit, extraSystem, toolsOverride);
     }
     const usageJson = JSON.stringify(usage);
     updateMessage(row.id, { content, status: "complete", usage_json: usageJson });
@@ -905,21 +935,28 @@ async function streamRun(
 
 async function llmLoop(
   ctx: RunCtx,
+  rt: Runtime,
   userPrompt: string,
   maxIterations: number,
   emit: (delta: string) => void,
   extraSystem?: string,
   toolsOverride?: Anthropic.ToolUnion[]
 ): Promise<{ input_tokens: number; output_tokens: number }> {
+  const client = rt.client;
   if (!client) throw new Error("no client");
   const { agent, channel } = ctx;
 
+  // 能力门控：服务端 web 工具与提示缓存仅官方 Anthropic API 可用
+  let dynamicCtx = buildDynamicContext(agent, channel);
+  if (!rt.official) dynamicCtx += `\n\n注意：当前模型通道不支持 web_search/web_fetch 联网调研，依据已有上下文与常识工作，不确定的事实要明确说明未经核实。`;
   const system: Anthropic.TextBlockParam[] = [
-    { type: "text", text: agent.system_prompt, cache_control: { type: "ephemeral" } },
-    { type: "text", text: buildDynamicContext(agent, channel) + (extraSystem ? `\n\n${extraSystem}` : "") },
+    rt.official
+      ? { type: "text", text: agent.system_prompt, cache_control: { type: "ephemeral" } }
+      : { type: "text", text: agent.system_prompt },
+    { type: "text", text: dynamicCtx + (extraSystem ? `\n\n${extraSystem}` : "") },
   ];
   const messages: Anthropic.MessageParam[] = [{ role: "user", content: userPrompt }];
-  const tools: Anthropic.ToolUnion[] = toolsOverride ?? [...TOOLS, ...WEB_TOOLS];
+  const tools: Anthropic.ToolUnion[] = toolsOverride ?? (rt.official ? [...TOOLS, ...WEB_TOOLS] : [...TOOLS]);
 
   const usage = { input_tokens: 0, output_tokens: 0 };
   let firstText = true;
@@ -927,9 +964,9 @@ async function llmLoop(
 
   for (let iteration = 0; iteration < maxIterations; iteration++) {
     const stream = client.messages.stream({
-      model: agent.model,
-      max_tokens: 16000,
-      ...(supportsAdaptiveThinking(agent.model) ? { thinking: { type: "adaptive" as const } } : {}),
+      model: rt.model,
+      max_tokens: rt.maxTokens,
+      ...(supportsAdaptiveThinking(rt.model) ? { thinking: { type: "adaptive" as const } } : {}),
       system,
       messages,
       tools,

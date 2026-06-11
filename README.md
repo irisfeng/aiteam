@@ -16,7 +16,10 @@
 - **文档库**：AI 的正式产出（报告/PRD/方案）沉淀为文档，可在看板卡片直达交付物
 - **审批门**：AI 的高风险动作进入收件箱，一键批准/拒绝
 - **Agent 记忆**：每个 AI 同事的长期记忆跨会话生效
-- **Mock 模式**：未配置 `ANTHROPIC_API_KEY` 时自动降级，全链路可体验
+- **BYOM（自带模型）**：默认推荐 Anthropic 官方；可在设置中接入任何 Anthropic 协议兼容端点
+  （DeepSeek/GLM/Kimi/MiniMax，或经 LiteLLM 接 OpenAI 协议供应商与本地 Ollama/vLLM），
+  逐 Agent 选择模型通道；第三方通道自动禁用服务端联网工具，API key 仅存服务端
+- **Mock 模式**：未配置任何模型 key 时自动降级，全链路可体验
 
 ## 快速开始
 

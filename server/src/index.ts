@@ -7,7 +7,7 @@ import { WebSocketServer } from "ws";
 import { api } from "./routes.js";
 import { attachBus } from "./bus.js";
 import { seedIfEmpty } from "./seed.js";
-import { isMockMode, startScheduler } from "./agents/engine.js";
+import { isMock, startScheduler } from "./agents/engine.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 8787);
@@ -31,5 +31,5 @@ const wss = new WebSocketServer({ server, path: "/ws" });
 attachBus(wss);
 
 server.listen(PORT, () => {
-  console.log(`[aiteam] server on http://localhost:${PORT} ${isMockMode ? "(mock mode — 未配置 ANTHROPIC_API_KEY)" : ""}`);
+  console.log(`[aiteam] server on http://localhost:${PORT} ${isMock() ? "(mock mode — 未配置任何模型 key)" : ""}`);
 });

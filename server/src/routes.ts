@@ -16,15 +16,26 @@ import {
   updateTask,
 } from "./db.js";
 import { broadcast } from "./bus.js";
-import { deleteRoutine, listDocuments, listProjects, listRoutines } from "./db.js";
-import { isMockMode, onMessage, onTaskAssigned, onTaskDelivered, teamStatus, triggerAgent } from "./agents/engine.js";
+import {
+  createProvider,
+  deleteProvider,
+  deleteRoutine,
+  getProvider,
+  listDocuments,
+  listProjects,
+  listProviders,
+  listRoutines,
+  sanitizeProvider,
+} from "./db.js";
+import { isMock, onMessage, onTaskAssigned, onTaskDelivered, teamStatus, triggerAgent } from "./agents/engine.js";
 
 export const api = Router();
 
 api.get("/bootstrap", (_req, res) => {
   res.json({
     user: { id: "user", name: process.env.AITEAM_USER_NAME || "我" },
-    mock_mode: isMockMode,
+    mock_mode: isMock(),
+    providers: listProviders().map(sanitizeProvider),
     agents: listAgents(),
     channels: listChannels(),
     tasks: listTasks(),
@@ -79,20 +90,41 @@ api.post("/dms", (req, res) => {
 });
 
 api.post("/agents", (req, res) => {
-  const { name, emoji, role, system_prompt, model } = req.body ?? {};
+  const { name, emoji, role, system_prompt, model, provider_id } = req.body ?? {};
   if (!name || !system_prompt) return res.status(400).json({ error: "name and system_prompt required" });
+  const provider = provider_id ? getProvider(String(provider_id)) : undefined;
+  if (provider_id && !provider) return res.status(400).json({ error: "provider not found" });
   try {
     const agent = createAgent({
       name: String(name).trim(),
       emoji: String(emoji || "🤖"),
       role: String(role || ""),
       system_prompt: String(system_prompt),
-      model: model ? String(model) : undefined,
+      model: model ? String(model) : provider?.default_model || undefined,
+      provider_id: provider?.id ?? null,
     });
     res.json(agent);
   } catch (err: any) {
     res.status(400).json({ error: err?.message ?? "create failed" });
   }
+});
+
+api.post("/providers", (req, res) => {
+  const { name, base_url, api_key, default_model, max_tokens } = req.body ?? {};
+  if (!name || !api_key) return res.status(400).json({ error: "name and api_key required" });
+  const provider = createProvider({
+    name: String(name).trim(),
+    base_url: String(base_url ?? "").trim().replace(/\/$/, ""),
+    api_key: String(api_key).trim(),
+    default_model: String(default_model ?? "").trim(),
+    max_tokens: Number(max_tokens) || undefined,
+  });
+  res.json(sanitizeProvider(provider));
+});
+
+api.delete("/providers/:id", (req, res) => {
+  deleteProvider(req.params.id);
+  res.json({ ok: true });
 });
 
 api.get("/tasks", (_req, res) => res.json(listTasks()));

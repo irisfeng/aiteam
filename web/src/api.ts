@@ -1,4 +1,4 @@
-import type { Agent, Approval, Channel, Doc, Message, Project, Task } from "./types";
+import type { Agent, Approval, Channel, Doc, Message, Project, Provider, Task } from "./types";
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
@@ -21,6 +21,7 @@ export interface Bootstrap {
   approvals: Approval[];
   documents: Doc[];
   projects: Project[];
+  providers: Provider[];
 }
 
 export const api = {
@@ -31,8 +32,17 @@ export const api = {
   createChannel: (name: string, agent_ids: string[]) =>
     req<Channel>("/channels", { method: "POST", body: JSON.stringify({ name, agent_ids }) }),
   openDm: (agent_id: string) => req<Channel>("/dms", { method: "POST", body: JSON.stringify({ agent_id }) }),
-  createAgent: (data: { name: string; emoji: string; role: string; system_prompt: string; model?: string }) =>
-    req<Agent>("/agents", { method: "POST", body: JSON.stringify(data) }),
+  createAgent: (data: {
+    name: string;
+    emoji: string;
+    role: string;
+    system_prompt: string;
+    model?: string;
+    provider_id?: string | null;
+  }) => req<Agent>("/agents", { method: "POST", body: JSON.stringify(data) }),
+  createProvider: (data: { name: string; base_url: string; api_key: string; default_model?: string }) =>
+    req<Provider>("/providers", { method: "POST", body: JSON.stringify(data) }),
+  deleteProvider: (id: string) => req<{ ok: boolean }>(`/providers/${id}`, { method: "DELETE" }),
   createTask: (data: { title: string; description?: string; channel_id?: string | null; assignee_agent_id?: string | null }) =>
     req<Task>("/tasks", { method: "POST", body: JSON.stringify(data) }),
   updateTask: (id: string, data: Partial<Pick<Task, "title" | "description" | "status" | "assignee_agent_id">>) =>

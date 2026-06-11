@@ -81,6 +81,16 @@ CREATE TABLE IF NOT EXISTS documents (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS providers (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  base_url TEXT NOT NULL DEFAULT '',
+  api_key TEXT NOT NULL DEFAULT '',
+  default_model TEXT NOT NULL DEFAULT '',
+  max_tokens INTEGER NOT NULL DEFAULT 16000,
+  is_official INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS routines (
   id TEXT PRIMARY KEY,
   channel_id TEXT NOT NULL,
@@ -112,6 +122,7 @@ addColumnIfMissing("tasks", "acceptance_criteria", "acceptance_criteria TEXT NOT
 addColumnIfMissing("tasks", "depends_on", "depends_on TEXT NOT NULL DEFAULT '[]'");
 addColumnIfMissing("tasks", "project_id", "project_id TEXT");
 addColumnIfMissing("tasks", "revision_count", "revision_count INTEGER NOT NULL DEFAULT 0");
+addColumnIfMissing("agents", "provider_id", "provider_id TEXT");
 
 export interface Agent {
   id: string;
@@ -120,6 +131,19 @@ export interface Agent {
   role: string;
   system_prompt: string;
   model: string;
+  /** null = 使用官方 Anthropic（环境变量 ANTHROPIC_API_KEY） */
+  provider_id: string | null;
+  created_at: number;
+}
+export interface Provider {
+  id: string;
+  name: string;
+  /** 空串 = 官方 api.anthropic.com */
+  base_url: string;
+  api_key: string;
+  default_model: string;
+  max_tokens: number;
+  is_official: number;
   created_at: number;
 }
 export interface Channel {
@@ -188,7 +212,14 @@ export function listAgents(): Agent[] {
 export function getAgent(id: string): Agent | undefined {
   return db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as Agent | undefined;
 }
-export function createAgent(a: { name: string; emoji: string; role: string; system_prompt: string; model?: string }): Agent {
+export function createAgent(a: {
+  name: string;
+  emoji: string;
+  role: string;
+  system_prompt: string;
+  model?: string;
+  provider_id?: string | null;
+}): Agent {
   const agent: Agent = {
     id: nanoid(10),
     name: a.name,
@@ -196,12 +227,59 @@ export function createAgent(a: { name: string; emoji: string; role: string; syst
     role: a.role,
     system_prompt: a.system_prompt,
     model: a.model || "claude-opus-4-8",
+    provider_id: a.provider_id ?? null,
     created_at: now(),
   };
   db.prepare(
-    "INSERT INTO agents (id, name, emoji, role, system_prompt, model, created_at) VALUES (@id, @name, @emoji, @role, @system_prompt, @model, @created_at)"
+    "INSERT INTO agents (id, name, emoji, role, system_prompt, model, provider_id, created_at) VALUES (@id, @name, @emoji, @role, @system_prompt, @model, @provider_id, @created_at)"
   ).run(agent);
   return agent;
+}
+
+// ---- providers（模型供应商 / BYOM）----
+export function listProviders(): Provider[] {
+  return db.prepare("SELECT * FROM providers ORDER BY created_at").all() as Provider[];
+}
+export function getProvider(id: string): Provider | undefined {
+  return db.prepare("SELECT * FROM providers WHERE id = ?").get(id) as Provider | undefined;
+}
+export function createProvider(p: {
+  name: string;
+  base_url?: string;
+  api_key?: string;
+  default_model?: string;
+  max_tokens?: number;
+}): Provider {
+  const provider: Provider = {
+    id: nanoid(10),
+    name: p.name,
+    base_url: p.base_url ?? "",
+    api_key: p.api_key ?? "",
+    default_model: p.default_model ?? "",
+    max_tokens: p.max_tokens && p.max_tokens > 0 ? p.max_tokens : 16000,
+    is_official: 0,
+    created_at: now(),
+  };
+  db.prepare(
+    "INSERT INTO providers (id, name, base_url, api_key, default_model, max_tokens, is_official, created_at) VALUES (@id, @name, @base_url, @api_key, @default_model, @max_tokens, @is_official, @created_at)"
+  ).run(provider);
+  return provider;
+}
+export function deleteProvider(id: string) {
+  db.prepare("UPDATE agents SET provider_id = NULL WHERE provider_id = ?").run(id);
+  db.prepare("DELETE FROM providers WHERE id = ?").run(id);
+}
+/** 给前端的脱敏视图：永不下发 api_key */
+export function sanitizeProvider(p: Provider) {
+  return {
+    id: p.id,
+    name: p.name,
+    base_url: p.base_url,
+    default_model: p.default_model,
+    max_tokens: p.max_tokens,
+    is_official: p.is_official,
+    has_key: Boolean(p.api_key),
+  };
 }
 
 // ---- channels ----

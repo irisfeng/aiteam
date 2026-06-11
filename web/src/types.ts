@@ -5,7 +5,17 @@ export interface Agent {
   role: string;
   system_prompt: string;
   model: string;
+  provider_id: string | null;
   created_at: number;
+}
+export interface Provider {
+  id: string;
+  name: string;
+  base_url: string;
+  default_model: string;
+  max_tokens: number;
+  is_official: number;
+  has_key: boolean;
 }
 export interface Channel {
   id: string;

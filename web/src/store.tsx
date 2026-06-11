@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { api, type Bootstrap } from "./api";
-import type { Agent, AgentStatus, Approval, Channel, Doc, Message, Project, Task, View } from "./types";
+import type { Agent, AgentStatus, Approval, Channel, Doc, Message, Project, Provider, Task, View } from "./types";
 
 interface State {
   ready: boolean;
@@ -21,6 +21,7 @@ interface State {
   approvals: Approval[];
   documents: Doc[];
   projects: Project[];
+  providers: Provider[];
   messages: Record<string, Message[]>;
   /** channelId -> agentId -> status */
   statuses: Record<string, Record<string, AgentStatus>>;
@@ -38,6 +39,7 @@ type Action =
   | { type: "task:upsert"; task: Task }
   | { type: "doc:upsert"; doc: Doc }
   | { type: "project:upsert"; project: Project }
+  | { type: "providers:set"; providers: Provider[] }
   | { type: "approval:upsert"; approval: Approval }
   | { type: "channel:new"; channel: Channel }
   | { type: "agent:new"; agent: Agent };
@@ -52,6 +54,7 @@ const initial: State = {
   approvals: [],
   documents: [],
   projects: [],
+  providers: [],
   messages: {},
   statuses: {},
   view: { kind: "tasks" },
@@ -81,6 +84,7 @@ function reducer(state: State, action: Action): State {
         approvals: d.approvals,
         documents: d.documents ?? [],
         projects: d.projects ?? [],
+        providers: d.providers ?? [],
         view: firstChannel ? { kind: "channel", id: firstChannel.id } : state.view,
       };
     }
@@ -132,6 +136,8 @@ function reducer(state: State, action: Action): State {
       return { ...state, documents: upsertBy(state.documents, action.doc) };
     case "project:upsert":
       return { ...state, projects: upsertBy(state.projects, action.project) };
+    case "providers:set":
+      return { ...state, providers: action.providers };
     case "approval:upsert":
       return { ...state, approvals: upsertBy(state.approvals, action.approval) };
     case "channel:new":
@@ -151,7 +157,16 @@ interface Store extends State {
   send: (channelId: string, content: string) => Promise<void>;
   openDm: (agentId: string) => Promise<void>;
   createChannel: (name: string, agentIds: string[]) => Promise<void>;
-  createAgent: (data: { name: string; emoji: string; role: string; system_prompt: string }) => Promise<void>;
+  createAgent: (data: {
+    name: string;
+    emoji: string;
+    role: string;
+    system_prompt: string;
+    model?: string;
+    provider_id?: string | null;
+  }) => Promise<void>;
+  createProvider: (data: { name: string; base_url: string; api_key: string; default_model?: string }) => Promise<void>;
+  deleteProvider: (id: string) => Promise<void>;
   moveTask: (task: Task, status: Task["status"]) => Promise<void>;
   resolveApproval: (id: string, approve: boolean) => Promise<void>;
   agentById: (id: string | null) => Agent | undefined;
@@ -261,6 +276,14 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       createAgent: async (data) => {
         const agent = await api.createAgent(data);
         dispatch({ type: "agent:new", agent });
+      },
+      createProvider: async (data) => {
+        const provider = await api.createProvider(data);
+        dispatch({ type: "providers:set", providers: [...state.providers, provider] });
+      },
+      deleteProvider: async (id) => {
+        await api.deleteProvider(id);
+        dispatch({ type: "providers:set", providers: state.providers.filter((p) => p.id !== id) });
       },
       moveTask: async (task, status) => {
         const next = await api.updateTask(task.id, { status });
