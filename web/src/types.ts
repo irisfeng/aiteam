@@ -47,10 +47,20 @@ export interface Approval {
   created_at: number;
   resolved_at: number | null;
 }
+export interface Doc {
+  id: string;
+  channel_id: string | null;
+  task_id: string | null;
+  agent_id: string | null;
+  title: string;
+  content: string;
+  created_at: number;
+  updated_at: number;
+}
 export interface AgentStatus {
   agent_id: string;
   channel_id: string;
   state: "thinking" | "tool" | "responding" | "idle";
   detail?: string;
 }
-export type View = { kind: "channel"; id: string } | { kind: "tasks" } | { kind: "inbox" };
+export type View = { kind: "channel"; id: string } | { kind: "tasks" } | { kind: "inbox" } | { kind: "docs" };

@@ -4,6 +4,7 @@ import { Sidebar } from "./components/Sidebar";
 import { ChannelView } from "./components/ChannelView";
 import { TasksBoard } from "./components/TasksBoard";
 import { InboxView } from "./components/InboxView";
+import { DocsView } from "./components/DocsView";
 import { NewAgentModal, NewChannelModal } from "./components/Modals";
 
 export default function App() {
@@ -21,6 +22,7 @@ export default function App() {
         {ws.view.kind === "channel" && <ChannelView channelId={ws.view.id} />}
         {ws.view.kind === "tasks" && <TasksBoard />}
         {ws.view.kind === "inbox" && <InboxView />}
+        {ws.view.kind === "docs" && <DocsView />}
       </main>
       {modal === "channel" && <NewChannelModal onClose={() => setModal(null)} />}
       {modal === "agent" && <NewAgentModal onClose={() => setModal(null)} />}

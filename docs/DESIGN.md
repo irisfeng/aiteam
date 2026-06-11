@@ -68,9 +68,15 @@ Workspace
 2. **代理链（agent-to-agent）**：Agent 回复中 `@` 另一个 Agent 时会触发对方接力，
    链深默认上限 2（`AGENT_CHAIN_DEPTH`），同一轮内每个 Agent 至多触发一次，防雪崩。
 3. **工具面**（Agent 可用的结构化动作，全部留痕广播）：
-   - `create_task` / `update_task` / `list_tasks` —— 与看板直连；
+   - `create_task` / `update_task` —— 与看板直连；指派给 AI 同事即触发对方自动开工；done 关单为 human-only（工具层硬拦截）；
+   - `web_search` / `web_fetch` —— Anthropic 服务端工具，真实联网调研；
+   - `write_document` / `read_document` —— 正式交付物沉淀到文档库，而非散落聊天流；
    - `request_approval` —— 进入用户收件箱的审批门；
    - `save_memory` —— 写入该 Agent 的长期记忆（跨会话生效）。
+4. **任务工作循环（核心）**：任务被指派给 Agent 后（人指派或同事开票分工皆可），它在后台
+   自主执行：todo → doing → 多轮"调研/撰写/开衍生任务"工具循环 → `write_document` 交付 →
+   系统转 review → 自动唤起评审同事（优先名字含"评审"者，其次开票人）对交付物全文给意见。
+   并发护栏：每个 Agent 串行干活（队列化）、全局并发上限 8、运行中任务去重。
 4. **上下文构建**：系统提示 = 角色人设（稳定，打 cache 断点）+ 工作区动态上下文
    （队友名册、频道任务快照、个人记忆）；对话以"频道转写"形式提供最近 N 条。
 5. **成本与状态**：每条 AI 消息落库 usage（input/output tokens）；
@@ -137,10 +143,13 @@ aiteam/
 
 ## 五、路线图
 
-- **M0（本次交付）**：频道/私信聊天、4 个内置 AI 同事、@路由 + 代理链、流式 + 状态广播、
+- **M0（已交付）**：频道/私信聊天、4 个内置 AI 同事、@路由 + 代理链、流式 + 状态广播、
   任务看板（AI 工具直连）、审批收件箱、Agent 记忆、消息级用量、Mock 模式、新建 Agent/频道。
-- **M1**：消息线程（thread）、引用回复、检索；Agent 主动行为（定时站会/日报）；
-  频道级"默认负责人"可配置。
+- **M1（已交付）— 干活能力**：任务指派即自动开工的后台工作循环、web_search/web_fetch
+  真实调研、write_document 文档交付与文档库、交付后同行评审闭环、done 关单 human-only、
+  并发护栏（Agent 串行队列 + 全局上限）。
+- **M1.5**：消息线程（thread）、引用回复、检索；Agent 主动行为（定时站会/日报）；
+  频道级"默认负责人"可配置；评审意见驱动的返工循环（bounded revise）。
 - **M2**：编码会话（沙箱 + diff 审查，参考 Managed Agents/Claude Agent SDK）；
   邮件接入与外发审批门打通。
 - **M3**：多工作区与成员体系、用量计费面板、移动端适配。

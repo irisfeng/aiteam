@@ -12,6 +12,7 @@ export type BusEvent =
   | { type: "message:done"; payload: { id: string; channel_id: string; content: string; usage_json: string | null } }
   | { type: "agent:status"; payload: { agent_id: string; channel_id: string; state: "thinking" | "tool" | "responding" | "idle"; detail?: string } }
   | { type: "task:upsert"; payload: unknown }
+  | { type: "doc:upsert"; payload: unknown }
   | { type: "approval:upsert"; payload: unknown }
   | { type: "channel:new"; payload: unknown };
 

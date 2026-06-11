@@ -16,7 +16,8 @@ import {
   updateTask,
 } from "./db.js";
 import { broadcast } from "./bus.js";
-import { isMockMode, onMessage, triggerAgent } from "./agents/engine.js";
+import { listDocuments } from "./db.js";
+import { isMockMode, onMessage, onTaskAssigned, triggerAgent } from "./agents/engine.js";
 
 export const api = Router();
 
@@ -28,6 +29,7 @@ api.get("/bootstrap", (_req, res) => {
     channels: listChannels(),
     tasks: listTasks(),
     approvals: listApprovals(),
+    documents: listDocuments(),
   });
 });
 
@@ -105,11 +107,13 @@ api.post("/tasks", (req, res) => {
     created_by: "user",
   });
   broadcast({ type: "task:upsert", payload: task });
+  if (task.assignee_agent_id) onTaskAssigned(task);
   res.json(task);
 });
 
 api.patch("/tasks/:id", (req, res) => {
   const { title, description, status, assignee_agent_id } = req.body ?? {};
+  const prev = listTasks().find((t) => t.id === req.params.id);
   const task = updateTask(req.params.id, {
     ...(title !== undefined ? { title } : {}),
     ...(description !== undefined ? { description } : {}),
@@ -118,8 +122,12 @@ api.patch("/tasks/:id", (req, res) => {
   });
   if (!task) return res.status(404).json({ error: "task not found" });
   broadcast({ type: "task:upsert", payload: task });
+  // 用户把任务指派给了新的 AI 同事 → 对方自动开工
+  if (task.assignee_agent_id && task.assignee_agent_id !== prev?.assignee_agent_id) onTaskAssigned(task);
   res.json(task);
 });
+
+api.get("/documents", (_req, res) => res.json(listDocuments()));
 
 api.post("/approvals/:id/resolve", (req, res) => {
   const approve = Boolean(req.body?.approve);

@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { useWorkspace } from "../store";
-import type { Task } from "../types";
+import type { Doc, Task } from "../types";
 import { api } from "../api";
-import { AgentAvatar } from "./Avatar";
+import { DocViewerModal } from "./DocsView";
 
 const COLUMNS: { key: Task["status"]; label: string }[] = [
   { key: "todo", label: "待办" },
@@ -11,10 +11,10 @@ const COLUMNS: { key: Task["status"]; label: string }[] = [
   { key: "done", label: "完成" },
 ];
 
-function TaskCard({ task }: { task: Task }) {
+function TaskCard({ task, onOpenDoc }: { task: Task; onOpenDoc: (doc: Doc) => void }) {
   const ws = useWorkspace();
-  const assignee = ws.agentById(task.assignee_agent_id);
   const creator = task.created_by === "user" ? null : ws.agentById(task.created_by);
+  const doc = ws.documents.find((d) => d.task_id === task.id);
   const idx = COLUMNS.findIndex((c) => c.key === task.status);
 
   return (
@@ -24,13 +24,19 @@ function TaskCard({ task }: { task: Task }) {
         <div className="mt-1 line-clamp-3 whitespace-pre-wrap text-[12.5px] text-ink-2">{task.description}</div>
       )}
       <div className="mt-2 flex items-center gap-1.5">
-        {assignee ? (
-          <span className="flex items-center gap-1 rounded-full bg-panel px-1.5 py-0.5 text-[11.5px] text-ink-2">
-            <AgentAvatar agent={assignee} size={14} /> {assignee.name}
-          </span>
-        ) : (
-          <span className="rounded-full bg-panel px-1.5 py-0.5 text-[11.5px] text-ink-3">未分配</span>
-        )}
+        <select
+          value={task.assignee_agent_id ?? ""}
+          onChange={(e) => void api.updateTask(task.id, { assignee_agent_id: e.target.value || null })}
+          className="max-w-[140px] rounded-full border border-line bg-panel px-1.5 py-0.5 text-[11.5px] text-ink-2 outline-none"
+          title="指派给 AI 同事后会自动开工"
+        >
+          <option value="">未分配</option>
+          {ws.agents.map((a) => (
+            <option key={a.id} value={a.id}>
+              {a.emoji} {a.name}
+            </option>
+          ))}
+        </select>
         {creator && (
           <span className="text-[11px] text-ink-3" title={`由 ${creator.name} 创建`}>
             {creator.emoji} 创建
@@ -50,13 +56,21 @@ function TaskCard({ task }: { task: Task }) {
             <button
               onClick={() => void ws.moveTask(task, COLUMNS[idx + 1].key)}
               className="rounded px-1 text-ink-3 hover:bg-panel hover:text-ink"
-              title={`移到「${COLUMNS[idx + 1].label}」`}
+              title={`移到「${COLUMNS[idx + 1].label}」${COLUMNS[idx + 1].key === "done" ? "（关单是 human-only）" : ""}`}
             >
               →
             </button>
           )}
         </span>
       </div>
+      {doc && (
+        <button
+          onClick={() => onOpenDoc(doc)}
+          className="mt-2 flex w-full items-center gap-1.5 rounded-md bg-accent-soft px-2 py-1 text-left text-[12px] text-ink-2 hover:text-ink"
+        >
+          📄 <span className="truncate">交付物：{doc.title}</span>
+        </button>
+      )}
     </div>
   );
 }
@@ -64,11 +78,13 @@ function TaskCard({ task }: { task: Task }) {
 export function TasksBoard() {
   const ws = useWorkspace();
   const [title, setTitle] = useState("");
+  const [assignee, setAssignee] = useState("");
+  const [openDoc, setOpenDoc] = useState<Doc | null>(null);
 
   async function addTask() {
     const t = title.trim();
     if (!t) return;
-    await api.createTask({ title: t });
+    await api.createTask({ title: t, assignee_agent_id: assignee || null });
     setTitle("");
   }
 
@@ -76,15 +92,27 @@ export function TasksBoard() {
     <div className="flex h-full min-w-0 flex-1 flex-col">
       <header className="flex items-center gap-3 border-b border-line px-5 py-3">
         <h1 className="text-[15px] font-semibold">任务</h1>
-        <span className="text-[12px] text-ink-3">人与 AI 共用同一块看板 — AI 同事会自己开票并推进</span>
+        <span className="text-[12px] text-ink-3">指派给 AI 同事即自动开工：调研 → 交付文档 → 转待评审</span>
         <div className="ml-auto flex items-center gap-2">
           <input
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && void addTask()}
             placeholder="快速新建任务…"
-            className="w-56 rounded-lg border border-line bg-white px-3 py-1.5 text-[13px] outline-none focus:border-accent/50"
+            className="w-52 rounded-lg border border-line bg-white px-3 py-1.5 text-[13px] outline-none focus:border-accent/50"
           />
+          <select
+            value={assignee}
+            onChange={(e) => setAssignee(e.target.value)}
+            className="rounded-lg border border-line bg-white px-2 py-1.5 text-[13px] text-ink-2 outline-none"
+          >
+            <option value="">不指派</option>
+            {ws.agents.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.emoji} {a.name}
+              </option>
+            ))}
+          </select>
           <button
             onClick={() => void addTask()}
             disabled={!title.trim()}
@@ -105,7 +133,7 @@ export function TasksBoard() {
               </div>
               <div className="flex flex-col gap-2 overflow-y-auto p-1">
                 {tasks.map((t) => (
-                  <TaskCard key={t.id} task={t} />
+                  <TaskCard key={t.id} task={t} onOpenDoc={setOpenDoc} />
                 ))}
                 {tasks.length === 0 && <div className="px-2 py-4 text-center text-[12px] text-ink-3">空</div>}
               </div>
@@ -113,6 +141,7 @@ export function TasksBoard() {
           );
         })}
       </div>
+      {openDoc && <DocViewerModal doc={openDoc} onClose={() => setOpenDoc(null)} />}
     </div>
   );
 }

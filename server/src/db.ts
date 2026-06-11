@@ -71,6 +71,16 @@ CREATE TABLE IF NOT EXISTS agent_memory (
   content TEXT NOT NULL DEFAULT '',
   updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS documents (
+  id TEXT PRIMARY KEY,
+  channel_id TEXT,
+  task_id TEXT,
+  agent_id TEXT,
+  title TEXT NOT NULL,
+  content TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 `);
 
 export interface Agent {
@@ -269,13 +279,13 @@ export function createTask(t: {
 }
 export function updateTask(
   id: string,
-  fields: Partial<Pick<Task, "title" | "description" | "status" | "assignee_agent_id">>
+  fields: Partial<Pick<Task, "title" | "description" | "status" | "assignee_agent_id" | "channel_id">>
 ): Task | undefined {
   const cur = getTask(id);
   if (!cur) return undefined;
   const next: Task = { ...cur, ...fields, updated_at: now() };
   db.prepare(
-    "UPDATE tasks SET title = @title, description = @description, status = @status, assignee_agent_id = @assignee_agent_id, updated_at = @updated_at WHERE id = @id"
+    "UPDATE tasks SET title = @title, description = @description, status = @status, assignee_agent_id = @assignee_agent_id, channel_id = @channel_id, updated_at = @updated_at WHERE id = @id"
   ).run(next);
   return next;
 }
@@ -305,6 +315,55 @@ export function resolveApproval(id: string, approve: boolean): Approval | undefi
   if (!cur || cur.status !== "pending") return cur;
   const next: Approval = { ...cur, status: approve ? "approved" : "rejected", resolved_at: now() };
   db.prepare("UPDATE approvals SET status = ?, resolved_at = ? WHERE id = ?").run(next.status, next.resolved_at, id);
+  return next;
+}
+
+// ---- documents ----
+export interface Doc {
+  id: string;
+  channel_id: string | null;
+  task_id: string | null;
+  agent_id: string | null;
+  title: string;
+  content: string;
+  created_at: number;
+  updated_at: number;
+}
+export function listDocuments(): Doc[] {
+  return db.prepare("SELECT * FROM documents ORDER BY created_at DESC").all() as Doc[];
+}
+export function getDocument(id: string): Doc | undefined {
+  return db.prepare("SELECT * FROM documents WHERE id = ?").get(id) as Doc | undefined;
+}
+export function createDocument(d: {
+  channel_id?: string | null;
+  task_id?: string | null;
+  agent_id?: string | null;
+  title: string;
+  content: string;
+}): Doc {
+  const doc: Doc = {
+    id: nanoid(10),
+    channel_id: d.channel_id ?? null,
+    task_id: d.task_id ?? null,
+    agent_id: d.agent_id ?? null,
+    title: d.title,
+    content: d.content,
+    created_at: now(),
+    updated_at: now(),
+  };
+  db.prepare(
+    "INSERT INTO documents (id, channel_id, task_id, agent_id, title, content, created_at, updated_at) VALUES (@id, @channel_id, @task_id, @agent_id, @title, @content, @created_at, @updated_at)"
+  ).run(doc);
+  return doc;
+}
+export function updateDocument(id: string, fields: { title?: string; content?: string }): Doc | undefined {
+  const cur = getDocument(id);
+  if (!cur) return undefined;
+  const next: Doc = { ...cur, ...fields, updated_at: now() };
+  db.prepare("UPDATE documents SET title = ?, content = ?, updated_at = ? WHERE id = ?").run(
+    next.title, next.content, next.updated_at, id
+  );
   return next;
 }
 

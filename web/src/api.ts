@@ -1,4 +1,4 @@
-import type { Agent, Approval, Channel, Message, Task } from "./types";
+import type { Agent, Approval, Channel, Doc, Message, Task } from "./types";
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
@@ -19,6 +19,7 @@ export interface Bootstrap {
   channels: Channel[];
   tasks: Task[];
   approvals: Approval[];
+  documents: Doc[];
 }
 
 export const api = {
@@ -31,7 +32,7 @@ export const api = {
   openDm: (agent_id: string) => req<Channel>("/dms", { method: "POST", body: JSON.stringify({ agent_id }) }),
   createAgent: (data: { name: string; emoji: string; role: string; system_prompt: string; model?: string }) =>
     req<Agent>("/agents", { method: "POST", body: JSON.stringify(data) }),
-  createTask: (data: { title: string; description?: string; channel_id?: string | null }) =>
+  createTask: (data: { title: string; description?: string; channel_id?: string | null; assignee_agent_id?: string | null }) =>
     req<Task>("/tasks", { method: "POST", body: JSON.stringify(data) }),
   updateTask: (id: string, data: Partial<Pick<Task, "title" | "description" | "status" | "assignee_agent_id">>) =>
     req<Task>(`/tasks/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
