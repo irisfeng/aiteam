@@ -40,7 +40,7 @@ export const api = {
     model?: string;
     provider_id?: string | null;
   }) => req<Agent>("/agents", { method: "POST", body: JSON.stringify(data) }),
-  createProvider: (data: { name: string; base_url: string; api_key: string; default_model?: string; max_tokens?: number }) =>
+  createProvider: (data: { name: string; base_url: string; api_key: string; default_model?: string; max_tokens?: number; web_tools?: boolean }) =>
     req<Provider>("/providers", { method: "POST", body: JSON.stringify(data) }),
   deleteProvider: (id: string) => req<{ ok: boolean }>(`/providers/${id}`, { method: "DELETE" }),
   createTask: (data: { title: string; description?: string; channel_id?: string | null; assignee_agent_id?: string | null }) =>

@@ -179,6 +179,15 @@ OpenAI 协议的供应商与本地运行时（Ollama / LM Studio / vLLM…）可
 **密钥安全**：API key 只存服务端（env / settings），永不下发前端。
 无任何 key 时进入 **Mock 模式**：Agent 回复模拟内容，产品全链路可体验。
 
+**DeepSeek 接入速查（2026-06，V4）**：
+- Anthropic 兼容端点：`https://api.deepseek.com/anthropic`；
+- 模型：`deepseek-v4-pro`（旗舰）/ `deepseek-v4-flash`（轻量）；旧名 `deepseek-chat`/
+  `deepseek-reasoner` 是 V4 Flash 的兼容别名，2026-07-24 起废弃；
+- 该端点会把 `claude-opus*` 自动映射为 v4-pro、`claude-sonnet*/haiku*` 映射为 v4-flash；
+- 上下文 1M / 最大输出 384K（两档相同）—— 我们默认 max_tokens 16000 可直接用；
+- 官方声明其 Anthropic 端点原生支持网页搜索 —— provider 设置中可勾选
+  "支持服务端联网工具"开启（运行报错则关闭）。
+
 ---
 
 ## 三、体验与视觉（"品味更好"具体落点）

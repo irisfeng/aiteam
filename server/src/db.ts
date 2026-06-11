@@ -123,6 +123,7 @@ addColumnIfMissing("tasks", "depends_on", "depends_on TEXT NOT NULL DEFAULT '[]'
 addColumnIfMissing("tasks", "project_id", "project_id TEXT");
 addColumnIfMissing("tasks", "revision_count", "revision_count INTEGER NOT NULL DEFAULT 0");
 addColumnIfMissing("agents", "provider_id", "provider_id TEXT");
+addColumnIfMissing("providers", "web_tools", "web_tools INTEGER NOT NULL DEFAULT 0");
 
 export interface Agent {
   id: string;
@@ -143,6 +144,9 @@ export interface Provider {
   api_key: string;
   default_model: string;
   max_tokens: number;
+  /** 该端点是否支持 Anthropic 服务端联网工具（web_search/web_fetch）。官方恒为支持；
+   *  部分兼容端点（如 DeepSeek）声明原生支持，可手动开启。 */
+  web_tools: number;
   is_official: number;
   created_at: number;
 }
@@ -249,6 +253,7 @@ export function createProvider(p: {
   api_key?: string;
   default_model?: string;
   max_tokens?: number;
+  web_tools?: boolean;
 }): Provider {
   const provider: Provider = {
     id: nanoid(10),
@@ -257,11 +262,12 @@ export function createProvider(p: {
     api_key: p.api_key ?? "",
     default_model: p.default_model ?? "",
     max_tokens: p.max_tokens && p.max_tokens > 0 ? p.max_tokens : 16000,
+    web_tools: p.web_tools ? 1 : 0,
     is_official: 0,
     created_at: now(),
   };
   db.prepare(
-    "INSERT INTO providers (id, name, base_url, api_key, default_model, max_tokens, is_official, created_at) VALUES (@id, @name, @base_url, @api_key, @default_model, @max_tokens, @is_official, @created_at)"
+    "INSERT INTO providers (id, name, base_url, api_key, default_model, max_tokens, web_tools, is_official, created_at) VALUES (@id, @name, @base_url, @api_key, @default_model, @max_tokens, @web_tools, @is_official, @created_at)"
   ).run(provider);
   return provider;
 }
@@ -277,6 +283,7 @@ export function sanitizeProvider(p: Provider) {
     base_url: p.base_url,
     default_model: p.default_model,
     max_tokens: p.max_tokens,
+    web_tools: p.web_tools,
     is_official: p.is_official,
     has_key: Boolean(p.api_key),
   };

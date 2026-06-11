@@ -14,6 +14,7 @@ export interface Provider {
   base_url: string;
   default_model: string;
   max_tokens: number;
+  web_tools: number;
   is_official: number;
   has_key: boolean;
 }

@@ -178,6 +178,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [apiKey, setApiKey] = useState("");
   const [defaultModel, setDefaultModel] = useState("");
   const [maxTokens, setMaxTokens] = useState("");
+  const [webTools, setWebTools] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -192,6 +193,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         api_key: apiKey.trim(),
         default_model: defaultModel.trim(),
         max_tokens: Number(maxTokens) || undefined,
+        web_tools: webTools,
       });
       setName("");
       setBaseUrl("");
@@ -241,14 +243,18 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       <label className={labelCls}>API Key（仅存服务端，不会下发前端）</label>
       <input value={apiKey} onChange={(e) => setApiKey(e.target.value)} type="password" placeholder="sk-…" className={inputCls} />
       <label className={labelCls}>默认模型</label>
-      <input value={defaultModel} onChange={(e) => setDefaultModel(e.target.value)} placeholder="例如 deepseek-chat" className={inputCls} />
+      <input value={defaultModel} onChange={(e) => setDefaultModel(e.target.value)} placeholder="例如 deepseek-v4-pro" className={inputCls} />
       <label className={labelCls}>单次输出上限 max_tokens（可选）</label>
       <input
         value={maxTokens}
         onChange={(e) => setMaxTokens(e.target.value)}
-        placeholder="默认 16000；DeepSeek 填 8000，本地模型按运行时上限"
+        placeholder="默认 16000（DeepSeek V4 支持 384K，可不填）；本地模型按运行时上限"
         className={inputCls}
       />
+      <label className="mt-3 flex cursor-pointer items-center gap-2 text-[12.5px] text-ink-2">
+        <input type="checkbox" checked={webTools} onChange={(e) => setWebTools(e.target.checked)} />
+        该端点支持服务端联网工具（web_search/web_fetch）。DeepSeek 官方 Anthropic 端点声明原生支持，可勾选；若运行报错请取消。
+      </label>
       {error && <div className="mt-2 text-[12px] text-red-500">{error}</div>}
       <button
         onClick={() => void add()}

@@ -53,6 +53,8 @@ export function isMock(): boolean {
 interface Runtime {
   client: Anthropic | null;
   official: boolean;
+  /** 是否启用 Anthropic 服务端联网工具（官方恒可用；兼容端点按 provider.web_tools） */
+  webTools: boolean;
   model: string;
   maxTokens: number;
 }
@@ -63,27 +65,29 @@ function resolveRuntime(agent: Agent): Runtime {
     if (p?.api_key) {
       return {
         client: new Anthropic({ apiKey: p.api_key, baseURL: p.base_url || undefined }),
-        official: !p.base_url, // 自定义 base_url 一律按"非官方"做能力门控
+        official: !p.base_url, // 自定义 base_url 一律按"非官方"做缓存等门控
+        webTools: !p.base_url || Boolean(p.web_tools),
         model: agent.model || p.default_model || "claude-opus-4-8",
         maxTokens: p.max_tokens || 16000,
       };
     }
   }
   if (envClient) {
-    return { client: envClient, official: true, model: agent.model || "claude-opus-4-8", maxTokens: 16000 };
+    return { client: envClient, official: true, webTools: true, model: agent.model || "claude-opus-4-8", maxTokens: 16000 };
   }
   // 无官方 key 时：回退到首个带 key 的供应商（工作区默认通道），
-  // 模型用供应商默认值——内置同事的 claude-* 模型名在第三方端点上不存在
+  // 模型用供应商默认值——内置同事的 claude-* 模型名在第三方端点上可能不存在
   const fallback = listProviders().find((p) => p.api_key);
   if (fallback) {
     return {
       client: new Anthropic({ apiKey: fallback.api_key, baseURL: fallback.base_url || undefined }),
       official: !fallback.base_url,
+      webTools: !fallback.base_url || Boolean(fallback.web_tools),
       model: fallback.default_model || agent.model,
       maxTokens: fallback.max_tokens || 16000,
     };
   }
-  return { client: null, official: true, model: agent.model, maxTokens: 16000 };
+  return { client: null, official: true, webTools: true, model: agent.model, maxTokens: 16000 };
 }
 
 function supportsAdaptiveThinking(model: string): boolean {
@@ -960,9 +964,9 @@ async function llmLoop(
   if (!client) throw new Error("no client");
   const { agent, channel } = ctx;
 
-  // 能力门控：服务端 web 工具与提示缓存仅官方 Anthropic API 可用
+  // 能力门控：服务端 web 工具按通道可用性；提示缓存仅官方 Anthropic API 启用
   let dynamicCtx = buildDynamicContext(agent, channel);
-  if (!rt.official) dynamicCtx += `\n\n注意：当前模型通道不支持 web_search/web_fetch 联网调研，依据已有上下文与常识工作，不确定的事实要明确说明未经核实。`;
+  if (!rt.webTools) dynamicCtx += `\n\n注意：当前模型通道不支持 web_search/web_fetch 联网调研，依据已有上下文与常识工作，不确定的事实要明确说明未经核实。`;
   const system: Anthropic.TextBlockParam[] = [
     rt.official
       ? { type: "text", text: agent.system_prompt, cache_control: { type: "ephemeral" } }
@@ -970,7 +974,7 @@ async function llmLoop(
     { type: "text", text: dynamicCtx + (extraSystem ? `\n\n${extraSystem}` : "") },
   ];
   const messages: Anthropic.MessageParam[] = [{ role: "user", content: userPrompt }];
-  const tools: Anthropic.ToolUnion[] = toolsOverride ?? (rt.official ? [...TOOLS, ...WEB_TOOLS] : [...TOOLS]);
+  const tools: Anthropic.ToolUnion[] = toolsOverride ?? (rt.webTools ? [...TOOLS, ...WEB_TOOLS] : [...TOOLS]);
 
   const usage = { input_tokens: 0, output_tokens: 0 };
   let firstText = true;

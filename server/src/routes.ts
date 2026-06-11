@@ -110,7 +110,7 @@ api.post("/agents", (req, res) => {
 });
 
 api.post("/providers", (req, res) => {
-  const { name, base_url, api_key, default_model, max_tokens } = req.body ?? {};
+  const { name, base_url, api_key, default_model, max_tokens, web_tools } = req.body ?? {};
   if (!name || !api_key) return res.status(400).json({ error: "name and api_key required" });
   const provider = createProvider({
     name: String(name).trim(),
@@ -118,6 +118,7 @@ api.post("/providers", (req, res) => {
     api_key: String(api_key).trim(),
     default_model: String(default_model ?? "").trim(),
     max_tokens: Number(max_tokens) || undefined,
+    web_tools: Boolean(web_tools),
   });
   res.json(sanitizeProvider(provider));
 });
