@@ -59,7 +59,20 @@ interface Runtime {
   maxTokens: number;
 }
 
-function resolveRuntime(agent: Agent): Runtime {
+/**
+ * preferStrong：验收与汇总是质量闭环的下限，官方通道可用时强制走最强模型
+ *（AITEAM_STRONG_MODEL 可覆盖，默认 claude-opus-4-8）。
+ */
+function resolveRuntime(agent: Agent, preferStrong = false): Runtime {
+  if (preferStrong && envClient) {
+    return {
+      client: envClient,
+      official: true,
+      webTools: true,
+      model: process.env.AITEAM_STRONG_MODEL || "claude-opus-4-8",
+      maxTokens: 16000,
+    };
+  }
   if (agent.provider_id) {
     const p = getProvider(agent.provider_id);
     if (p?.api_key) {
@@ -182,6 +195,23 @@ const runningTasks = new Set<string>();
 const agentQueues = new Map<string, Promise<void>>();
 const currentWork = new Map<string, string>(); // agentId -> 正在执行的 taskId
 const queuedCount = new Map<string, number>(); // agentId -> 排队中的任务数
+const cancelledTasks = new Set<string>(); // 用户按下停止开关的任务
+
+/** 停止开关（kill switch）：运行中的任务在下一个迭代边界停下；排队中的任务直接不再开工。 */
+export function stopTask(taskId: string) {
+  cancelledTasks.add(taskId);
+}
+
+/** 预算护栏（借鉴 Paperclip 的硬切断）：今日 token 总用量超限则不再自动开工。 */
+function budgetExhausted(): boolean {
+  const budget = Number(process.env.AITEAM_DAILY_TOKEN_BUDGET ?? 0);
+  if (!budget) return false;
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+  let total = 0;
+  for (const s of agentDailyStats(startOfDay.getTime()).values()) total += s.input + s.output;
+  return total >= budget;
+}
 
 function depsSatisfied(task: Task): boolean {
   return taskDependsOn(task).every((id) => {
@@ -198,6 +228,12 @@ export function onTaskAssigned(task: Task) {
   if (!depsSatisfied(task)) return; // 依赖交付时由 onTaskDelivered 解锁
   const agent = getAgent(task.assignee_agent_id);
   if (!agent) return;
+  // 项目处于"计划待批"状态时不开工，等用户批准
+  if (task.project_id && getProject(task.project_id)?.status === "planned") return;
+  if (budgetExhausted()) {
+    if (task.channel_id) audit(task.channel_id, `🧯 今日 token 预算已用尽（AITEAM_DAILY_TOKEN_BUDGET），任务「${task.title}」暂停自动开工`);
+    return;
+  }
   if (runningTasks.size >= MAX_CONCURRENT_WORK) {
     if (task.channel_id) audit(task.channel_id, `⏸️ 并发已满，任务「${task.title}」暂未自动开工`);
     return;
@@ -265,6 +301,10 @@ function setTaskStatus(taskId: string, statusValue: Task["status"]): Task | unde
 async function runTaskWork(agent: Agent, taskId: string) {
   let task = getTask(taskId);
   if (!task || task.status === "done" || task.status === "review") return;
+  if (cancelledTasks.delete(taskId)) {
+    if (task.channel_id) audit(task.channel_id, `⏹ 任务「${task.title}」已被用户停止（未开工）`);
+    return;
+  }
 
   // 任务必须有可见的工作频道；没有则落到首个频道
   let channel = task.channel_id ? getChannel(task.channel_id) : undefined;
@@ -286,6 +326,12 @@ async function runTaskWork(agent: Agent, taskId: string) {
     const prompt = feedback ? buildReworkBrief(task, channel, feedback) : buildWorkBrief(task, channel);
     await streamRun(ctx, prompt, MAX_WORK_ITERATIONS);
     lastDocIds = ctx.createdDocIds.length > 0 ? ctx.createdDocIds : lastDocIds;
+
+    if (cancelledTasks.delete(task.id)) {
+      setTaskStatus(task.id, "todo");
+      audit(channel.id, `⏹ 任务「${task.title}」已被用户停止，退回待办`);
+      return;
+    }
 
     const verdict = await runVerification(agent, channel, task.id, lastDocIds);
     if (verdict.result === "pass") {
@@ -324,9 +370,12 @@ function buildWorkBrief(task: Task, channel: Channel): string {
         depDocs.map(({ dep, doc }) => `### 来自「${dep.title}」：《${doc.title}》\n${doc.content.slice(0, 4000)}`).join("\n\n")
       : "";
   const transcript = buildTranscript(channel.id, 20);
+  // 目标链（借鉴 Paperclip）：让任务知道自己服务于什么目标
+  const project = task.project_id ? getProject(task.project_id) : undefined;
   return [
     `你被指派了一个任务，请现在完成它。`,
     ``,
+    project ? `所属项目：「${project.title}」—— 项目目标：${project.goal || "（见任务详情）"}\n你的任务是该目标的一环，交付物要服务于整体目标。` : "",
     `任务：${task.title}`,
     `详情：${task.description || "（无）"}`,
     task.acceptance_criteria ? `验收标准（交付物将被逐条核验）：\n${task.acceptance_criteria}` : "",
@@ -339,7 +388,7 @@ function buildWorkBrief(task: Task, channel: Channel): string {
     ``,
     `工作要求：`,
     `1. 开工前先查阅你的长期记忆（见系统上下文），其中"核实过的事实/通用规则"优先遵循；`,
-    `2. 如需要事实、数据或最新外部信息，先用 web_search / web_fetch 调研，不要凭空编造；`,
+    `2. 如需要事实、数据或最新外部信息，先用 web_search / web_fetch 调研，不要凭空编造；研究/写作类任务建议按"多视角列问题 → 搭大纲 → 成文"推进，重要事实注明来源；`,
     `3. 用 write_document 产出一份完整、可直接使用的交付物文档（Markdown 正文要详尽，逐条覆盖验收标准）；`,
     `4. 交付前用 save_memory 记录至多 1 条本次任务沉淀的「核实过的事实」或「通用规则」（不要记流水账）；`,
     `5. 在回复正文给出简短交付摘要：做了什么、关键结论、需要谁跟进什么；`,
@@ -431,7 +480,8 @@ async function runVerification(
   ];
 
   const ctx = newCtx(verifier, channel, "verify", task.id);
-  await streamRun(ctx, prompt, 3, 0, undefined, verifierTools);
+  // 验收是质量闭环的下限：官方通道可用时强制走最强模型
+  await streamRun(ctx, prompt, 3, 0, undefined, verifierTools, true);
   if (!ctx.verdict) {
     audit(channel.id, `ℹ️ ${verifier.name} 未提交结构化裁决，按通过处理`);
     return { result: "pass", reasons: "" };
@@ -440,8 +490,24 @@ async function runVerification(
 }
 
 // ---------------------------------------------------------------------------
-// 项目模式：Lead 拆解（start_project）→ DAG 调度 → 全部交付 → 自动汇总
+// 项目模式：Lead 拆解（start_project）→ [计划把关] → DAG 调度 → 全部交付 → 自动汇总
 // ---------------------------------------------------------------------------
+
+/** plan 类审批落定后调用：批准 → 启动项目；拒绝 → 唤起 Lead 调整。 */
+export function onPlanResolved(projectId: string, approved: boolean) {
+  const project = getProject(projectId);
+  if (!project || project.status !== "planned") return;
+  const channel = project.channel_id ? getChannel(project.channel_id) : undefined;
+  if (approved) {
+    const updated = updateProject(projectId, { status: "running" });
+    if (updated) broadcast({ type: "project:upsert", payload: updated });
+    if (channel) audit(channel.id, `▶️ 项目「${project.title}」计划已获批准，开工`);
+    for (const t of listTasks().filter((x) => x.project_id === projectId)) onTaskAssigned(t);
+  } else if (channel) {
+    audit(channel.id, `✋ 项目「${project.title}」计划被退回——请结合用户在频道里的意见调整计划后重新立项`);
+    if (project.lead_agent_id) triggerAgent(project.lead_agent_id, channel.id);
+  }
+}
 
 function checkProject(projectId: string) {
   const project = getProject(projectId);
@@ -488,7 +554,8 @@ async function runSynthesis(lead: Agent, channel: Channel, projectId: string) {
     `3. 在回复正文给出给用户看的简短项目交付摘要。`,
   ].join("\n");
 
-  await streamRun(ctx, prompt, MAX_WORK_ITERATIONS);
+  // 汇总同样走最强通道
+  await streamRun(ctx, prompt, MAX_WORK_ITERATIONS, 0, undefined, undefined, true);
 
   const summaryDocId = ctx.createdDocIds[ctx.createdDocIds.length - 1] ?? null;
   const updated = updateProject(projectId, { summary_doc_id: summaryDocId });
@@ -556,12 +623,13 @@ const TOOLS: Anthropic.ToolUnion[] = [
   {
     name: "start_project",
     description:
-      "立项：把一个目标一次性拆解为带依赖关系的任务计划。任务会按依赖图自动调度（无依赖的立即开工，依赖项交付后自动解锁），全部交付后由你自动汇总最终报告。适用于需要多位同事分工协作的目标；单个待办用 create_task 即可。",
+      "立项：把一个目标一次性拆解为带依赖关系的任务计划。任务会按依赖图自动调度（无依赖的立即开工，依赖项交付后自动解锁），全部交付后由你自动汇总最终报告。适用于需要多位同事分工协作的目标；单个待办用 create_task 即可。autonomy 档位：auto=全自主闭环直接开工；approve_plan=计划先送用户批准再开工（重大/高成本项目、或用户要求把关时使用）。",
     input_schema: {
       type: "object" as const,
       properties: {
         title: { type: "string", description: "项目名" },
         goal: { type: "string", description: "项目目标与整体验收口径" },
+        autonomy: { type: "string", enum: ["auto", "approve_plan"], description: "自主度，默认 auto" },
         tasks: {
           type: "array",
           description: "任务计划（按依赖顺序排列）",
@@ -694,11 +762,14 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
     case "start_project": {
       const items: any[] = Array.isArray(input.tasks) ? input.tasks : [];
       if (items.length === 0) return "错误：tasks 不能为空。";
+      const autonomy = input.autonomy === "approve_plan" ? "approve_plan" : "auto";
       const project = createProject({
         channel_id: channel.id,
         lead_agent_id: agent.id,
         title: String(input.title ?? "未命名项目").slice(0, 200),
         goal: String(input.goal ?? ""),
+        autonomy,
+        status: autonomy === "approve_plan" ? "planned" : "running",
       });
       broadcast({ type: "project:upsert", payload: project });
       const created: Task[] = [];
@@ -729,8 +800,22 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
         })
         .join("\n");
       audit(channel.id, `🧩 ${agent.name} 立项「${project.title}」，共 ${created.length} 个任务：\n${plan}`);
+      const taskLines = created.map((t, i) => `${i + 1}. ${t.title}（id: ${t.id}）`).join("\n");
+      if (autonomy === "approve_plan") {
+        const approval = createApproval({
+          channel_id: channel.id,
+          agent_id: agent.id,
+          title: `项目计划待批准：「${project.title}」`,
+          payload: `项目目标：${project.goal || "（见任务）"}\n\n任务计划：\n${plan}`,
+          kind: "plan",
+          ref_id: project.id,
+        });
+        broadcast({ type: "approval:upsert", payload: approval });
+        audit(channel.id, `🔒 项目「${project.title}」的计划已送用户批准（见收件箱），批准后自动开工`);
+        return `项目已创建（id: ${project.id}，approve_plan 模式）。计划已送用户批准，批准前不会开工。任务计划：\n${taskLines}`;
+      }
       for (const t of created) onTaskAssigned(t); // 无依赖的立即开工
-      return `项目已创建（id: ${project.id}）。任务计划：\n${created.map((t, i) => `${i + 1}. ${t.title}（id: ${t.id}）`).join("\n")}\n无依赖且已指派的任务已自动开工；依赖项交付后会自动解锁后续任务；全部交付后你会被唤起做最终汇总。`;
+      return `项目已创建（id: ${project.id}）。任务计划：\n${taskLines}\n无依赖且已指派的任务已自动开工；依赖项交付后会自动解锁后续任务；全部交付后你会被唤起做最终汇总。`;
     }
     case "create_task": {
       const assignee = findAgentByName(input.assignee);
@@ -907,7 +992,8 @@ async function streamRun(
   maxIterations: number,
   depth = 0,
   extraSystem?: string,
-  toolsOverride?: Anthropic.ToolUnion[]
+  toolsOverride?: Anthropic.ToolUnion[],
+  preferStrong = false
 ): Promise<Message | null> {
   const { agent, channel } = ctx;
   status(agent, channel.id, "thinking");
@@ -929,7 +1015,7 @@ async function streamRun(
 
   try {
     let usage = { input_tokens: 0, output_tokens: 0 };
-    const rt = resolveRuntime(agent);
+    const rt = resolveRuntime(agent, preferStrong);
     if (!rt.client) {
       await mockRun(ctx, emit);
     } else {
@@ -979,8 +1065,14 @@ async function llmLoop(
   const usage = { input_tokens: 0, output_tokens: 0 };
   let firstText = true;
   let emitted = false;
+  let steerSince = Date.now(); // 运行中插话：此刻之后的用户消息会注入下一轮迭代
 
   for (let iteration = 0; iteration < maxIterations; iteration++) {
+    // 停止开关：在迭代边界停下（标志位由 runTaskWork 消费并落状态）
+    if (ctx.taskId && cancelledTasks.has(ctx.taskId)) {
+      emit("\n\n⏹ 已按用户要求停止。");
+      break;
+    }
     const stream = client.messages.stream({
       model: rt.model,
       max_tokens: rt.maxTokens,
@@ -1029,6 +1121,18 @@ async function llmLoop(
     }
     messages.push({ role: "user", content: results });
     if (emitted) emit("\n\n"); // 工具段落之间留空行，保持 Markdown 结构
+
+    // 运行中插话：把用户在频道里的新消息注入下一轮迭代（人随时可干预）
+    const interjections = listMessages(channel.id, 10).filter(
+      (m) => m.author_type === "user" && m.created_at > steerSince
+    );
+    if (interjections.length > 0) {
+      steerSince = Date.now();
+      messages.push({
+        role: "user",
+        content: `[用户插话——请立即纳入考虑，必要时调整做法或中止当前方向]\n${interjections.map((m) => m.content).join("\n")}`,
+      });
+    }
 
     // 校验者一旦提交裁决即可收口
     if (ctx.kind === "verify" && ctx.verdict) break;

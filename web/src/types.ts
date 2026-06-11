@@ -58,7 +58,8 @@ export interface Project {
   lead_agent_id: string | null;
   title: string;
   goal: string;
-  status: "running" | "review" | "done";
+  status: "planned" | "running" | "review" | "done";
+  autonomy: "auto" | "approve_plan";
   summary_doc_id: string | null;
   created_at: number;
   updated_at: number;
@@ -69,6 +70,8 @@ export interface Approval {
   agent_id: string;
   title: string;
   payload: string;
+  kind: "action" | "plan";
+  ref_id: string | null;
   status: "pending" | "approved" | "rejected";
   created_at: number;
   resolved_at: number | null;

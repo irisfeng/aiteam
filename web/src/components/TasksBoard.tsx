@@ -72,6 +72,15 @@ function TaskCard({ task, onOpenDoc }: { task: Task; onOpenDoc: (doc: Doc) => vo
           </span>
         )}
         <span className="ml-auto flex gap-0.5">
+          {task.status === "doing" && (
+            <button
+              onClick={() => void fetch(`/api/tasks/${task.id}/stop`, { method: "POST" })}
+              className="rounded px-1 text-ink-3 hover:bg-panel hover:text-red-500"
+              title="停止：运行中的工作在下一个步骤边界停下，任务退回待办"
+            >
+              ⏹
+            </button>
+          )}
           {idx > 0 && (
             <button
               onClick={() => void ws.moveTask(task, COLUMNS[idx - 1].key)}

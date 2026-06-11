@@ -29,7 +29,14 @@ export function InboxView() {
                 <div className="flex items-center gap-2">
                   <AgentAvatar agent={agent} size={24} />
                   <span className="text-[13.5px] font-semibold">{agent?.name ?? "AI"}</span>
-                  <span className="text-[12px] text-ink-3">请求批准 · {fmt(a.created_at)}</span>
+                  {a.kind === "plan" && (
+                    <span className="rounded bg-accent-soft px-1.5 py-px text-[11px] font-medium text-ink-2">
+                      🧩 项目计划
+                    </span>
+                  )}
+                  <span className="text-[12px] text-ink-3">
+                    {a.kind === "plan" ? "批准后自动开工" : "请求批准"} · {fmt(a.created_at)}
+                  </span>
                 </div>
                 <div className="mt-2 text-[14px] font-medium">{a.title}</div>
                 {a.payload && (

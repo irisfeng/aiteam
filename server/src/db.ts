@@ -124,6 +124,9 @@ addColumnIfMissing("tasks", "project_id", "project_id TEXT");
 addColumnIfMissing("tasks", "revision_count", "revision_count INTEGER NOT NULL DEFAULT 0");
 addColumnIfMissing("agents", "provider_id", "provider_id TEXT");
 addColumnIfMissing("providers", "web_tools", "web_tools INTEGER NOT NULL DEFAULT 0");
+addColumnIfMissing("projects", "autonomy", "autonomy TEXT NOT NULL DEFAULT 'auto'");
+addColumnIfMissing("approvals", "kind", "kind TEXT NOT NULL DEFAULT 'action'");
+addColumnIfMissing("approvals", "ref_id", "ref_id TEXT");
 
 export interface Agent {
   id: string;
@@ -191,7 +194,10 @@ export interface Project {
   lead_agent_id: string | null;
   title: string;
   goal: string;
-  status: "running" | "review" | "done";
+  /** planned = 计划待用户批准（autonomy=approve_plan）；running → review → done */
+  status: "planned" | "running" | "review" | "done";
+  /** auto = 全自主闭环；approve_plan = 拆解后先经用户批准再开工 */
+  autonomy: "auto" | "approve_plan";
   summary_doc_id: string | null;
   created_at: number;
   updated_at: number;
@@ -202,6 +208,10 @@ export interface Approval {
   agent_id: string;
   title: string;
   payload: string;
+  /** action = 高风险动作审批；plan = 项目计划把关 */
+  kind: "action" | "plan";
+  /** plan 类审批关联的 project id */
+  ref_id: string | null;
   status: "pending" | "approved" | "rejected";
   created_at: number;
   resolved_at: number | null;
@@ -453,6 +463,8 @@ export function createProject(p: {
   lead_agent_id?: string | null;
   title: string;
   goal?: string;
+  status?: Project["status"];
+  autonomy?: Project["autonomy"];
 }): Project {
   const project: Project = {
     id: nanoid(10),
@@ -460,13 +472,14 @@ export function createProject(p: {
     lead_agent_id: p.lead_agent_id ?? null,
     title: p.title,
     goal: p.goal ?? "",
-    status: "running",
+    status: p.status ?? "running",
+    autonomy: p.autonomy ?? "auto",
     summary_doc_id: null,
     created_at: now(),
     updated_at: now(),
   };
   db.prepare(
-    "INSERT INTO projects (id, channel_id, lead_agent_id, title, goal, status, summary_doc_id, created_at, updated_at) VALUES (@id, @channel_id, @lead_agent_id, @title, @goal, @status, @summary_doc_id, @created_at, @updated_at)"
+    "INSERT INTO projects (id, channel_id, lead_agent_id, title, goal, status, autonomy, summary_doc_id, created_at, updated_at) VALUES (@id, @channel_id, @lead_agent_id, @title, @goal, @status, @autonomy, @summary_doc_id, @created_at, @updated_at)"
   ).run(project);
   return project;
 }
@@ -487,19 +500,28 @@ export function updateProject(
 export function listApprovals(): Approval[] {
   return db.prepare("SELECT * FROM approvals ORDER BY created_at DESC").all() as Approval[];
 }
-export function createApproval(a: { channel_id?: string | null; agent_id: string; title: string; payload?: string }): Approval {
+export function createApproval(a: {
+  channel_id?: string | null;
+  agent_id: string;
+  title: string;
+  payload?: string;
+  kind?: Approval["kind"];
+  ref_id?: string | null;
+}): Approval {
   const approval: Approval = {
     id: nanoid(10),
     channel_id: a.channel_id ?? null,
     agent_id: a.agent_id,
     title: a.title,
     payload: a.payload ?? "",
+    kind: a.kind ?? "action",
+    ref_id: a.ref_id ?? null,
     status: "pending",
     created_at: now(),
     resolved_at: null,
   };
   db.prepare(
-    "INSERT INTO approvals (id, channel_id, agent_id, title, payload, status, created_at, resolved_at) VALUES (@id, @channel_id, @agent_id, @title, @payload, @status, @created_at, @resolved_at)"
+    "INSERT INTO approvals (id, channel_id, agent_id, title, payload, kind, ref_id, status, created_at, resolved_at) VALUES (@id, @channel_id, @agent_id, @title, @payload, @kind, @ref_id, @status, @created_at, @resolved_at)"
   ).run(approval);
   return approval;
 }

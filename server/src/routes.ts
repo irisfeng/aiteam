@@ -27,7 +27,16 @@ import {
   listRoutines,
   sanitizeProvider,
 } from "./db.js";
-import { isMock, onMessage, onTaskAssigned, onTaskDelivered, teamStatus, triggerAgent } from "./agents/engine.js";
+import {
+  isMock,
+  onMessage,
+  onPlanResolved,
+  onTaskAssigned,
+  onTaskDelivered,
+  stopTask,
+  teamStatus,
+  triggerAgent,
+} from "./agents/engine.js";
 
 export const api = Router();
 
@@ -165,6 +174,11 @@ api.patch("/tasks/:id", (req, res) => {
   res.json(task);
 });
 
+api.post("/tasks/:id/stop", (req, res) => {
+  stopTask(req.params.id);
+  res.json({ ok: true });
+});
+
 api.get("/documents", (_req, res) => res.json(listDocuments()));
 
 api.get("/team", (_req, res) => res.json({ members: teamStatus(), routines: listRoutines() }));
@@ -187,7 +201,11 @@ api.post("/approvals/:id/resolve", (req, res) => {
       content: `${approve ? "✅ 用户批准了" : "❌ 用户拒绝了"} ${agent?.name ?? "AI"} 的审批请求「${approval.title}」`,
     });
     broadcast({ type: "message:new", payload: sys });
-    triggerAgent(approval.agent_id, approval.channel_id);
+    if (approval.kind === "plan" && approval.ref_id) {
+      onPlanResolved(approval.ref_id, approve); // 计划把关：批准开工 / 退回唤起 Lead
+    } else {
+      triggerAgent(approval.agent_id, approval.channel_id);
+    }
   }
   res.json(approval);
 });
