@@ -146,12 +146,38 @@ Workspace
 5. **成本与状态**：每条 AI 消息落库 usage（input/output tokens）；
    过程状态（thinking / 使用工具 / responding）通过 WebSocket 实时广播。
 
-### 2.3 模型策略
+### 2.3 模型策略：推荐默认 + 开放接入（BYOM）
 
-- 默认 `claude-opus-4-8`（adaptive thinking），逐 Agent 可配；
-- 流式输出（messages.stream），手写工具循环以便逐 token 广播 + 工具拦截；
-- 系统提示分层缓存（角色人设块打 `cache_control`，动态上下文放其后）；
-- 无 `ANTHROPIC_API_KEY` 时进入 **Mock 模式**：Agent 回复模拟内容，产品全链路可体验。
+原则：**我们推荐模型（默认 Claude），但不锁定** —— 用户可接第三方供应商 API 或本地模型。
+
+**协议选择：统一走 Anthropic Messages 协议，不自写多协议适配层。**
+依据：2026 年 Anthropic 协议已是事实上的第二标准 —— DeepSeek、智谱 GLM、Kimi(Moonshot)、
+MiniMax 等主流供应商均提供 Anthropic 兼容端点（为兼容 Claude Code 生态）；其余一切
+OpenAI 协议的供应商与本地运行时（Ollama / LM Studio / vLLM…）可经 LiteLLM 等网关
+一行配置转成 Anthropic 协议。自写 OpenAI 适配层要重做"流式 + 工具循环 + system 块"
+三件事的翻译，是持续维护负担，收益却只是省一个网关进程 —— 不做（列为远期可选）。
+
+**接入模型（Provider 抽象）**：
+- `providers` 表：`{id, name, base_url, api_key, default_model, is_anthropic_official}`；
+  内置一条 Anthropic 官方（base_url 缺省）；用户可增删（设置页/环境变量）。
+- Agent 维度：`agent.provider_id + agent.model`，同一工作区可混用——
+  例如 PM/校验者用 Claude，闲聊型角色用本地模型。
+- 引擎按 provider 构造并缓存 SDK client（`new Anthropic({ baseURL, apiKey })`）。
+
+**能力门控（关键工程点）**：
+- `web_search`/`web_fetch` 是 **Anthropic 服务端工具**，仅官方 API 可用 —— 非官方
+  provider 自动从工具面剔除（否则 400）；交由提示词告知该同事"无联网调研能力"。
+- `thinking: adaptive` 维持按模型名正则门控；`cache_control` 仅官方启用，其余剥离。
+- `max_tokens` 随 provider 可配（本地模型上限通常更低）。
+
+**质量分级建议（写进产品推荐文案）**：
+- 干活/验收（工具循环可靠性敏感）→ 推荐 `claude-opus-4-8`；
+- 聊天/低风险角色 → 任意合格模型；
+- 弱模型做 worker 的主要风险是工具调用可靠性与长程一致性，验收循环可以兜一部分底，
+  但 verifier 本身必须用强模型（裁决质量决定整个质量闭环）。
+
+**密钥安全**：API key 只存服务端（env / settings），永不下发前端。
+无任何 key 时进入 **Mock 模式**：Agent 回复模拟内容，产品全链路可体验。
 
 ---
 
