@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { api, type Bootstrap } from "./api";
-import type { Agent, AgentStatus, Approval, Channel, Doc, Message, Task, View } from "./types";
+import type { Agent, AgentStatus, Approval, Channel, Doc, Message, Project, Task, View } from "./types";
 
 interface State {
   ready: boolean;
@@ -20,6 +20,7 @@ interface State {
   tasks: Task[];
   approvals: Approval[];
   documents: Doc[];
+  projects: Project[];
   messages: Record<string, Message[]>;
   /** channelId -> agentId -> status */
   statuses: Record<string, Record<string, AgentStatus>>;
@@ -36,6 +37,7 @@ type Action =
   | { type: "agent:status"; status: AgentStatus }
   | { type: "task:upsert"; task: Task }
   | { type: "doc:upsert"; doc: Doc }
+  | { type: "project:upsert"; project: Project }
   | { type: "approval:upsert"; approval: Approval }
   | { type: "channel:new"; channel: Channel }
   | { type: "agent:new"; agent: Agent };
@@ -49,6 +51,7 @@ const initial: State = {
   tasks: [],
   approvals: [],
   documents: [],
+  projects: [],
   messages: {},
   statuses: {},
   view: { kind: "tasks" },
@@ -77,6 +80,7 @@ function reducer(state: State, action: Action): State {
         tasks: d.tasks,
         approvals: d.approvals,
         documents: d.documents ?? [],
+        projects: d.projects ?? [],
         view: firstChannel ? { kind: "channel", id: firstChannel.id } : state.view,
       };
     }
@@ -126,6 +130,8 @@ function reducer(state: State, action: Action): State {
       return { ...state, tasks: upsertBy(state.tasks, action.task) };
     case "doc:upsert":
       return { ...state, documents: upsertBy(state.documents, action.doc) };
+    case "project:upsert":
+      return { ...state, projects: upsertBy(state.projects, action.project) };
     case "approval:upsert":
       return { ...state, approvals: upsertBy(state.approvals, action.approval) };
     case "channel:new":
@@ -201,6 +207,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
             break;
           case "doc:upsert":
             dispatch({ type: "doc:upsert", doc: payload });
+            break;
+          case "project:upsert":
+            dispatch({ type: "project:upsert", project: payload });
             break;
           case "approval:upsert":
             dispatch({ type: "approval:upsert", approval: payload });

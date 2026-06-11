@@ -16,10 +16,39 @@ function TaskCard({ task, onOpenDoc }: { task: Task; onOpenDoc: (doc: Doc) => vo
   const creator = task.created_by === "user" ? null : ws.agentById(task.created_by);
   const doc = ws.documents.find((d) => d.task_id === task.id);
   const idx = COLUMNS.findIndex((c) => c.key === task.status);
+  const project = ws.projects.find((p) => p.id === task.project_id);
+  let depCount = 0;
+  try {
+    depCount = (JSON.parse(task.depends_on) as string[]).length;
+  } catch { /* 旧数据无该字段 */ }
 
   return (
     <div className="rounded-lg border border-line bg-white p-3 shadow-sm">
+      {(project || depCount > 0 || task.revision_count > 0) && (
+        <div className="mb-1 flex flex-wrap items-center gap-1">
+          {project && (
+            <span className="rounded bg-accent-soft px-1.5 py-px text-[10.5px] text-ink-2" title={project.goal}>
+              🧩 {project.title}
+            </span>
+          )}
+          {depCount > 0 && (
+            <span className="rounded bg-panel px-1.5 py-px text-[10.5px] text-ink-3" title="依赖交付后自动开工">
+              ⛓ 依赖 {depCount}
+            </span>
+          )}
+          {task.revision_count > 0 && (
+            <span className="rounded bg-panel px-1.5 py-px text-[10.5px] text-ink-3" title="验收未通过的返工次数">
+              ↩ 返工 {task.revision_count}
+            </span>
+          )}
+        </div>
+      )}
       <div className="text-[13.5px] font-medium leading-snug">{task.title}</div>
+      {task.acceptance_criteria && (
+        <div className="mt-1 line-clamp-2 text-[11.5px] text-ink-3" title={task.acceptance_criteria}>
+          验收：{task.acceptance_criteria}
+        </div>
+      )}
       {task.description && (
         <div className="mt-1 line-clamp-3 whitespace-pre-wrap text-[12.5px] text-ink-2">{task.description}</div>
       )}

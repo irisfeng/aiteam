@@ -7,11 +7,13 @@ import {
   appendMemory,
   createApproval,
   createDocument,
+  createProject,
   createTask,
   getAgent,
   getChannel,
   getDocument,
   getMemory,
+  getProject,
   getTask,
   insertMessage,
   listAgents,
@@ -19,12 +21,15 @@ import {
   listDocuments,
   listMessages,
   listTasks,
+  taskDependsOn,
   updateMessage,
+  updateProject,
   updateTask,
 } from "../db.js";
 import { broadcast } from "../bus.js";
 
 const MAX_CHAIN_DEPTH = Number(process.env.AGENT_CHAIN_DEPTH ?? 2);
+const MAX_REVISIONS = Number(process.env.TASK_MAX_REVISIONS ?? 1);
 const TRANSCRIPT_WINDOW = 40;
 const MAX_WORK_ITERATIONS = 8;
 const MAX_CONCURRENT_WORK = 8;
@@ -41,12 +46,18 @@ function supportsAdaptiveThinking(model: string): boolean {
 interface RunCtx {
   agent: Agent;
   channel: Channel;
+  kind: "chat" | "work" | "verify" | "synthesis";
   taskId: string | null;
   createdDocIds: string[];
+  verdict: { result: "pass" | "revise"; reasons: string } | null;
+}
+
+function newCtx(agent: Agent, channel: Channel, kind: RunCtx["kind"], taskId: string | null = null): RunCtx {
+  return { agent, channel, kind, taskId, createdDocIds: [], verdict: null };
 }
 
 // ---------------------------------------------------------------------------
-// 路由与触发
+// 聊天路由与触发
 // ---------------------------------------------------------------------------
 
 function parseMentions(text: string, candidates: Agent[]): Agent[] {
@@ -84,7 +95,7 @@ export function onMessage(message: Message) {
     if (seen.has(agent.id)) continue;
     seen.add(agent.id);
     const depth = message.author_type === "agent" ? message.reply_depth + 1 : 0;
-    void runAgent(agent, channel, depth).catch((err) => reportFailure(agent, channel, err));
+    void runChat(agent, channel, depth).catch((err) => reportFailure(agent, channel, err));
   }
 }
 
@@ -93,7 +104,7 @@ export function triggerAgent(agentId: string, channelId: string, extraSystem?: s
   const agent = getAgent(agentId);
   const channel = getChannel(channelId);
   if (!agent || !channel) return;
-  void runAgent(agent, channel, 1, extraSystem).catch((err) => reportFailure(agent, channel, err));
+  void runChat(agent, channel, 1, extraSystem).catch((err) => reportFailure(agent, channel, err));
 }
 
 function reportFailure(agent: Agent, channel: Channel, err: any) {
@@ -102,18 +113,35 @@ function reportFailure(agent: Agent, channel: Channel, err: any) {
   status(agent, channel.id, "idle");
 }
 
+async function runChat(agent: Agent, channel: Channel, depth: number, extraSystem?: string) {
+  const ctx = newCtx(agent, channel, "chat");
+  const transcript = buildTranscript(channel.id);
+  const prompt = `以下是频道 #${channel.name} 的最近对话记录：\n\n<transcript>\n${transcript}\n</transcript>\n\n现在请你以「${agent.name}」的身份，针对最新一条消息给出回复。直接输出回复内容本身，不要带姓名前缀或时间戳。`;
+  const done = await streamRun(ctx, prompt, 6, depth, extraSystem);
+  // 代理链：本条回复中 @ 了其他同事则接力
+  if (done) onMessage(done);
+}
+
 // ---------------------------------------------------------------------------
-// 任务工作循环：任务指派给 Agent 后，它在后台自主认领并完成
+// 任务工作循环：指派 → 自主执行 → 验收 → （返工 →）交付 → 解锁依赖/项目汇总
 // ---------------------------------------------------------------------------
 
 const runningTasks = new Set<string>();
 const agentQueues = new Map<string, Promise<void>>();
 
-/** 任务被指派（或创建时即带负责人）后调用。每个 Agent 串行干活，全局并发受限。 */
+function depsSatisfied(task: Task): boolean {
+  return taskDependsOn(task).every((id) => {
+    const dep = getTask(id);
+    return !dep || dep.status === "review" || dep.status === "done";
+  });
+}
+
+/** 任务被指派（或创建时即带负责人）后调用。依赖未满足的任务会等依赖交付后自动开工。 */
 export function onTaskAssigned(task: Task) {
   if (!task.assignee_agent_id) return;
   if (task.status === "review" || task.status === "done") return;
   if (runningTasks.has(task.id)) return;
+  if (!depsSatisfied(task)) return; // 依赖交付时由 onTaskDelivered 解锁
   const agent = getAgent(task.assignee_agent_id);
   if (!agent) return;
   if (runningTasks.size >= MAX_CONCURRENT_WORK) {
@@ -126,12 +154,30 @@ export function onTaskAssigned(task: Task) {
     .then(() => runTaskWork(agent, task.id))
     .catch((err) => {
       const t = getTask(task.id);
-      const channelId = t?.channel_id;
-      if (channelId) audit(channelId, `⚠️ ${agent.name} 处理任务「${task.title}」失败：${err?.message ?? err}`);
+      if (t?.channel_id) audit(t.channel_id, `⚠️ ${agent.name} 处理任务「${task.title}」失败：${err?.message ?? err}`);
       console.error(`[engine] task work failed:`, err);
     })
     .finally(() => runningTasks.delete(task.id));
   agentQueues.set(agent.id, next);
+}
+
+/** 任务交付（review/done）后调用：解锁依赖它的任务，并检查项目是否可汇总。 */
+export function onTaskDelivered(task: Task) {
+  for (const t of listTasks()) {
+    if (t.status !== "todo" || !t.assignee_agent_id) continue;
+    if (!taskDependsOn(t).includes(task.id)) continue;
+    if (depsSatisfied(t)) {
+      if (t.channel_id) audit(t.channel_id, `⛓️ 任务「${t.title}」的依赖已交付，自动开工`);
+      onTaskAssigned(t);
+    }
+  }
+  if (task.project_id) checkProject(task.project_id);
+}
+
+function setTaskStatus(taskId: string, statusValue: Task["status"]): Task | undefined {
+  const t = updateTask(taskId, { status: statusValue });
+  if (t) broadcast({ type: "task:upsert", payload: t });
+  return t;
 }
 
 async function runTaskWork(agent: Agent, taskId: string) {
@@ -148,61 +194,224 @@ async function runTaskWork(agent: Agent, taskId: string) {
   }
 
   audit(channel.id, `🚀 ${agent.name} 开始处理任务「${task.title}」`);
-  const doing = updateTask(task.id, { status: "doing" });
-  if (doing) broadcast({ type: "task:upsert", payload: doing });
+  setTaskStatus(task.id, "doing");
 
-  const ctx: RunCtx = { agent, channel, taskId: task.id, createdDocIds: [] };
+  let feedback: string | null = null; // 上一轮验收意见（返工时注入）
+  let lastDocIds: string[] = [];
+
+  for (let attempt = 0; attempt <= MAX_REVISIONS; attempt++) {
+    const ctx = newCtx(agent, channel, "work", task.id);
+    const prompt = feedback ? buildReworkBrief(task, channel, feedback) : buildWorkBrief(task, channel);
+    await streamRun(ctx, prompt, MAX_WORK_ITERATIONS);
+    lastDocIds = ctx.createdDocIds.length > 0 ? ctx.createdDocIds : lastDocIds;
+
+    const verdict = await runVerification(agent, channel, task.id, lastDocIds);
+    if (verdict.result === "pass") {
+      if (verdict.reasons) audit(channel.id, `✅ 验收通过：任务「${task.title}」`);
+      break;
+    }
+    feedback = verdict.reasons || "验收未通过，请对照验收标准修订。";
+    const fresh = getTask(task.id);
+    const revisions = (fresh?.revision_count ?? 0) + 1;
+    updateTask(task.id, { revision_count: revisions });
+    if (attempt >= MAX_REVISIONS) {
+      audit(channel.id, `⚠️ 任务「${task.title}」已达返工上限（${MAX_REVISIONS} 次），转入待评审请人工把关`);
+      break;
+    }
+    audit(channel.id, `↩️ 验收未通过，任务「${task.title}」退回 ${agent.name} 修订（第 ${revisions} 次）`);
+  }
+
+  const after = getTask(task.id);
+  if (after && after.status === "doing") {
+    const review = setTaskStatus(task.id, "review");
+    if (review) {
+      audit(channel.id, `📦 ${agent.name} 已交付任务「${review.title}」，转入待评审`);
+      onTaskDelivered(review);
+    }
+  }
+}
+
+function buildWorkBrief(task: Task, channel: Channel): string {
+  const depDocs = taskDependsOn(task)
+    .map((id) => getTask(id))
+    .filter((t): t is Task => Boolean(t))
+    .flatMap((t) => listDocuments().filter((d) => d.task_id === t.id).map((d) => ({ dep: t, doc: d })));
+  const depSection =
+    depDocs.length > 0
+      ? `\n## 前置任务的交付物（你的工作以此为输入）\n` +
+        depDocs.map(({ dep, doc }) => `### 来自「${dep.title}」：《${doc.title}》\n${doc.content.slice(0, 4000)}`).join("\n\n")
+      : "";
   const transcript = buildTranscript(channel.id, 20);
-  const prompt = [
+  return [
     `你被指派了一个任务，请现在完成它。`,
     ``,
     `任务：${task.title}`,
     `详情：${task.description || "（无）"}`,
+    task.acceptance_criteria ? `验收标准（交付物将被逐条核验）：\n${task.acceptance_criteria}` : "",
     `所在频道：#${channel.name}`,
+    depSection,
     ``,
     `<transcript>（频道最近讨论，供你了解背景）`,
     transcript,
     `</transcript>`,
     ``,
     `工作要求：`,
-    `1. 如需要事实、数据或最新外部信息，先用 web_search / web_fetch 调研，不要凭空编造；`,
-    `2. 用 write_document 产出一份完整、可直接使用的交付物文档（Markdown 正文要详尽）；`,
-    `3. 文档写完后，在回复正文给出简短交付摘要：做了什么、关键结论、需要谁跟进什么；`,
-    `4. 任务状态由系统管理，不要调用 update_task 改本任务状态；关单（done）只能由人类完成；`,
-    `5. 如发现衍生工作，可用 create_task 开新任务并指派给合适的同事。`,
-  ].join("\n");
-
-  await streamRun(ctx, prompt, MAX_WORK_ITERATIONS);
-
-  // 交付：转入待评审，并唤起评审同事
-  const after = getTask(task.id);
-  if (after && after.status === "doing") {
-    const review = updateTask(task.id, { status: "review" });
-    if (review) {
-      broadcast({ type: "task:upsert", payload: review });
-      audit(channel.id, `📦 ${agent.name} 已交付任务「${review.title}」，转入待评审`);
-    }
-  }
-  requestPeerReview(agent, channel, task.id, ctx.createdDocIds);
+    `1. 开工前先查阅你的长期记忆（见系统上下文），其中"核实过的事实/通用规则"优先遵循；`,
+    `2. 如需要事实、数据或最新外部信息，先用 web_search / web_fetch 调研，不要凭空编造；`,
+    `3. 用 write_document 产出一份完整、可直接使用的交付物文档（Markdown 正文要详尽，逐条覆盖验收标准）；`,
+    `4. 交付前用 save_memory 记录至多 1 条本次任务沉淀的「核实过的事实」或「通用规则」（不要记流水账）；`,
+    `5. 在回复正文给出简短交付摘要：做了什么、关键结论、需要谁跟进什么；`,
+    `6. 任务状态由系统管理，不要调用 update_task 改本任务状态；关单（done）只能由人类完成；`,
+    `7. 如发现衍生工作，可用 create_task 开新任务并指派给合适的同事。`,
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
-/** 同行评审：交付后自动唤起另一位同事针对交付物全文给意见。 */
-function requestPeerReview(worker: Agent, channel: Channel, taskId: string, docIds: string[]) {
+function buildReworkBrief(task: Task, channel: Channel, feedback: string): string {
+  const myDocs = listDocuments().filter((d) => d.task_id === task.id);
+  const last = myDocs[0];
+  return [
+    `你对任务「${task.title}」的交付未通过验收，请修订后重新交付。`,
+    ``,
+    task.acceptance_criteria ? `验收标准：\n${task.acceptance_criteria}` : "",
+    `校验者意见：\n${feedback}`,
+    last ? `\n你上一版交付物《${last.title}》（id: ${last.id}，可用 read_document 重读全文）` : "",
+    ``,
+    `要求：针对意见逐条修复，用 write_document 重新提交完整的新版本（不是补丁），并在回复中说明改了什么。`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// 验收循环：干净上下文的校验者按 rubric 逐条核验（verifier ≠ self-critique）
+// ---------------------------------------------------------------------------
+
+async function runVerification(
+  worker: Agent,
+  channel: Channel,
+  taskId: string,
+  docIds: string[]
+): Promise<{ result: "pass" | "revise"; reasons: string }> {
   const task = getTask(taskId);
-  if (!task) return;
+  if (!task) return { result: "pass", reasons: "" };
+  if (!client) return { result: "pass", reasons: "" }; // Mock 模式跳过验收
+
   const others = channelAgents(channel).filter((a) => a.id !== worker.id);
-  if (others.length === 0) return;
-  const reviewer =
+  if (others.length === 0) return { result: "pass", reasons: "" };
+  const verifier =
     others.find((a) => a.name.includes("评审")) ??
     others.find((a) => a.id === task.created_by) ??
     others[0];
 
   const doc = docIds.length > 0 ? getDocument(docIds[docIds.length - 1]) : undefined;
-  const extraSystem = doc
-    ? `## 待评审交付物《${doc.title}》全文\n\n${doc.content.slice(0, 12000)}`
-    : undefined;
-  audit(channel.id, `🔎 请 ${reviewer.name} 评审 ${worker.name} 对任务「${task.title}」的交付`);
-  triggerAgent(reviewer.id, channel.id, extraSystem);
+  if (!doc) return { result: "revise", reasons: "没有找到交付物文档：必须用 write_document 提交正式交付物。" };
+
+  audit(channel.id, `🔎 ${verifier.name} 开始验收任务「${task.title}」的交付物`);
+
+  // 关键：干净上下文 —— 只给 rubric + 交付物，不带频道闲聊，避免被讨论氛围带偏
+  const prompt = [
+    `你是本次交付的校验者。请独立、严格地核验以下交付物是否满足任务要求。`,
+    ``,
+    `任务：${task.title}`,
+    `详情：${task.description || "（无）"}`,
+    task.acceptance_criteria
+      ? `验收标准（逐条核验）：\n${task.acceptance_criteria}`
+      : `（未写明验收标准 —— 按任务标题与详情判断交付物是否完整、可直接使用、无明显错误）`,
+    ``,
+    `交付物《${doc.title}》全文：`,
+    `<deliverable>`,
+    doc.content.slice(0, 16000),
+    `</deliverable>`,
+    ``,
+    `请逐条给出核验结论（满足/不满足及理由），随后必须调用 submit_verdict 提交最终裁决：`,
+    `- 全部关键标准满足 → result: "pass"`,
+    `- 存在不满足的关键标准 → result: "revise"，并在 reasons 中给出可执行的修订意见`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const verifierTools: Anthropic.ToolUnion[] = [
+    {
+      name: "submit_verdict",
+      description: "提交验收裁决。核验完成后必须调用本工具，且只调用一次。",
+      input_schema: {
+        type: "object" as const,
+        properties: {
+          result: { type: "string", enum: ["pass", "revise"], description: "pass=验收通过；revise=退回修订" },
+          reasons: { type: "string", description: "裁决理由；revise 时给出逐条可执行的修订意见" },
+        },
+        required: ["result", "reasons"],
+      },
+    },
+    TOOLS.find((t) => "name" in t && t.name === "read_document")!,
+  ];
+
+  const ctx = newCtx(verifier, channel, "verify", task.id);
+  await streamRun(ctx, prompt, 3, 0, undefined, verifierTools);
+  if (!ctx.verdict) {
+    audit(channel.id, `ℹ️ ${verifier.name} 未提交结构化裁决，按通过处理`);
+    return { result: "pass", reasons: "" };
+  }
+  return ctx.verdict;
+}
+
+// ---------------------------------------------------------------------------
+// 项目模式：Lead 拆解（start_project）→ DAG 调度 → 全部交付 → 自动汇总
+// ---------------------------------------------------------------------------
+
+function checkProject(projectId: string) {
+  const project = getProject(projectId);
+  if (!project || project.status !== "running") return;
+  const tasks = listTasks().filter((t) => t.project_id === projectId);
+  if (tasks.length === 0) return;
+  if (!tasks.every((t) => t.status === "review" || t.status === "done")) return;
+
+  const updated = updateProject(projectId, { status: "review" });
+  if (updated) broadcast({ type: "project:upsert", payload: updated });
+
+  const lead = project.lead_agent_id ? getAgent(project.lead_agent_id) : undefined;
+  const channel = project.channel_id ? getChannel(project.channel_id) : undefined;
+  if (!lead || !channel) return;
+
+  audit(channel.id, `🎯 项目「${project.title}」全部任务已交付，${lead.name} 开始汇总`);
+  void runSynthesis(lead, channel, project.id).catch((err) => reportFailure(lead, channel, err));
+}
+
+async function runSynthesis(lead: Agent, channel: Channel, projectId: string) {
+  const project = getProject(projectId);
+  if (!project) return;
+  const tasks = listTasks().filter((t) => t.project_id === projectId);
+  const docs = listDocuments().filter((d) => d.task_id && tasks.some((t) => t.id === d.task_id));
+  const taskList = tasks
+    .map((t) => {
+      const assignee = t.assignee_agent_id ? getAgent(t.assignee_agent_id)?.name ?? "?" : "未分配";
+      const tDocs = docs.filter((d) => d.task_id === t.id).map((d) => `《${d.title}》(id: ${d.id})`);
+      return `- ${t.title}（负责人 ${assignee}）交付物：${tDocs.join("、") || "无"}`;
+    })
+    .join("\n");
+
+  const ctx = newCtx(lead, channel, "synthesis", null);
+  const prompt = [
+    `你发起的项目「${project.title}」全部任务已交付，请进行最终汇总。`,
+    ``,
+    `项目目标：${project.goal || "（见各任务）"}`,
+    `任务与交付物清单：\n${taskList}`,
+    ``,
+    `要求：`,
+    `1. 用 read_document 通读所有交付物全文；`,
+    `2. 用 write_document 产出一份《${project.title} · 最终汇总报告》：综合各交付物的结论，`,
+    `   消解相互矛盾之处，给出整体结论与建议的下一步行动清单；`,
+    `3. 在回复正文给出给用户看的简短项目交付摘要。`,
+  ].join("\n");
+
+  await streamRun(ctx, prompt, MAX_WORK_ITERATIONS);
+
+  const summaryDocId = ctx.createdDocIds[ctx.createdDocIds.length - 1] ?? null;
+  const updated = updateProject(projectId, { summary_doc_id: summaryDocId });
+  if (updated) broadcast({ type: "project:upsert", payload: updated });
+  audit(channel.id, `🏁 项目「${project.title}」已汇总交付，等待用户确认关闭`);
 }
 
 // ---------------------------------------------------------------------------
@@ -243,13 +452,15 @@ function buildDynamicContext(agent: Agent, channel: Channel): string {
     .map((d) => `- 《${d.title}》（id: ${d.id}，作者: ${d.agent_id ? getAgent(d.agent_id)?.name ?? "?" : "用户"}）`)
     .join("\n");
   const memory = getMemory(agent.id);
+  const nowStr = new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
   return [
     `## 当前工作区上下文`,
+    `当前时间：${nowStr}（Asia/Shanghai）—— 涉及时间判断时以此为准`,
     `频道：#${channel.name}（${channel.kind === "dm" ? "与用户的私信" : "团队频道"}）`,
     teammates ? `频道内其他 AI 同事：\n${teammates}` : `频道内没有其他 AI 同事。`,
     tasks ? `频道任务看板：\n${tasks}` : `任务看板目前为空。`,
     docs ? `工作区文档（可用 read_document 阅读全文）：\n${docs}` : "",
-    memory ? `## 你的长期记忆\n${memory}` : "",
+    memory ? `## 你的长期记忆（先查阅，"核实过的事实/通用规则"优先遵循）\n${memory}` : "",
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -261,14 +472,47 @@ function buildDynamicContext(agent: Agent, channel: Channel): string {
 
 const TOOLS: Anthropic.ToolUnion[] = [
   {
+    name: "start_project",
+    description:
+      "立项：把一个目标一次性拆解为带依赖关系的任务计划。任务会按依赖图自动调度（无依赖的立即开工，依赖项交付后自动解锁），全部交付后由你自动汇总最终报告。适用于需要多位同事分工协作的目标；单个待办用 create_task 即可。",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "项目名" },
+        goal: { type: "string", description: "项目目标与整体验收口径" },
+        tasks: {
+          type: "array",
+          description: "任务计划（按依赖顺序排列）",
+          items: {
+            type: "object",
+            properties: {
+              title: { type: "string" },
+              description: { type: "string", description: "充分的背景与要求，负责人将据此独立完成" },
+              acceptance_criteria: { type: "string", description: "逐条可核验的验收标准（验收循环将逐条把关）" },
+              assignee: { type: "string", description: "负责人名字（AI 同事名）" },
+              depends_on: {
+                type: "array",
+                items: { type: "integer" },
+                description: "依赖的任务在本数组中的下标（0 起），只能引用排在前面的任务",
+              },
+            },
+            required: ["title", "assignee"],
+          },
+        },
+      },
+      required: ["title", "tasks"],
+    },
+  },
+  {
     name: "create_task",
     description:
-      "在团队任务看板上创建一个任务。当讨论中出现明确的待办事项时调用；指派给 AI 同事后对方会自动开工。",
+      "在团队任务看板上创建单个任务。指派给 AI 同事后对方会自动开工；写清验收标准，交付物将被逐条核验。",
     input_schema: {
       type: "object" as const,
       properties: {
         title: { type: "string", description: "任务标题，简洁的动宾短语" },
-        description: { type: "string", description: "任务详情，包含足够的背景与验收标准（负责人将据此独立完成）" },
+        description: { type: "string", description: "任务详情，包含足够的背景（负责人将据此独立完成）" },
+        acceptance_criteria: { type: "string", description: "逐条可核验的验收标准" },
         assignee: { type: "string", description: "负责人的名字（AI 同事名，或留空表示未分配）" },
       },
       required: ["title"],
@@ -277,7 +521,7 @@ const TOOLS: Anthropic.ToolUnion[] = [
   {
     name: "update_task",
     description:
-      "更新看板上的任务：推进状态、改负责人、改标题/描述。task_id 来自上下文中的任务列表。注意：done（关单）只能由人类操作。",
+      "更新看板上的任务：推进状态、改负责人、改标题/描述/验收标准。task_id 来自上下文中的任务列表。注意：done（关单）只能由人类操作。",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -285,6 +529,7 @@ const TOOLS: Anthropic.ToolUnion[] = [
         status: { type: "string", enum: ["todo", "doing", "review"] },
         title: { type: "string" },
         description: { type: "string" },
+        acceptance_criteria: { type: "string" },
         assignee: { type: "string", description: "负责人名字" },
       },
       required: ["task_id"],
@@ -327,10 +572,11 @@ const TOOLS: Anthropic.ToolUnion[] = [
   },
   {
     name: "save_memory",
-    description: "把值得长期记住的结论写入你的记忆（用户偏好、项目背景、关键决策）。每次一条，简洁。",
+    description:
+      "把一条值得长期记住的「核实过的事实」或「通用规则」写入你的记忆（如：用户偏好、项目背景、验证过的打法）。不要记未经验证的猜测或流水账；如与旧记忆冲突，写明修正。",
     input_schema: {
       type: "object" as const,
-      properties: { note: { type: "string", description: "要记住的一条笔记" } },
+      properties: { note: { type: "string", description: "一条蒸馏后的笔记，格式建议：[事实]… 或 [规则]…" } },
       required: ["note"],
     },
   },
@@ -350,12 +596,54 @@ function findAgentByName(name?: string): Agent | undefined {
 function execTool(ctx: RunCtx, name: string, input: any): string {
   const { agent, channel } = ctx;
   switch (name) {
+    case "start_project": {
+      const items: any[] = Array.isArray(input.tasks) ? input.tasks : [];
+      if (items.length === 0) return "错误：tasks 不能为空。";
+      const project = createProject({
+        channel_id: channel.id,
+        lead_agent_id: agent.id,
+        title: String(input.title ?? "未命名项目").slice(0, 200),
+        goal: String(input.goal ?? ""),
+      });
+      broadcast({ type: "project:upsert", payload: project });
+      const created: Task[] = [];
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i];
+        const assignee = findAgentByName(it.assignee);
+        const deps = (Array.isArray(it.depends_on) ? it.depends_on : [])
+          .filter((d: any) => Number.isInteger(d) && d >= 0 && d < i)
+          .map((d: number) => created[d].id);
+        const task = createTask({
+          channel_id: channel.id,
+          title: String(it.title ?? `任务 ${i + 1}`).slice(0, 200),
+          description: String(it.description ?? ""),
+          acceptance_criteria: String(it.acceptance_criteria ?? ""),
+          assignee_agent_id: assignee?.id ?? null,
+          created_by: agent.id,
+          project_id: project.id,
+          depends_on: deps,
+        });
+        created.push(task);
+        broadcast({ type: "task:upsert", payload: task });
+      }
+      const plan = created
+        .map((t, i) => {
+          const deps = taskDependsOn(t).map((id) => created.findIndex((c) => c.id === id) + 1);
+          const assignee = t.assignee_agent_id ? getAgent(t.assignee_agent_id)?.name : "未分配";
+          return `${i + 1}. ${t.title} → ${assignee}${deps.length ? `（依赖 ${deps.join("、")}）` : ""}`;
+        })
+        .join("\n");
+      audit(channel.id, `🧩 ${agent.name} 立项「${project.title}」，共 ${created.length} 个任务：\n${plan}`);
+      for (const t of created) onTaskAssigned(t); // 无依赖的立即开工
+      return `项目已创建（id: ${project.id}）。任务计划：\n${created.map((t, i) => `${i + 1}. ${t.title}（id: ${t.id}）`).join("\n")}\n无依赖且已指派的任务已自动开工；依赖项交付后会自动解锁后续任务；全部交付后你会被唤起做最终汇总。`;
+    }
     case "create_task": {
       const assignee = findAgentByName(input.assignee);
       const task = createTask({
         channel_id: channel.id,
         title: String(input.title ?? "").slice(0, 200),
         description: String(input.description ?? ""),
+        acceptance_criteria: String(input.acceptance_criteria ?? ""),
         status: "todo",
         assignee_agent_id: assignee?.id ?? null,
         created_by: agent.id,
@@ -374,12 +662,12 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
         ...(input.status ? { status: input.status } : {}),
         ...(input.title ? { title: String(input.title) } : {}),
         ...(input.description !== undefined ? { description: String(input.description) } : {}),
+        ...(input.acceptance_criteria !== undefined ? { acceptance_criteria: String(input.acceptance_criteria) } : {}),
         ...(input.assignee !== undefined ? { assignee_agent_id: assignee?.id ?? null } : {}),
       });
       if (!task) return `错误：找不到任务 ${input.task_id}`;
       broadcast({ type: "task:upsert", payload: task });
       audit(channel.id, `🗂️ ${agent.name} 更新了任务「${task.title}」→ ${task.status}`);
-      // 换了新负责人 → 触发对方自动开工（避免自己改自己导致的重复触发）
       if (task.assignee_agent_id && task.assignee_agent_id !== prev.assignee_agent_id && task.id !== ctx.taskId) {
         onTaskAssigned(task);
       }
@@ -418,6 +706,11 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
       appendMemory(agent.id, String(input.note ?? ""));
       return "已写入记忆。";
     }
+    case "submit_verdict": {
+      const result = input.result === "revise" ? "revise" : "pass";
+      ctx.verdict = { result, reasons: String(input.reasons ?? "") };
+      return `裁决已记录：${result}`;
+    }
     default:
       return `未知工具：${name}`;
   }
@@ -425,18 +718,20 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
 
 function toolLabel(name: string): string {
   switch (name) {
+    case "start_project": return "正在拆解项目计划…";
     case "create_task": return "正在创建任务…";
     case "update_task": return "正在更新任务…";
     case "write_document": return "正在撰写文档…";
     case "read_document": return "正在查阅文档…";
     case "request_approval": return "正在发起审批请求…";
-    case "save_memory": return "正在记录笔记…";
+    case "save_memory": return "正在沉淀经验…";
+    case "submit_verdict": return "正在提交验收裁决…";
     default: return `正在使用 ${name}…`;
   }
 }
 
 // ---------------------------------------------------------------------------
-// 运行核心：流式 LLM 循环（聊天应答与任务工作共用）
+// 运行核心：流式 LLM 循环（聊天 / 干活 / 验收 / 汇总共用）
 // ---------------------------------------------------------------------------
 
 function audit(channelId: string, text: string) {
@@ -448,25 +743,13 @@ function status(agent: Agent, channelId: string, state: "thinking" | "tool" | "r
   broadcast({ type: "agent:status", payload: { agent_id: agent.id, channel_id: channelId, state, detail } });
 }
 
-async function runAgent(agent: Agent, channel: Channel, depth: number, extraSystem?: string) {
-  const ctx: RunCtx = { agent, channel, taskId: null, createdDocIds: [] };
-  const transcript = buildTranscript(channel.id);
-  const prompt = `以下是频道 #${channel.name} 的最近对话记录：\n\n<transcript>\n${transcript}\n</transcript>\n\n现在请你以「${agent.name}」的身份，针对最新一条消息给出回复。直接输出回复内容本身，不要带姓名前缀或时间戳。`;
-  const done = await streamRun(ctx, prompt, 6, depth, extraSystem);
-
-  // 代理链：本条回复中 @ 了其他同事则接力
-  if (done) onMessage(done);
-}
-
-/**
- * 以 agent 身份在频道里执行一轮流式回复（含工具循环），返回落库后的完整消息。
- */
 async function streamRun(
   ctx: RunCtx,
   userPrompt: string,
   maxIterations: number,
   depth = 0,
-  extraSystem?: string
+  extraSystem?: string,
+  toolsOverride?: Anthropic.ToolUnion[]
 ): Promise<Message | null> {
   const { agent, channel } = ctx;
   status(agent, channel.id, "thinking");
@@ -491,7 +774,7 @@ async function streamRun(
     if (!client) {
       await mockRun(ctx, emit);
     } else {
-      usage = await llmLoop(ctx, userPrompt, maxIterations, emit, extraSystem);
+      usage = await llmLoop(ctx, userPrompt, maxIterations, emit, extraSystem, toolsOverride);
     }
     const usageJson = JSON.stringify(usage);
     updateMessage(row.id, { content, status: "complete", usage_json: usageJson });
@@ -514,7 +797,8 @@ async function llmLoop(
   userPrompt: string,
   maxIterations: number,
   emit: (delta: string) => void,
-  extraSystem?: string
+  extraSystem?: string,
+  toolsOverride?: Anthropic.ToolUnion[]
 ): Promise<{ input_tokens: number; output_tokens: number }> {
   if (!client) throw new Error("no client");
   const { agent, channel } = ctx;
@@ -524,7 +808,7 @@ async function llmLoop(
     { type: "text", text: buildDynamicContext(agent, channel) + (extraSystem ? `\n\n${extraSystem}` : "") },
   ];
   const messages: Anthropic.MessageParam[] = [{ role: "user", content: userPrompt }];
-  const tools: Anthropic.ToolUnion[] = [...TOOLS, ...WEB_TOOLS];
+  const tools: Anthropic.ToolUnion[] = toolsOverride ?? [...TOOLS, ...WEB_TOOLS];
 
   const usage = { input_tokens: 0, output_tokens: 0 };
   let firstText = true;
@@ -579,6 +863,9 @@ async function llmLoop(
     }
     messages.push({ role: "user", content: results });
     if (emitted) emit("\n\n"); // 工具段落之间留空行，保持 Markdown 结构
+
+    // 校验者一旦提交裁决即可收口
+    if (ctx.kind === "verify" && ctx.verdict) break;
   }
   return usage;
 }
@@ -589,7 +876,8 @@ async function llmLoop(
 
 async function mockRun(ctx: RunCtx, emit: (delta: string) => void) {
   const { agent } = ctx;
-  if (ctx.taskId) {
+  let text: string;
+  if (ctx.kind === "work" && ctx.taskId) {
     const task = getTask(ctx.taskId);
     const doc = createDocument({
       channel_id: ctx.channel.id,
@@ -601,18 +889,29 @@ async function mockRun(ctx: RunCtx, emit: (delta: string) => void) {
     ctx.createdDocIds.push(doc.id);
     broadcast({ type: "doc:upsert", payload: doc });
     audit(ctx.channel.id, `📄 ${agent.name} 写好了文档《${doc.title}》`);
-  }
-  const text = ctx.taskId
-    ? `（Mock 模式）任务已按演示流程处理完毕：我完成了调研与交付物撰写（见文档库），任务将转入待评审。配置 \`ANTHROPIC_API_KEY\` 后我会真实执行这项工作。`
-    : `（Mock 模式）你好，我是 **${agent.name}**（${agent.role}）。
+    text = `（Mock 模式）任务已按演示流程处理完毕：调研 → 交付物撰写（见文档库）→ 转待评审。配置 \`ANTHROPIC_API_KEY\` 后我会真实执行这项工作。`;
+  } else if (ctx.kind === "synthesis") {
+    const doc = createDocument({
+      channel_id: ctx.channel.id,
+      task_id: null,
+      agent_id: agent.id,
+      title: `（Mock）项目最终汇总报告`,
+      content: `# 项目最终汇总报告\n\nMock 模式演示：全部任务交付后由 Lead 自动汇总。`,
+    });
+    ctx.createdDocIds.push(doc.id);
+    broadcast({ type: "doc:upsert", payload: doc });
+    text = `（Mock 模式）项目汇总完成，最终报告已写入文档库。`;
+  } else {
+    text = `（Mock 模式）你好，我是 **${agent.name}**（${agent.role}）。
 
-当前服务端未配置 \`ANTHROPIC_API_KEY\`，所以这是一条模拟回复，用于演示完整的协作流程：
+当前服务端未配置 \`ANTHROPIC_API_KEY\`，这是模拟回复，用于演示完整协作流程：
 
 | 能力 | 状态 |
 |---|---|
 | 流式输出 / @路由 / 代理接力 | ✅ 正在演示 |
-| 任务自动开工 → 交付 → 同行评审 | ✅ 指派任务即可演示 |
-| 联网调研 / 文档交付 / 审批门 / 记忆 | ✅ 配置 Key 后由我真实驱动 |`;
+| 任务自动开工 → 交付 → 验收循环 | ✅ 指派任务即可演示 |
+| 项目模式（拆解→依赖调度→自动汇总） | ✅ 配置 Key 后由我真实驱动 |`;
+  }
   for (const chunk of text.match(/[\s\S]{1,12}/g) ?? []) {
     emit(chunk);
     await new Promise((r) => setTimeout(r, 20));

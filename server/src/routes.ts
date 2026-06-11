@@ -16,8 +16,8 @@ import {
   updateTask,
 } from "./db.js";
 import { broadcast } from "./bus.js";
-import { listDocuments } from "./db.js";
-import { isMockMode, onMessage, onTaskAssigned, triggerAgent } from "./agents/engine.js";
+import { listDocuments, listProjects } from "./db.js";
+import { isMockMode, onMessage, onTaskAssigned, onTaskDelivered, triggerAgent } from "./agents/engine.js";
 
 export const api = Router();
 
@@ -30,6 +30,7 @@ api.get("/bootstrap", (_req, res) => {
     tasks: listTasks(),
     approvals: listApprovals(),
     documents: listDocuments(),
+    projects: listProjects(),
   });
 });
 
@@ -124,6 +125,10 @@ api.patch("/tasks/:id", (req, res) => {
   broadcast({ type: "task:upsert", payload: task });
   // 用户把任务指派给了新的 AI 同事 → 对方自动开工
   if (task.assignee_agent_id && task.assignee_agent_id !== prev?.assignee_agent_id) onTaskAssigned(task);
+  // 人工把任务推进到交付态 → 解锁依赖它的任务 / 触发项目汇总
+  const delivered = task.status === "review" || task.status === "done";
+  const wasDelivered = prev?.status === "review" || prev?.status === "done";
+  if (delivered && !wasDelivered) onTaskDelivered(task);
   res.json(task);
 });
 

@@ -34,6 +34,21 @@ export interface Task {
   status: "todo" | "doing" | "review" | "done";
   assignee_agent_id: string | null;
   created_by: string;
+  acceptance_criteria: string;
+  depends_on: string;
+  project_id: string | null;
+  revision_count: number;
+  created_at: number;
+  updated_at: number;
+}
+export interface Project {
+  id: string;
+  channel_id: string | null;
+  lead_agent_id: string | null;
+  title: string;
+  goal: string;
+  status: "running" | "review" | "done";
+  summary_doc_id: string | null;
   created_at: number;
   updated_at: number;
 }

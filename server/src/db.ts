@@ -81,7 +81,28 @@ CREATE TABLE IF NOT EXISTS documents (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS projects (
+  id TEXT PRIMARY KEY,
+  channel_id TEXT,
+  lead_agent_id TEXT,
+  title TEXT NOT NULL,
+  goal TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'running',
+  summary_doc_id TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 `);
+
+// 轻量迁移：旧库补新列
+function addColumnIfMissing(table: string, column: string, ddl: string) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (!cols.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+}
+addColumnIfMissing("tasks", "acceptance_criteria", "acceptance_criteria TEXT NOT NULL DEFAULT ''");
+addColumnIfMissing("tasks", "depends_on", "depends_on TEXT NOT NULL DEFAULT '[]'");
+addColumnIfMissing("tasks", "project_id", "project_id TEXT");
+addColumnIfMissing("tasks", "revision_count", "revision_count INTEGER NOT NULL DEFAULT 0");
 
 export interface Agent {
   id: string;
@@ -119,6 +140,22 @@ export interface Task {
   status: "todo" | "doing" | "review" | "done";
   assignee_agent_id: string | null;
   created_by: string;
+  acceptance_criteria: string;
+  /** JSON: 依赖的任务 id 数组；全部交付（review/done）后本任务才会自动开工 */
+  depends_on: string;
+  project_id: string | null;
+  revision_count: number;
+  created_at: number;
+  updated_at: number;
+}
+export interface Project {
+  id: string;
+  channel_id: string | null;
+  lead_agent_id: string | null;
+  title: string;
+  goal: string;
+  status: "running" | "review" | "done";
+  summary_doc_id: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -260,6 +297,9 @@ export function createTask(t: {
   status?: Task["status"];
   assignee_agent_id?: string | null;
   created_by?: string;
+  acceptance_criteria?: string;
+  depends_on?: string[];
+  project_id?: string | null;
 }): Task {
   const task: Task = {
     id: nanoid(10),
@@ -269,23 +309,82 @@ export function createTask(t: {
     status: t.status ?? "todo",
     assignee_agent_id: t.assignee_agent_id ?? null,
     created_by: t.created_by ?? "user",
+    acceptance_criteria: t.acceptance_criteria ?? "",
+    depends_on: JSON.stringify(t.depends_on ?? []),
+    project_id: t.project_id ?? null,
+    revision_count: 0,
     created_at: now(),
     updated_at: now(),
   };
   db.prepare(
-    "INSERT INTO tasks (id, channel_id, title, description, status, assignee_agent_id, created_by, created_at, updated_at) VALUES (@id, @channel_id, @title, @description, @status, @assignee_agent_id, @created_by, @created_at, @updated_at)"
+    "INSERT INTO tasks (id, channel_id, title, description, status, assignee_agent_id, created_by, acceptance_criteria, depends_on, project_id, revision_count, created_at, updated_at) VALUES (@id, @channel_id, @title, @description, @status, @assignee_agent_id, @created_by, @acceptance_criteria, @depends_on, @project_id, @revision_count, @created_at, @updated_at)"
   ).run(task);
   return task;
 }
 export function updateTask(
   id: string,
-  fields: Partial<Pick<Task, "title" | "description" | "status" | "assignee_agent_id" | "channel_id">>
+  fields: Partial<
+    Pick<
+      Task,
+      "title" | "description" | "status" | "assignee_agent_id" | "channel_id" | "acceptance_criteria" | "revision_count"
+    >
+  >
 ): Task | undefined {
   const cur = getTask(id);
   if (!cur) return undefined;
   const next: Task = { ...cur, ...fields, updated_at: now() };
   db.prepare(
-    "UPDATE tasks SET title = @title, description = @description, status = @status, assignee_agent_id = @assignee_agent_id, channel_id = @channel_id, updated_at = @updated_at WHERE id = @id"
+    "UPDATE tasks SET title = @title, description = @description, status = @status, assignee_agent_id = @assignee_agent_id, channel_id = @channel_id, acceptance_criteria = @acceptance_criteria, revision_count = @revision_count, updated_at = @updated_at WHERE id = @id"
+  ).run(next);
+  return next;
+}
+export function taskDependsOn(task: Task): string[] {
+  try {
+    const arr = JSON.parse(task.depends_on);
+    return Array.isArray(arr) ? arr.filter((x) => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+// ---- projects ----
+export function listProjects(): Project[] {
+  return db.prepare("SELECT * FROM projects ORDER BY created_at DESC").all() as Project[];
+}
+export function getProject(id: string): Project | undefined {
+  return db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as Project | undefined;
+}
+export function createProject(p: {
+  channel_id?: string | null;
+  lead_agent_id?: string | null;
+  title: string;
+  goal?: string;
+}): Project {
+  const project: Project = {
+    id: nanoid(10),
+    channel_id: p.channel_id ?? null,
+    lead_agent_id: p.lead_agent_id ?? null,
+    title: p.title,
+    goal: p.goal ?? "",
+    status: "running",
+    summary_doc_id: null,
+    created_at: now(),
+    updated_at: now(),
+  };
+  db.prepare(
+    "INSERT INTO projects (id, channel_id, lead_agent_id, title, goal, status, summary_doc_id, created_at, updated_at) VALUES (@id, @channel_id, @lead_agent_id, @title, @goal, @status, @summary_doc_id, @created_at, @updated_at)"
+  ).run(project);
+  return project;
+}
+export function updateProject(
+  id: string,
+  fields: Partial<Pick<Project, "status" | "summary_doc_id" | "title" | "goal">>
+): Project | undefined {
+  const cur = getProject(id);
+  if (!cur) return undefined;
+  const next: Project = { ...cur, ...fields, updated_at: now() };
+  db.prepare(
+    "UPDATE projects SET title = @title, goal = @goal, status = @status, summary_doc_id = @summary_doc_id, updated_at = @updated_at WHERE id = @id"
   ).run(next);
   return next;
 }
@@ -376,7 +475,14 @@ export function getMemory(agentId: string): string {
 }
 export function appendMemory(agentId: string, note: string) {
   const cur = getMemory(agentId);
-  const next = (cur ? cur + "\n" : "") + `- ${note}`;
+  let next = (cur ? cur + "\n" : "") + `- ${note}`;
+  // 记忆上限：保留最近的条目，鼓励"蒸馏规则"而非无限流水账
+  const MAX = 4000;
+  if (next.length > MAX) {
+    const lines = next.split("\n");
+    while (lines.length > 1 && lines.join("\n").length > MAX) lines.shift();
+    next = lines.join("\n");
+  }
   db.prepare(
     "INSERT INTO agent_memory (agent_id, content, updated_at) VALUES (?, ?, ?) ON CONFLICT(agent_id) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at"
   ).run(agentId, next, now());

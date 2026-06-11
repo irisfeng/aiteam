@@ -1,4 +1,4 @@
-import type { Agent, Approval, Channel, Doc, Message, Task } from "./types";
+import type { Agent, Approval, Channel, Doc, Message, Project, Task } from "./types";
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
@@ -20,6 +20,7 @@ export interface Bootstrap {
   tasks: Task[];
   approvals: Approval[];
   documents: Doc[];
+  projects: Project[];
 }
 
 export const api = {
