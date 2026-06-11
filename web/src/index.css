@@ -1,0 +1,59 @@
+@import "tailwindcss";
+
+@theme {
+  --color-paper: #faf9f7;
+  --color-panel: #f4f2ee;
+  --color-line: #e7e4de;
+  --color-ink: #26241f;
+  --color-ink-2: #6b675e;
+  --color-ink-3: #a39e92;
+  --color-accent: #d96b27;
+  --color-accent-soft: #fbeee4;
+  --font-sans: -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", sans-serif;
+}
+
+html, body, #root {
+  height: 100%;
+}
+body {
+  @apply bg-paper text-ink font-sans antialiased;
+  font-size: 14px;
+}
+
+/* ---- Markdown 渲染（AI 工作产出风格） ---- */
+.md {
+  @apply leading-relaxed;
+  word-break: break-word;
+}
+.md > *:first-child { margin-top: 0; }
+.md > *:last-child { margin-bottom: 0; }
+.md p { margin: 0.5em 0; }
+.md h1, .md h2, .md h3, .md h4 { font-weight: 600; margin: 1em 0 0.4em; }
+.md h1 { font-size: 1.25em; }
+.md h2 { font-size: 1.15em; }
+.md h3 { font-size: 1.05em; }
+.md ul, .md ol { margin: 0.4em 0; padding-left: 1.4em; }
+.md ul { list-style: disc; }
+.md ol { list-style: decimal; }
+.md li { margin: 0.15em 0; }
+.md blockquote { border-left: 3px solid var(--color-line); padding-left: 0.8em; color: var(--color-ink-2); margin: 0.5em 0; }
+.md code { background: var(--color-panel); border: 1px solid var(--color-line); border-radius: 4px; padding: 0.1em 0.35em; font-size: 0.9em; }
+.md pre { background: #2b2925; color: #f2efe9; border-radius: 8px; padding: 0.8em 1em; overflow-x: auto; margin: 0.6em 0; }
+.md pre code { background: transparent; border: none; padding: 0; color: inherit; }
+.md table { border-collapse: collapse; margin: 0.6em 0; font-size: 0.95em; }
+.md th, .md td { border: 1px solid var(--color-line); padding: 0.35em 0.7em; text-align: left; }
+.md th { background: var(--color-panel); font-weight: 600; }
+.md hr { border: none; border-top: 1px solid var(--color-line); margin: 1em 0; }
+.md a { color: var(--color-accent); text-decoration: underline; text-underline-offset: 2px; }
+.md strong { font-weight: 600; }
+
+/* 流式光标 */
+.stream-cursor::after {
+  content: "▍";
+  color: var(--color-accent);
+  animation: blink 1s steps(1) infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+
+/* 细滚动条 */
+* { scrollbar-width: thin; scrollbar-color: var(--color-line) transparent; }
