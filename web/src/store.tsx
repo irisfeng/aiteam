@@ -165,7 +165,7 @@ interface Store extends State {
     model?: string;
     provider_id?: string | null;
   }) => Promise<void>;
-  createProvider: (data: { name: string; base_url: string; api_key: string; default_model?: string }) => Promise<void>;
+  createProvider: (data: { name: string; base_url: string; api_key: string; default_model?: string; max_tokens?: number }) => Promise<void>;
   deleteProvider: (id: string) => Promise<void>;
   moveTask: (task: Task, status: Task["status"]) => Promise<void>;
   resolveApproval: (id: string, approve: boolean) => Promise<void>;

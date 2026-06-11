@@ -69,7 +69,21 @@ function resolveRuntime(agent: Agent): Runtime {
       };
     }
   }
-  return { client: envClient, official: true, model: agent.model || "claude-opus-4-8", maxTokens: 16000 };
+  if (envClient) {
+    return { client: envClient, official: true, model: agent.model || "claude-opus-4-8", maxTokens: 16000 };
+  }
+  // 无官方 key 时：回退到首个带 key 的供应商（工作区默认通道），
+  // 模型用供应商默认值——内置同事的 claude-* 模型名在第三方端点上不存在
+  const fallback = listProviders().find((p) => p.api_key);
+  if (fallback) {
+    return {
+      client: new Anthropic({ apiKey: fallback.api_key, baseURL: fallback.base_url || undefined }),
+      official: !fallback.base_url,
+      model: fallback.default_model || agent.model,
+      maxTokens: fallback.max_tokens || 16000,
+    };
+  }
+  return { client: null, official: true, model: agent.model, maxTokens: 16000 };
 }
 
 function supportsAdaptiveThinking(model: string): boolean {

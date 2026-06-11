@@ -177,6 +177,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [defaultModel, setDefaultModel] = useState("");
+  const [maxTokens, setMaxTokens] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -190,11 +191,13 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         base_url: baseUrl.trim(),
         api_key: apiKey.trim(),
         default_model: defaultModel.trim(),
+        max_tokens: Number(maxTokens) || undefined,
       });
       setName("");
       setBaseUrl("");
       setApiKey("");
       setDefaultModel("");
+      setMaxTokens("");
     } catch (e: any) {
       setError(e?.message ?? "添加失败");
     } finally {
@@ -239,6 +242,13 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       <input value={apiKey} onChange={(e) => setApiKey(e.target.value)} type="password" placeholder="sk-…" className={inputCls} />
       <label className={labelCls}>默认模型</label>
       <input value={defaultModel} onChange={(e) => setDefaultModel(e.target.value)} placeholder="例如 deepseek-chat" className={inputCls} />
+      <label className={labelCls}>单次输出上限 max_tokens（可选）</label>
+      <input
+        value={maxTokens}
+        onChange={(e) => setMaxTokens(e.target.value)}
+        placeholder="默认 16000；DeepSeek 填 8000，本地模型按运行时上限"
+        className={inputCls}
+      />
       {error && <div className="mt-2 text-[12px] text-red-500">{error}</div>}
       <button
         onClick={() => void add()}
