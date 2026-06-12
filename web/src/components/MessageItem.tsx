@@ -38,13 +38,13 @@ export const MessageItem = memo(function MessageItem({ message }: { message: Mes
   const usage = usageLabel(message.usage_json);
 
   return (
-    <div className="group flex gap-3 px-4 py-2 hover:bg-panel/60">
+    <div className="msg-in group flex gap-3 px-4 py-2 hover:bg-sel/50">
       {isAgent ? <AgentAvatar agent={agent} /> : <UserAvatar name={name} />}
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline gap-1.5">
           <span className="text-[13.5px] font-semibold">{name}</span>
           {isAgent && <AiBadge />}
-          <span className="text-[11.5px] text-ink-3">{fmtTime(message.created_at)}</span>
+          <span className="font-mono text-[11px] text-ink-3">{fmtTime(message.created_at)}</span>
         </div>
         <div className={`md mt-0.5 text-[14px] ${message.status === "streaming" ? "stream-cursor" : ""}`}>
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
@@ -53,7 +53,7 @@ export const MessageItem = memo(function MessageItem({ message }: { message: Mes
           <div className="mt-1 text-[12px] text-red-500">回复中断</div>
         )}
         {usage && (
-          <div className="mt-1 text-[11px] text-ink-3 opacity-0 transition-opacity group-hover:opacity-100">
+          <div className="mt-1 font-mono text-[10.5px] text-ink-3 opacity-0 transition-opacity group-hover:opacity-100">
             {usage}
           </div>
         )}

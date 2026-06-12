@@ -3,14 +3,14 @@ import { useWorkspace } from "../store";
 
 function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/30" onMouseDown={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onMouseDown={onClose}>
       <div
-        className="w-[420px] rounded-xl border border-line bg-white p-5 shadow-xl"
+        className="modal-card max-h-[90vh] w-[440px] overflow-y-auto rounded-xl border border-line bg-panel p-5 shadow-xl"
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-[15px] font-semibold">{title}</h2>
-          <button onClick={onClose} className="rounded px-1.5 text-ink-3 hover:bg-panel">
+          <button onClick={onClose} className="rounded px-1.5 text-ink-3 hover:bg-sel">
             ✕
           </button>
         </div>
@@ -21,14 +21,34 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
 }
 
 const inputCls =
-  "w-full rounded-lg border border-line bg-white px-3 py-2 text-[13.5px] outline-none focus:border-accent/50";
+  "w-full rounded-lg border border-line bg-panel px-3 py-2 text-[13.5px] outline-none focus:border-accent/50";
 const labelCls = "mb-1 mt-3 block text-[12.5px] font-medium text-ink-2 first:mt-0";
+
+/** 场景组队模板（Hive 设计：3-4 张场景卡一键组队，零输入成本；按角色关键词匹配现有成员） */
+const SCENES: { icon: string; name: string; desc: string; channel: string; roleKeys: string[] }[] = [
+  { icon: "🔬", name: "调研与报告", desc: "联网调研 → 分析报告", channel: "research", roleKeys: ["产品", "工程"] },
+  { icon: "🚀", name: "产品立项", desc: "拆解分工 → 并行交付 → 汇总", channel: "project", roleKeys: ["产品", "工程", "评审"] },
+  { icon: "✍️", name: "内容与增长", desc: "选题 → 成文 → SEO 优化", channel: "content", roleKeys: ["产品", "SEO", "增长", "内容"] },
+  { icon: "🔍", name: "评审把关", desc: "方案/交付物的独立核验", channel: "review", roleKeys: ["评审", "工程"] },
+];
 
 export function NewChannelModal({ onClose }: { onClose: () => void }) {
   const ws = useWorkspace();
   const [name, setName] = useState("");
+  const [scene, setScene] = useState<number | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set(ws.agents.map((a) => a.id)));
   const [busy, setBusy] = useState(false);
+
+  function sceneAgents(i: number) {
+    const keys = SCENES[i].roleKeys;
+    return ws.agents.filter((a) => keys.some((k) => a.name.includes(k) || a.role.includes(k)));
+  }
+
+  function pickScene(i: number) {
+    setScene(i);
+    setSelected(new Set(sceneAgents(i).map((a) => a.id)));
+    if (!name.trim() || SCENES.some((s) => s.channel === name.trim())) setName(SCENES[i].channel);
+  }
 
   async function create() {
     if (!name.trim() || busy) return;
@@ -43,12 +63,36 @@ export function NewChannelModal({ onClose }: { onClose: () => void }) {
 
   return (
     <Modal title="新建频道" onClose={onClose}>
+      <label className={labelCls}>按场景组队（可选）</label>
+      <div className="grid grid-cols-2 gap-2">
+        {SCENES.map((s, i) => {
+          const members = sceneAgents(i);
+          const active = scene === i;
+          return (
+            <button
+              key={s.name}
+              onClick={() => pickScene(i)}
+              className={`rounded-lg border p-2.5 text-left transition-colors ${
+                active ? "border-accent bg-accent-soft" : "border-line hover:border-accent/40"
+              }`}
+            >
+              <div className="flex items-center gap-1.5 text-[13px] font-medium">
+                <span>{s.icon}</span>
+                {s.name}
+                {active && <span className="ml-auto font-mono text-[10px] text-accent">已选</span>}
+              </div>
+              <div className="mt-0.5 text-[11.5px] text-ink-3">{s.desc}</div>
+              <div className="mt-1 text-[12px]">{members.map((a) => a.emoji).join(" ") || "—"}</div>
+            </button>
+          );
+        })}
+      </div>
       <label className={labelCls}>频道名</label>
-      <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="例如 asr_stt_finetuning" className={inputCls} />
-      <label className={labelCls}>邀请 AI 同事</label>
+      <input value={name} onChange={(e) => setName(e.target.value)} placeholder="例如 asr_stt_finetuning" className={inputCls} />
+      <label className={labelCls}>邀请 AI 同事（手动调整后场景选中态解除）</label>
       <div className="flex flex-col gap-1">
         {ws.agents.map((a) => (
-          <label key={a.id} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-[13.5px] hover:bg-panel">
+          <label key={a.id} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-[13.5px] hover:bg-sel">
             <input
               type="checkbox"
               checked={selected.has(a.id)}
@@ -56,6 +100,7 @@ export function NewChannelModal({ onClose }: { onClose: () => void }) {
                 const next = new Set(selected);
                 e.target.checked ? next.add(a.id) : next.delete(a.id);
                 setSelected(next);
+                setScene(null); // 手动增减成员 = 偏离场景模板
               }}
             />
             <span>{a.emoji}</span>
@@ -259,7 +304,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
               </span>
               <button
                 onClick={() => startEdit(p.id)}
-                className="rounded px-1.5 text-[12px] text-ink-2 hover:bg-panel hover:text-ink"
+                className="rounded px-1.5 text-[12px] text-ink-2 hover:bg-sel hover:text-ink"
                 title="编辑该供应商"
               >
                 编辑
@@ -269,7 +314,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                   if (editingId === p.id) resetForm();
                   void ws.deleteProvider(p.id);
                 }}
-                className="rounded px-1.5 text-ink-3 hover:bg-panel hover:text-ink"
+                className="rounded px-1.5 text-ink-3 hover:bg-sel hover:text-ink"
                 title="删除（引用它的同事将回退到官方通道）"
               >
                 ✕
@@ -282,7 +327,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       <div className="mt-3 flex items-center gap-2 text-[12.5px] font-medium text-ink">
         {editingId ? `编辑：${name || "供应商"}` : "新增供应商"}
         {editingId && (
-          <button onClick={resetForm} className="rounded px-1.5 text-[12px] font-normal text-ink-3 hover:bg-panel">
+          <button onClick={resetForm} className="rounded px-1.5 text-[12px] font-normal text-ink-3 hover:bg-sel">
             取消编辑
           </button>
         )}

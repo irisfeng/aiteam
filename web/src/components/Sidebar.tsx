@@ -1,5 +1,23 @@
+import { useEffect, useState } from "react";
 import { useWorkspace } from "../store";
 import { AgentAvatar } from "./Avatar";
+
+function ThemeToggle() {
+  const [dark, setDark] = useState(() => localStorage.getItem("aiteam-theme") === "dark");
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", dark);
+    localStorage.setItem("aiteam-theme", dark ? "dark" : "light");
+  }, [dark]);
+  return (
+    <button
+      onClick={() => setDark((d) => !d)}
+      className="rounded px-1 text-ink-3 hover:bg-sel hover:text-ink"
+      title={dark ? "切换到浅色模式" : "切换到深色模式"}
+    >
+      {dark ? "☀" : "☾"}
+    </button>
+  );
+}
 
 function SectionTitle({ children, onAdd }: { children: string; onAdd?: () => void }) {
   return (
@@ -33,7 +51,7 @@ function Item({
     <button
       onClick={onClick}
       className={`flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-[13.5px] ${
-        active ? "bg-accent-soft font-medium text-ink" : "text-ink-2 hover:bg-line/60"
+        active ? "bg-accent-soft font-medium text-ink" : "text-ink-2 hover:bg-sel"
       }`}
     >
       <span className="flex-1 truncate">{children}</span>
@@ -104,7 +122,7 @@ export function Sidebar({
           <button
             key={a.id}
             onClick={() => void ws.openDm(a.id)}
-            className="flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-[13.5px] text-ink-2 hover:bg-line/60"
+            className="flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-[13.5px] text-ink-2 hover:bg-sel"
             title={`${a.role} · 点击私信`}
           >
             <AgentAvatar agent={a} size={20} />
@@ -130,7 +148,8 @@ export function Sidebar({
       <div className="flex items-center gap-2 border-t border-line px-4 py-3 text-[13px] text-ink-2">
         <span className="h-2 w-2 rounded-full bg-green-500" />
         <span className="flex-1">{ws.user.name}</span>
-        <button onClick={onSettings} className="rounded px-1 text-ink-3 hover:bg-line hover:text-ink" title="模型供应商设置">
+        <ThemeToggle />
+        <button onClick={onSettings} className="rounded px-1 text-ink-3 hover:bg-sel hover:text-ink" title="模型供应商设置">
           ⚙
         </button>
       </div>

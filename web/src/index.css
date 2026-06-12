@@ -1,15 +1,45 @@
 @import "tailwindcss";
 
+/* ===== Hive 双主题令牌（来自 Claude Design「Hive 桌面端」交接稿） ===== */
+:root {
+  --t-bg: #f3f1eb;
+  --t-panel: #ffffff;
+  --t-line: #e6e3db;
+  --t-ink: #26241f;
+  --t-dim: #8a877e;
+  --t-faint: #a8a49a;
+  --t-sel: #ece9e1;
+  --t-accent: #c28a1e;
+  --t-accent-soft: #fbf3e2;
+  --t-code-bg: #2b2925;
+  --t-code-ink: #f2efe9;
+}
+.dark {
+  --t-bg: #131312;
+  --t-panel: #181817;
+  --t-line: #262624;
+  --t-ink: #e8e6e1;
+  --t-dim: #8f8d86;
+  --t-faint: #6e6c66;
+  --t-sel: #232322;
+  --t-accent: #e0a848;
+  --t-accent-soft: #1c1915;
+  --t-code-bg: #0e0e0d;
+  --t-code-ink: #d9d6cf;
+}
+
 @theme {
-  --color-paper: #faf9f7;
-  --color-panel: #f4f2ee;
-  --color-line: #e7e4de;
-  --color-ink: #26241f;
-  --color-ink-2: #6b675e;
-  --color-ink-3: #a39e92;
-  --color-accent: #d96b27;
-  --color-accent-soft: #fbeee4;
+  --color-paper: var(--t-bg);
+  --color-panel: var(--t-panel);
+  --color-line: var(--t-line);
+  --color-ink: var(--t-ink);
+  --color-ink-2: var(--t-dim);
+  --color-ink-3: var(--t-faint);
+  --color-sel: var(--t-sel);
+  --color-accent: var(--t-accent);
+  --color-accent-soft: var(--t-accent-soft);
   --font-sans: -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 html, body, #root {
@@ -20,7 +50,12 @@ body {
   font-size: 14px;
 }
 
-/* ---- Markdown 渲染（AI 工作产出风格） ---- */
+/* 主题切换丝滑过渡（只对颜色属性，不影响布局性能） */
+body, aside, main, header, div, button, input, textarea, select, span, table, th, td, pre, code {
+  transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+
+/* ===== Markdown 渲染（AI 工作产出风格） ===== */
 .md {
   @apply leading-relaxed;
   word-break: break-word;
@@ -36,24 +71,36 @@ body {
 .md ul { list-style: disc; }
 .md ol { list-style: decimal; }
 .md li { margin: 0.15em 0; }
-.md blockquote { border-left: 3px solid var(--color-line); padding-left: 0.8em; color: var(--color-ink-2); margin: 0.5em 0; }
-.md code { background: var(--color-panel); border: 1px solid var(--color-line); border-radius: 4px; padding: 0.1em 0.35em; font-size: 0.9em; }
-.md pre { background: #2b2925; color: #f2efe9; border-radius: 8px; padding: 0.8em 1em; overflow-x: auto; margin: 0.6em 0; }
+.md blockquote { border-left: 3px solid var(--t-line); padding-left: 0.8em; color: var(--t-dim); margin: 0.5em 0; }
+.md code { background: var(--t-sel); border: 1px solid var(--t-line); border-radius: 4px; padding: 0.1em 0.35em; font-size: 0.9em; font-family: var(--font-mono); }
+.md pre { background: var(--t-code-bg); color: var(--t-code-ink); border-radius: 8px; padding: 0.8em 1em; overflow-x: auto; margin: 0.6em 0; }
 .md pre code { background: transparent; border: none; padding: 0; color: inherit; }
 .md table { border-collapse: collapse; margin: 0.6em 0; font-size: 0.95em; }
-.md th, .md td { border: 1px solid var(--color-line); padding: 0.35em 0.7em; text-align: left; }
-.md th { background: var(--color-panel); font-weight: 600; }
-.md hr { border: none; border-top: 1px solid var(--color-line); margin: 1em 0; }
-.md a { color: var(--color-accent); text-decoration: underline; text-underline-offset: 2px; }
+.md th, .md td { border: 1px solid var(--t-line); padding: 0.35em 0.7em; text-align: left; }
+.md th { background: var(--t-sel); font-weight: 600; }
+.md hr { border: none; border-top: 1px solid var(--t-line); margin: 1em 0; }
+.md a { color: var(--t-accent); text-decoration: underline; text-underline-offset: 2px; }
 .md strong { font-weight: 600; }
 
 /* 流式光标 */
 .stream-cursor::after {
   content: "▍";
-  color: var(--color-accent);
+  color: var(--t-accent);
   animation: blink 1s steps(1) infinite;
 }
 @keyframes blink { 50% { opacity: 0; } }
 
+/* 弹窗与消息的入场动画（丝滑而克制） */
+@keyframes modal-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+.modal-card { animation: modal-in 0.16s ease-out; }
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: none; }
+}
+.msg-in { animation: fade-in 0.18s ease-out; }
+
 /* 细滚动条 */
-* { scrollbar-width: thin; scrollbar-color: var(--color-line) transparent; }
+* { scrollbar-width: thin; scrollbar-color: var(--t-line) transparent; }

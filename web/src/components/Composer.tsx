@@ -56,7 +56,7 @@ export function Composer({
   return (
     <div className="relative px-4 pb-4">
       {candidates.length > 0 && (
-        <div className="absolute bottom-full left-4 z-10 mb-1 w-64 overflow-hidden rounded-lg border border-line bg-white shadow-lg">
+        <div className="absolute bottom-full left-4 z-10 mb-1 w-64 overflow-hidden rounded-lg border border-line bg-panel shadow-lg">
           {candidates.map((a) => (
             <button
               key={a.id}
@@ -73,7 +73,7 @@ export function Composer({
           ))}
         </div>
       )}
-      <div className="flex items-end gap-2 rounded-xl border border-line bg-white px-3 py-2 focus-within:border-accent/50">
+      <div className="flex items-end gap-2 rounded-xl border border-line bg-panel px-3 py-2 focus-within:border-accent/50">
         <textarea
           ref={textareaRef}
           value={value}

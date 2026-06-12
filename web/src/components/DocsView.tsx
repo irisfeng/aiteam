@@ -90,7 +90,7 @@ function SheetTable({ content }: { content: string }) {
         <thead>
           <tr>
             {head.map((h, i) => (
-              <th key={i} className="border border-line bg-panel px-2.5 py-1.5 text-left font-semibold">
+              <th key={i} className="border border-line bg-sel px-2.5 py-1.5 text-left font-semibold">
                 {h}
               </th>
             ))}
@@ -117,7 +117,7 @@ function SlidesPreview({ content }: { content: string }) {
   return (
     <div className="flex flex-col gap-4">
       {pages.map((page, i) => (
-        <div key={i} className="relative aspect-video w-full overflow-hidden rounded-lg border border-line bg-white shadow-sm">
+        <div key={i} className="relative aspect-video w-full overflow-hidden rounded-lg border border-line bg-panel shadow-sm">
           <div className="md h-full overflow-y-auto p-8 text-[14px]">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{page}</ReactMarkdown>
           </div>
@@ -135,15 +135,15 @@ export function DocViewerModal({ doc, onClose }: { doc: Doc; onClose: () => void
   const author = ws.agentById(doc.agent_id);
   const meta = docKindMeta(doc.kind);
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/30 p-6" onMouseDown={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6" onMouseDown={onClose}>
       <div
-        className="flex max-h-full w-[820px] flex-col overflow-hidden rounded-xl border border-line bg-white shadow-xl"
+        className="flex max-h-full w-[820px] flex-col overflow-hidden rounded-xl border border-line bg-panel shadow-xl"
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-2 border-b border-line px-5 py-3">
           <span>{meta.icon}</span>
           <span className="text-[15px] font-semibold">{doc.title}</span>
-          <span className="rounded bg-panel px-1.5 py-px text-[11px] text-ink-2" title={meta.hint}>
+          <span className="rounded bg-sel px-1.5 py-px text-[11px] text-ink-2" title={meta.hint}>
             {meta.label}
           </span>
           <span className="text-[12px] text-ink-3">
@@ -151,14 +151,14 @@ export function DocViewerModal({ doc, onClose }: { doc: Doc; onClose: () => void
           </span>
           <button
             onClick={() => download(doc)}
-            className="ml-auto rounded-lg border border-line px-2.5 py-1 text-[12px] text-ink-2 hover:bg-panel"
+            className="ml-auto rounded-lg border border-line px-2.5 py-1 text-[12px] text-ink-2 hover:bg-sel"
             title={meta.hint}
           >
             ⬇ 下载{doc.kind === "sheet" && !doc.content.trimStart().startsWith("|") ? " .csv" : " .md"}
           </button>
-          <button onClick={onClose} className="rounded px-1.5 text-ink-3 hover:bg-panel">✕</button>
+          <button onClick={onClose} className="rounded px-1.5 text-ink-3 hover:bg-sel">✕</button>
         </div>
-        <div className={`flex-1 overflow-y-auto px-6 py-4 ${doc.kind === "slides" ? "bg-panel/40" : ""}`}>
+        <div className={`flex-1 overflow-y-auto px-6 py-4 ${doc.kind === "slides" ? "bg-sel/40" : ""}`}>
           {doc.kind === "slides" ? (
             <SlidesPreview content={doc.content} />
           ) : doc.kind === "sheet" ? (
@@ -199,7 +199,7 @@ export function DocsView() {
               <button
                 key={d.id}
                 onClick={() => setOpenDoc(d)}
-                className="flex items-center gap-3 rounded-xl border border-line bg-white p-3.5 text-left shadow-sm hover:border-accent/40"
+                className="flex items-center gap-3 rounded-xl border border-line bg-panel p-3.5 text-left shadow-sm hover:border-accent/40"
               >
                 <span className="text-lg" title={meta.label}>{meta.icon}</span>
                 <div className="min-w-0 flex-1">

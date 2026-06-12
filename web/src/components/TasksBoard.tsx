@@ -23,7 +23,7 @@ function TaskCard({ task, onOpenDoc }: { task: Task; onOpenDoc: (doc: Doc) => vo
   } catch { /* 旧数据无该字段 */ }
 
   return (
-    <div className="rounded-lg border border-line bg-white p-3 shadow-sm">
+    <div className="rounded-lg border border-line bg-panel p-3 shadow-sm">
       {(project || depCount > 0 || task.revision_count > 0 || task.model_tier === "light") && (
         <div className="mb-1 flex flex-wrap items-center gap-1">
           {project && (
@@ -32,17 +32,17 @@ function TaskCard({ task, onOpenDoc }: { task: Task; onOpenDoc: (doc: Doc) => vo
             </span>
           )}
           {depCount > 0 && (
-            <span className="rounded bg-panel px-1.5 py-px text-[10.5px] text-ink-3" title="依赖交付后自动开工">
+            <span className="rounded bg-sel px-1.5 py-px text-[10.5px] text-ink-3" title="依赖交付后自动开工">
               ⛓ 依赖 {depCount}
             </span>
           )}
           {task.revision_count > 0 && (
-            <span className="rounded bg-panel px-1.5 py-px text-[10.5px] text-ink-3" title="验收未通过的返工次数">
+            <span className="rounded bg-sel px-1.5 py-px text-[10.5px] text-ink-3" title="验收未通过的返工次数">
               ↩ 返工 {task.revision_count}
             </span>
           )}
           {task.model_tier === "light" && (
-            <span className="rounded bg-panel px-1.5 py-px text-[10.5px] text-ink-3" title="轻量模型通道（低成本）">
+            <span className="rounded bg-sel px-1.5 py-px text-[10.5px] text-ink-3" title="轻量模型通道（低成本）">
               ⚡ 轻量
             </span>
           )}
@@ -61,7 +61,7 @@ function TaskCard({ task, onOpenDoc }: { task: Task; onOpenDoc: (doc: Doc) => vo
         <select
           value={task.assignee_agent_id ?? ""}
           onChange={(e) => void api.updateTask(task.id, { assignee_agent_id: e.target.value || null })}
-          className="max-w-[140px] rounded-full border border-line bg-panel px-1.5 py-0.5 text-[11.5px] text-ink-2 outline-none"
+          className="max-w-[140px] rounded-full border border-line bg-sel px-1.5 py-0.5 text-[11.5px] text-ink-2 outline-none"
           title="指派给 AI 同事后会自动开工"
         >
           <option value="">未分配</option>
@@ -80,7 +80,7 @@ function TaskCard({ task, onOpenDoc }: { task: Task; onOpenDoc: (doc: Doc) => vo
           {task.status === "doing" && (
             <button
               onClick={() => void fetch(`/api/tasks/${task.id}/stop`, { method: "POST" })}
-              className="rounded px-1 text-ink-3 hover:bg-panel hover:text-red-500"
+              className="rounded px-1 text-ink-3 hover:bg-sel hover:text-red-500"
               title="停止：运行中的工作在下一个步骤边界停下，任务退回待办"
             >
               ⏹
@@ -89,7 +89,7 @@ function TaskCard({ task, onOpenDoc }: { task: Task; onOpenDoc: (doc: Doc) => vo
           {idx > 0 && (
             <button
               onClick={() => void ws.moveTask(task, COLUMNS[idx - 1].key)}
-              className="rounded px-1 text-ink-3 hover:bg-panel hover:text-ink"
+              className="rounded px-1 text-ink-3 hover:bg-sel hover:text-ink"
               title={`移到「${COLUMNS[idx - 1].label}」`}
             >
               ←
@@ -98,7 +98,7 @@ function TaskCard({ task, onOpenDoc }: { task: Task; onOpenDoc: (doc: Doc) => vo
           {idx < COLUMNS.length - 1 && (
             <button
               onClick={() => void ws.moveTask(task, COLUMNS[idx + 1].key)}
-              className="rounded px-1 text-ink-3 hover:bg-panel hover:text-ink"
+              className="rounded px-1 text-ink-3 hover:bg-sel hover:text-ink"
               title={`移到「${COLUMNS[idx + 1].label}」${COLUMNS[idx + 1].key === "done" ? "（关单是 human-only）" : ""}`}
             >
               →
@@ -142,12 +142,12 @@ export function TasksBoard() {
             onChange={(e) => setTitle(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && void addTask()}
             placeholder="快速新建任务…"
-            className="w-52 rounded-lg border border-line bg-white px-3 py-1.5 text-[13px] outline-none focus:border-accent/50"
+            className="w-52 rounded-lg border border-line bg-panel px-3 py-1.5 text-[13px] outline-none focus:border-accent/50"
           />
           <select
             value={assignee}
             onChange={(e) => setAssignee(e.target.value)}
-            className="rounded-lg border border-line bg-white px-2 py-1.5 text-[13px] text-ink-2 outline-none"
+            className="rounded-lg border border-line bg-panel px-2 py-1.5 text-[13px] text-ink-2 outline-none"
           >
             <option value="">不指派</option>
             {ws.agents.map((a) => (
@@ -169,7 +169,7 @@ export function TasksBoard() {
         {COLUMNS.map((col) => {
           const tasks = ws.tasks.filter((t) => t.status === col.key);
           return (
-            <div key={col.key} className="flex min-w-0 flex-col rounded-xl bg-panel p-2">
+            <div key={col.key} className="flex min-w-0 flex-col rounded-xl bg-sel/60 p-2">
               <div className="flex items-center gap-1.5 px-2 py-1.5">
                 <span className="text-[13px] font-semibold">{col.label}</span>
                 <span className="text-[12px] text-ink-3">{tasks.length}</span>

@@ -25,7 +25,7 @@ export function InboxView() {
           {pending.map((a) => {
             const agent = ws.agentById(a.agent_id);
             return (
-              <div key={a.id} className="rounded-xl border border-line bg-white p-4 shadow-sm">
+              <div key={a.id} className="rounded-xl border border-line bg-panel p-4 shadow-sm">
                 <div className="flex items-center gap-2">
                   <AgentAvatar agent={agent} size={24} />
                   <span className="text-[13.5px] font-semibold">{agent?.name ?? "AI"}</span>
@@ -40,7 +40,7 @@ export function InboxView() {
                 </div>
                 <div className="mt-2 text-[14px] font-medium">{a.title}</div>
                 {a.payload && (
-                  <pre className="mt-2 max-h-60 overflow-y-auto whitespace-pre-wrap rounded-lg bg-panel p-3 text-[13px] text-ink-2">
+                  <pre className="mt-2 max-h-60 overflow-y-auto whitespace-pre-wrap rounded-lg bg-sel p-3 text-[13px] text-ink-2">
                     {a.payload}
                   </pre>
                 )}
@@ -53,7 +53,7 @@ export function InboxView() {
                   </button>
                   <button
                     onClick={() => void ws.resolveApproval(a.id, false)}
-                    className="rounded-lg border border-line px-4 py-1.5 text-[13px] font-medium text-ink-2 hover:bg-panel"
+                    className="rounded-lg border border-line px-4 py-1.5 text-[13px] font-medium text-ink-2 hover:bg-sel"
                   >
                     拒绝
                   </button>
@@ -68,7 +68,7 @@ export function InboxView() {
               {resolved.map((a) => {
                 const agent = ws.agentById(a.agent_id);
                 return (
-                  <div key={a.id} className="rounded-xl border border-line bg-panel/60 p-3 opacity-70">
+                  <div key={a.id} className="rounded-xl border border-line bg-sel/50 p-3 opacity-70">
                     <div className="flex items-center gap-2 text-[13px]">
                       <span>{a.status === "approved" ? "✅" : "❌"}</span>
                       <span className="font-medium">{a.title}</span>

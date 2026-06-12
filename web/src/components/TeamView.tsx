@@ -60,7 +60,7 @@ export function TeamView() {
             if (!agent) return null;
             const working = m.state === "working";
             return (
-              <div key={m.agent_id} className="rounded-xl border border-line bg-white p-4 shadow-sm">
+              <div key={m.agent_id} className="rounded-xl border border-line bg-panel p-4 shadow-sm">
                 <div className="flex items-center gap-2.5">
                   <AgentAvatar agent={agent} size={36} />
                   <div className="min-w-0">
@@ -72,6 +72,12 @@ export function TeamView() {
                       />
                     </div>
                     <div className="truncate text-[12px] text-ink-3">{agent.role}</div>
+                    <span
+                      className="mt-0.5 inline-block max-w-full truncate rounded border border-line bg-sel px-1 font-mono text-[10px] leading-4 text-ink-2"
+                      title={agent.provider_id ? "自定义供应商通道" : "官方/工作区默认通道"}
+                    >
+                      {agent.model}
+                    </span>
                   </div>
                 </div>
                 <div className="mt-3 text-[12.5px]">
@@ -81,16 +87,16 @@ export function TeamView() {
                       {m.queued > 0 && <span className="text-ink-3">（队列还有 {m.queued} 个）</span>}
                     </div>
                   ) : (
-                    <div className="rounded-lg bg-panel px-2.5 py-1.5 text-ink-3">☕ 空闲中，可以指派任务</div>
+                    <div className="rounded-lg bg-sel px-2.5 py-1.5 text-ink-3">☕ 空闲中，可以指派任务</div>
                   )}
                 </div>
                 <div className="mt-2.5 flex gap-4 text-[12px] text-ink-2">
                   <span>
-                    今日交付 <span className="font-semibold text-ink">{m.delivered_today}</span>
+                    今日交付 <span className="font-mono font-semibold text-ink">{m.delivered_today}</span>
                   </span>
                   <span>
                     今日用量{" "}
-                    <span className="font-semibold text-ink">
+                    <span className="font-mono font-semibold text-ink">
                       {(m.tokens_today.input + m.tokens_today.output).toLocaleString()}
                     </span>{" "}
                     tokens
@@ -104,7 +110,7 @@ export function TeamView() {
         <div className="mx-auto mt-6 max-w-3xl">
           <div className="mb-2 text-[13px] font-semibold">例行任务</div>
           {routines.length === 0 ? (
-            <div className="rounded-xl border border-line bg-panel/50 p-4 text-[12.5px] text-ink-3">
+            <div className="rounded-xl border border-line bg-sel/50 p-4 text-[12.5px] text-ink-3">
               还没有例行任务。在频道里告诉某位同事，例如：“@产品经理 以后每天 09:30 在这里发一份昨日进展与今日计划的站会汇总”。
             </div>
           ) : (
@@ -112,15 +118,15 @@ export function TeamView() {
               {routines.map((r) => {
                 const agent = ws.agentById(r.agent_id);
                 return (
-                  <div key={r.id} className="flex items-center gap-3 rounded-xl border border-line bg-white p-3 text-[13px]">
-                    <span className="rounded bg-panel px-2 py-0.5 font-mono text-[12px]">{r.time}</span>
+                  <div key={r.id} className="flex items-center gap-3 rounded-xl border border-line bg-panel p-3 text-[13px]">
+                    <span className="rounded bg-sel px-2 py-0.5 font-mono text-[12px]">{r.time}</span>
                     <span>{agent?.emoji} {agent?.name}</span>
                     <span className="min-w-0 flex-1 truncate text-ink-2" title={r.instruction}>
                       {r.instruction}
                     </span>
                     <button
                       onClick={() => void removeRoutine(r.id)}
-                      className="rounded px-1.5 text-ink-3 hover:bg-panel hover:text-ink"
+                      className="rounded px-1.5 text-ink-3 hover:bg-sel hover:text-ink"
                       title="删除例行任务"
                     >
                       ✕
