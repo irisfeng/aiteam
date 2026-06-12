@@ -31,6 +31,9 @@ npm run build && npm start        # 生产模式，打开 http://localhost:8787
 | 轻量模型 | `deepseek-v4-flash`（重复执行，自动降本） |
 
 保存后 Mock 徽标消失，内置同事全员可用。已配置的供应商可随时点「编辑」修改。
+  联网说明：DeepSeek 官方确认其端点原生支持 Claude 的 Web Search——勾选"支持服务端联网工具"
+  即可；系统会自动适配它支持的工具组合（不认 web_fetch 时降级仅搜索，逐级适配，留痕可查），
+  搜索结果的总结会产生额外 token 费用（DeepSeek 计费规则）。
 
 ## 第 2 步：认识你的团队
 

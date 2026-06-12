@@ -595,6 +595,9 @@ export function renameChannel(id: string, name: string): Channel | undefined {
   db.prepare("UPDATE channels SET name = ? WHERE id = ?").run(name, id);
   return getChannel(id);
 }
+export function clearChannelMessages(id: string) {
+  db.prepare("DELETE FROM messages WHERE channel_id = ?").run(id);
+}
 export function deleteChannel(id: string) {
   db.prepare("UPDATE tasks SET channel_id = NULL WHERE channel_id = ?").run(id);
   db.prepare("DELETE FROM messages WHERE channel_id = ?").run(id);

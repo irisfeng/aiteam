@@ -1,5 +1,6 @@
 import { Router } from "express";
 import {
+  clearChannelMessages,
   clearMemory,
   createAgent,
   createMcpServer,
@@ -230,6 +231,16 @@ api.get("/usage", (_req, res) => {
       };
     }),
   });
+});
+
+api.delete("/channels/:id/messages", (req, res) => {
+  const channel = getChannel(req.params.id);
+  if (!channel) return res.status(404).json({ error: "channel not found" });
+  clearChannelMessages(channel.id);
+  broadcast({ type: "messages:cleared", payload: { channel_id: channel.id } });
+  const sys = insertMessage({ channel_id: channel.id, author_type: "system", content: "🧹 对话记录已清空（任务与文档不受影响）" });
+  broadcast({ type: "message:new", payload: sys });
+  res.json({ ok: true });
 });
 
 api.patch("/channels/:id", (req, res) => {

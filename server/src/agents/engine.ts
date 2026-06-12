@@ -40,7 +40,9 @@ import { callMcpTool, isMcpTool, mcpToolDefs } from "./mcp.js";
 
 const MAX_CHAIN_DEPTH = Number(process.env.AGENT_CHAIN_DEPTH ?? 2);
 const MAX_REVISIONS = Number(process.env.TASK_MAX_REVISIONS ?? 1);
-const TRANSCRIPT_WINDOW = 40;
+const TRANSCRIPT_WINDOW = 30;
+/** 每次运行的 MCP 插件调用上限（外部检索按次计费，防烧爆） */
+const MCP_CALLS_PER_RUN = Number(process.env.AITEAM_MCP_CALLS_PER_RUN ?? 5);
 const MAX_WORK_ITERATIONS = 8;
 const MAX_CONCURRENT_WORK = 8;
 
@@ -64,8 +66,28 @@ interface Runtime {
   maxTokens: number;
 }
 
-/** 实测不接受联网工具的通道（运行期熔断，重启后重试） */
-const webToolsBroken = new Set<string>();
+/**
+ * 兼容端点的联网工具适配阶梯：0=搜索+抓取 → 1=仅搜索 → 2=仅搜索(旧版类型) → 3=停用。
+ * DeepSeek 官方文档确认其 Anthropic 端点原生支持 Claude 的 Web Search，但 web_fetch 与
+ * 新版本号支持不一；实测 4xx 时自动降一档重试并留痕。官方通道恒为 0。
+ */
+const webToolsStage = new Map<string, number>();
+const WEB_STAGE_LABEL = ["搜索+抓取", "仅搜索", "仅搜索（兼容版）", "停用"];
+function webToolsFor(stage: number): Anthropic.ToolUnion[] {
+  switch (stage) {
+    case 0:
+      return [
+        { type: "web_search_20260209", name: "web_search" },
+        { type: "web_fetch_20260209", name: "web_fetch" },
+      ];
+    case 1:
+      return [{ type: "web_search_20260209", name: "web_search" }];
+    case 2:
+      return [{ type: "web_search_20250305", name: "web_search" } as unknown as Anthropic.ToolUnion];
+    default:
+      return [];
+  }
+}
 
 interface RuntimeOpts {
   /** 验收/汇总走最强通道 */
@@ -96,7 +118,7 @@ function resolveRuntime(agent: Agent, opts: RuntimeOpts = {}): Runtime {
   const fromProvider = (p: NonNullable<ReturnType<typeof getProvider>>, agentModel: string): Runtime => ({
     client: new Anthropic({ apiKey: p.api_key, baseURL: p.base_url || undefined }),
     official: !p.base_url, // 自定义 base_url 一律按"非官方"做缓存等门控
-    webTools: (!p.base_url || Boolean(p.web_tools)) && !webToolsBroken.has(p.id),
+    webTools: !p.base_url || Boolean(p.web_tools),
     providerId: p.id,
     model: light ? p.light_model || p.default_model || agentModel : agentModel || p.default_model || "claude-opus-4-8",
     maxTokens: p.max_tokens || 16000,
@@ -419,7 +441,7 @@ function buildWorkBrief(task: Task, channel: Channel): string {
     ``,
     `工作要求：`,
     `1. 开工前先查阅你的长期记忆（见系统上下文），其中"核实过的事实/通用规则"优先遵循；`,
-    `2. 如需要事实、数据或最新外部信息，先用 web_search / web_fetch 调研，不要凭空编造；研究/写作类任务建议按"多视角列问题 → 搭大纲 → 成文"推进，重要事实注明来源；`,
+    `2. 如需要事实、数据或最新外部信息，先用 web_search / web_fetch 或可用插件调研，不要凭空编造；外部检索按次计费——先想清楚要查什么、合并关键词，单任务尽量不超过 3 次；能从已有文档（read_document）获得的不要重复检索。研究/写作类任务按"多视角列问题 → 搭大纲 → 成文"推进，重要事实注明来源；`,
     `3. 用 write_document 产出完整、可直接使用的交付物，按任务性质选格式 kind：报告/方案用 report，需要演示就交 slides（Marp 分页），数据/报表交 sheet（CSV）——必要时可以多份组合（如 report + slides）；正文要详尽，逐条覆盖验收标准；`,
     `4. 交付前用 save_memory 记录至多 1 条本次任务沉淀的「核实过的事实」或「通用规则」（不要记流水账）；`,
     `5. 在回复正文给出简短交付摘要：做了什么、关键结论、需要谁跟进什么；`,
@@ -609,16 +631,22 @@ function authorLabel(m: Message): string {
   return a ? `${a.name}(AI)` : "AI";
 }
 
+function clip(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}…[已截断，全文 ${text.length} 字，对应交付物请用 read_document 查阅]` : text;
+}
+
 function buildTranscript(channelId: string, window = TRANSCRIPT_WINDOW): string {
   const msgs = listMessages(channelId, window).filter((m) => m.status !== "streaming");
   return msgs
-    .map((m) => {
+    .map((m, i) => {
       let quote = "";
       if (m.reply_to) {
         const target = getMessage(m.reply_to);
         if (target) quote = `[回复 ${authorLabel(target)} 的消息「${target.content.slice(0, 40)}…」] `;
       }
-      return `[${fmtTime(m.created_at)}] ${authorLabel(m)}: ${quote}${m.content}`;
+      // 降本核心：旧消息截断到 500 字（完整产出都在文档库），最新 2 条保留语境
+      const body = clip(m.content, i >= msgs.length - 2 ? 4000 : 500);
+      return `[${fmtTime(m.created_at)}] ${authorLabel(m)}: ${quote}${body}`;
     })
     .join("\n\n");
 }
@@ -651,7 +679,10 @@ function buildDynamicContext(agent: Agent, channel: Channel): string {
     skillBudget -= piece.length;
     skillsBlock += (skillsBlock ? "\n\n" : "") + piece;
   }
-  const nowStr = new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
+  const nowStr = new Date().toLocaleString("zh-CN", {
+    timeZone: "Asia/Shanghai", hour12: false,
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+  }); // 分钟级粒度：秒级时间戳会破坏供应商的自动前缀缓存
   return [
     `## 当前工作区上下文`,
     `当前时间：${nowStr}（Asia/Shanghai）—— 涉及时间判断时以此为准`,
@@ -674,7 +705,7 @@ const TOOLS: Anthropic.ToolUnion[] = [
   {
     name: "start_project",
     description:
-      "立项：把一个目标一次性拆解为带依赖关系的任务计划。任务会按依赖图自动调度（无依赖的立即开工，依赖项交付后自动解锁），全部交付后由你自动汇总最终报告。适用于需要多位同事分工协作的目标；单个待办用 create_task 即可。autonomy 档位：auto=全自主闭环直接开工；approve_plan=计划先送用户批准再开工（重大/高成本项目、或用户要求把关时使用）。",
+      "立项：把一个目标一次性拆解为带依赖关系的任务计划。任务会按依赖图自动调度（无依赖的立即开工，依赖项交付后自动解锁），全部交付后由你自动汇总最终报告。适用于需要多位同事分工协作的目标；单个待办用 create_task 即可。拆解纪律：每个交付物恰好一位负责人；子任务范围互斥不重叠；能复用前置交付物就建依赖（depends_on），绝不让多人重复调研同一主题。autonomy 档位：auto=全自主闭环直接开工；approve_plan=计划先送用户批准再开工（重大/高成本项目、或用户要求把关时使用）。",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -806,12 +837,6 @@ const TOOLS: Anthropic.ToolUnion[] = [
       required: ["note"],
     },
   },
-];
-
-// 服务端工具：真实联网调研能力（由 Anthropic 服务端执行，无需本地实现）
-const WEB_TOOLS: Anthropic.ToolUnion[] = [
-  { type: "web_search_20260209", name: "web_search" },
-  { type: "web_fetch_20260209", name: "web_fetch" },
 ];
 
 function findAgentByName(name?: string): Agent | undefined {
@@ -1135,21 +1160,30 @@ async function llmLoop(
     { type: "text", text: dynamicCtx + (extraSystem ? `\n\n${extraSystem}` : "") },
   ];
   const messages: Anthropic.MessageParam[] = [{ role: "user", content: userPrompt }];
-  let tools: Anthropic.ToolUnion[] = toolsOverride ?? (rt.webTools ? [...TOOLS, ...WEB_TOOLS] : [...TOOLS]);
+  const stageKey = rt.providerId ?? "env";
+  let webStage = rt.official ? 0 : webToolsStage.get(stageKey) ?? 0;
+  let mcpDefs: Anthropic.Tool[] = [];
   if (!toolsOverride) {
     try {
-      tools = [...tools, ...(await mcpToolDefs())]; // MCP 插件工具（懒连接，失败自动跳过）
+      mcpDefs = await mcpToolDefs(); // MCP 插件工具（懒连接，失败自动跳过）
     } catch (err) {
       console.error("[engine] mcp tools unavailable:", err);
     }
   }
+  const buildTools = (): Anthropic.ToolUnion[] =>
+    toolsOverride ?? [...TOOLS, ...(rt.webTools ? webToolsFor(webStage) : []), ...mcpDefs];
+  let tools: Anthropic.ToolUnion[] = buildTools();
   const isWebTool = (t: Anthropic.ToolUnion) => "type" in t && typeof t.type === "string" && t.type.startsWith("web_");
+  // 兼容端点不接受服务端内容块（搜索结果/server tool 等）回传——回传前剥离，只保留文本与客户端工具调用
+  const echoContent = (content: Anthropic.Message["content"]) =>
+    (rt.official ? content : content.filter((b) => b.type === "text" || b.type === "tool_use")) as Anthropic.MessageParam["content"];
 
   const usage = { input_tokens: 0, output_tokens: 0 };
   let firstText = true;
   let emitted = false;
   let steerSince = Date.now(); // 运行中插话：此刻之后的用户消息会注入下一轮迭代
   let transientRetries = 0; // 瞬时网络错误（terminated/重置/5xx）重试计数
+  let mcpCalls = 0; // 本次运行已消耗的外部插件调用数
 
   for (let iteration = 0; iteration < maxIterations; iteration++) {
     // 停止开关：在迭代边界停下（标志位由 runTaskWork 消费并落状态）
@@ -1181,12 +1215,12 @@ async function llmLoop(
     } catch (err: any) {
       const errStatus = err?.status ?? err?.response?.status;
       const errMsg = String(err?.message ?? err);
-      // 兼容端点对服务端联网工具的支持不一（如声明支持实测 4xx）：自动熔断该通道的
-      // web 工具并重试本轮；熔断记录在内存，重启后会再探测一次
-      if (rt.providerId && tools.some(isWebTool) && errStatus >= 400 && errStatus < 500) {
-        webToolsBroken.add(rt.providerId);
-        tools = tools.filter((t) => !isWebTool(t));
-        audit(channel.id, `ℹ️ 当前模型通道不接受联网工具（${errMsg.slice(0, 80)}），已自动停用并重试`);
+      // 兼容端点联网工具适配阶梯：4xx 自动降一档重试（搜索+抓取 → 仅搜索 → 兼容版 → 停用）
+      if (rt.providerId && !rt.official && tools.some(isWebTool) && errStatus >= 400 && errStatus < 500) {
+        webStage = Math.min(webStage + 1, 3);
+        webToolsStage.set(stageKey, webStage);
+        tools = buildTools();
+        audit(channel.id, `ℹ️ 联网工具适配：通道拒绝当前组合（${errMsg.slice(0, 60)}），降级为「${WEB_STAGE_LABEL[webStage]}」重试`);
         iteration--;
         continue;
       }
@@ -1213,20 +1247,29 @@ async function llmLoop(
 
     if (final.stop_reason === "pause_turn") {
       // 服务端工具（web_search 等）跑满单次迭代上限，续跑即可
-      messages.push({ role: "assistant", content: final.content });
+      messages.push({ role: "assistant", content: echoContent(final.content) });
       continue;
     }
 
     const toolUses = final.content.filter((b): b is Anthropic.ToolUseBlock => b.type === "tool_use");
     if (final.stop_reason !== "tool_use" || toolUses.length === 0) break;
 
-    messages.push({ role: "assistant", content: final.content });
+    messages.push({ role: "assistant", content: echoContent(final.content) });
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const tu of toolUses) {
       status(agent, channel.id, "tool", toolLabel(tu.name));
       let result: string;
       try {
-        result = isMcpTool(tu.name) ? await callMcpTool(tu.name, tu.input) : execTool(ctx, tu.name, tu.input);
+        if (isMcpTool(tu.name)) {
+          if (mcpCalls >= MCP_CALLS_PER_RUN) {
+            result = `⚠️ 本次运行的外部插件调用已达上限（${MCP_CALLS_PER_RUN} 次）。外部检索按次计费，请基于已获得的信息完成工作，不要再尝试调用插件。`;
+          } else {
+            mcpCalls++;
+            result = await callMcpTool(tu.name, tu.input);
+          }
+        } else {
+          result = execTool(ctx, tu.name, tu.input);
+        }
       } catch (err: any) {
         result = `工具执行失败：${err?.message ?? err}`;
       }

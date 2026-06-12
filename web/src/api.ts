@@ -62,6 +62,7 @@ export const api = {
   renameChannel: (id: string, name: string) =>
     req<Channel>(`/channels/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }),
   deleteChannel: (id: string) => req<{ ok: boolean }>(`/channels/${id}`, { method: "DELETE" }),
+  clearMessages: (id: string) => req<{ ok: boolean }>(`/channels/${id}/messages`, { method: "DELETE" }),
   createAgent: (data: {
     name: string;
     emoji: string;

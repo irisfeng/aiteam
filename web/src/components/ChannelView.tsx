@@ -113,6 +113,16 @@ export function ChannelView({ channelId }: { channelId: string }) {
           ))}
         </div>
         <span className="font-mono text-[11px] text-ink-3">{members.length + 1} 名成员</span>
+        <button
+          onClick={() => {
+            if (window.confirm(`清空 ${channel.kind === "dm" ? "本私信" : `#${channel.name}`} 的全部对话记录？任务与文档不受影响，此操作不可恢复。`))
+              void ws.clearMessages(channelId);
+          }}
+          className="rounded px-1.5 py-0.5 text-[12px] text-ink-3 hover:bg-sel hover:text-red-500"
+          title="清空对话记录（任务与文档保留）"
+        >
+          🧹
+        </button>
         {channel.kind === "channel" && (
           <button
             onClick={togglePanel}

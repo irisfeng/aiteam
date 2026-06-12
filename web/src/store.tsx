@@ -44,6 +44,7 @@ type Action =
   | { type: "channel:new"; channel: Channel }
   | { type: "channel:update"; channel: Channel }
   | { type: "channel:delete"; id: string }
+  | { type: "messages:cleared"; channelId: string }
   | { type: "agent:new"; agent: Agent };
 
 const initial: State = {
@@ -148,6 +149,8 @@ function reducer(state: State, action: Action): State {
         : { ...state, channels: [...state.channels, action.channel] };
     case "channel:update":
       return { ...state, channels: state.channels.map((c) => (c.id === action.channel.id ? action.channel : c)) };
+    case "messages:cleared":
+      return { ...state, messages: { ...state.messages, [action.channelId]: [] } };
     case "channel:delete": {
       const channels = state.channels.filter((c) => c.id !== action.id);
       const view =
@@ -171,6 +174,7 @@ interface Store extends State {
   createChannel: (name: string, agentIds: string[]) => Promise<void>;
   renameChannel: (id: string, name: string) => Promise<void>;
   deleteChannel: (id: string) => Promise<void>;
+  clearMessages: (id: string) => Promise<void>;
   /** 从角色模板一键实例化（幂等），返回该 Agent */
   installTemplate: (templateId: string) => Promise<Agent>;
   createAgent: (data: {
@@ -255,6 +259,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
           case "channel:delete":
             dispatch({ type: "channel:delete", id: payload.id });
             break;
+          case "messages:cleared":
+            dispatch({ type: "messages:cleared", channelId: payload.channel_id });
+            break;
         }
       };
       ws.onclose = () => {
@@ -303,6 +310,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       deleteChannel: async (id) => {
         await api.deleteChannel(id);
         dispatch({ type: "channel:delete", id });
+      },
+      clearMessages: async (id) => {
+        await api.clearMessages(id);
+        dispatch({ type: "messages:cleared", channelId: id });
       },
       createAgent: async (data) => {
         const agent = await api.createAgent(data);

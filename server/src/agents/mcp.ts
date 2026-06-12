@@ -7,6 +7,9 @@ import { McpServer, listMcpServers } from "../db.js";
 /** 注入工作循环的 MCP 工具数量上限（防上下文膨胀，尤其轻量通道） */
 const MAX_MCP_TOOLS = Number(process.env.AITEAM_MAX_MCP_TOOLS ?? 40);
 const TOOL_RESULT_LIMIT = 20000;
+/** 同参调用结果缓存：重复检索直接回缓存（零计费）。TTL 10 分钟，上限 200 条 */
+const CALL_CACHE_TTL = Number(process.env.AITEAM_MCP_CACHE_TTL_MS ?? 10 * 60_000);
+const callCache = new Map<string, { text: string; ts: number }>();
 
 interface Connection {
   client: Client;
@@ -111,6 +114,9 @@ export async function callMcpTool(name: string, input: unknown): Promise<string>
   if (!server) return `错误：MCP server「${serverKey}」不存在或已停用`;
   const conn = await ensureConnection(server);
   if (!conn) return `错误：MCP server「${server.name}」连接失败，请检查配置（设置 → MCP 插件 → 测试）`;
+  const cacheKey = `${name}:${JSON.stringify(input ?? {})}`;
+  const hit = callCache.get(cacheKey);
+  if (hit && Date.now() - hit.ts < CALL_CACHE_TTL) return hit.text;
   try {
     const result = await conn.client.callTool({ name: toolName, arguments: (input ?? {}) as Record<string, unknown> });
     const parts: string[] = [];
@@ -120,7 +126,12 @@ export async function callMcpTool(name: string, input: unknown): Promise<string>
       else parts.push(JSON.stringify(block));
     }
     const text = parts.join("\n") || "(无输出)";
-    return (result.isError ? `工具返回错误：${text}` : text).slice(0, TOOL_RESULT_LIMIT);
+    const out = (result.isError ? `工具返回错误：${text}` : text).slice(0, TOOL_RESULT_LIMIT);
+    if (!result.isError) {
+      if (callCache.size >= 200) callCache.delete(callCache.keys().next().value as string);
+      callCache.set(cacheKey, { text: out, ts: Date.now() });
+    }
+    return out;
   } catch (err: any) {
     // 连接失效则下次懒重连
     dropConnection(server.id);

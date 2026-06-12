@@ -17,7 +17,8 @@ export type BusEvent =
   | { type: "approval:upsert"; payload: unknown }
   | { type: "channel:new"; payload: unknown }
   | { type: "channel:update"; payload: unknown }
-  | { type: "channel:delete"; payload: { id: string } };
+  | { type: "channel:delete"; payload: { id: string } }
+  | { type: "messages:cleared"; payload: { channel_id: string } };
 
 export function broadcast(event: BusEvent) {
   if (!wss) return;
