@@ -689,6 +689,9 @@ export function getMemory(agentId: string): string {
     | undefined;
   return row?.content ?? "";
 }
+export function clearMemory(agentId: string) {
+  db.prepare("DELETE FROM agent_memory WHERE agent_id = ?").run(agentId);
+}
 export function appendMemory(agentId: string, note: string) {
   const cur = getMemory(agentId);
   let next = (cur ? cur + "\n" : "") + `- ${note}`;

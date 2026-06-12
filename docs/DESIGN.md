@@ -156,6 +156,22 @@ Helio（helio.im）自称 "the AI-native team workspace"。核心信息来自官
 | Salesforce / Google ADK | 治理成熟度清单：Agent Identity / Registry / trace / Simulation & Evaluation | 企业化对标清单（远期） |
 | Relevance AI | "AI Workforce" 商业叙事；guardrails 与知识库 first-class | 产品叙事参考 |
 
+### D.4 Osaurus 深挖与 UI 优化方案（2026-06 补充）
+
+Osaurus（osaurus.ai，开源 Swift 原生 macOS AI harness）核心思想：**Agent 是一等公民**
+（每个 agent 自有提示词/模型/主题/记忆）；**三层记忆**（固定身份层 + 钉住事实 +
+会话情景记忆自动固化）；菜单栏级的克制原生工具感；主题可编辑（JSON 导入导出）；20+ 原生插件。
+
+| 借鉴项 | 落点 | 状态 |
+|---|---|---|
+| Agent 一等公民 | **Agent 档案面板**：身份/系统提示词/模型通道/长期记忆可视化（可清空）/私信直达；侧栏 ⓘ 与团队卡片点击进入 | ✅ 已实现 |
+| 克制工具感 | mono 序号导航（01-04）、今日用量 footer、mono 时间戳/状态/徽标体系 | ✅ 已实现 |
+| 贴着工作看进度 | 频道右侧任务面板（本频道任务分组 + 交付物直达），⫿ 开关可收起 | ✅ 已实现 |
+| 深色优先 | 主题默认跟随系统 prefers-color-scheme，☀/☾ 手动覆盖 | ✅ 已实现 |
+| 三层记忆 | 身份层=系统提示词（已有）；**钉住事实**（用户/Agent 可 pin，不被淘汰）；情景记忆自动固化（定期蒸馏合并） | 📋 M6 |
+| 每 Agent JSON 主题 | 成员专属色已实现；完整主题编辑后置 | 📋 远期 |
+| 插件面 | 对应我们的 MCP 集成路线 | 📋 M6（MCP 优先） |
+
 ---
 
 ## 二、产品定义

@@ -1,11 +1,13 @@
 import { Router } from "express";
 import {
+  clearMemory,
   createAgent,
   createChannel,
   createTask,
   findDm,
   getAgent,
   getChannel,
+  getMemory,
   insertMessage,
   listAgents,
   listApprovals,
@@ -199,6 +201,19 @@ api.post("/tasks/:id/stop", (req, res) => {
 api.get("/documents", (_req, res) => res.json(listDocuments()));
 
 api.get("/team", (_req, res) => res.json({ members: teamStatus(), routines: listRoutines() }));
+
+api.get("/agents/:id/memory", (req, res) => {
+  const agent = getAgent(req.params.id);
+  if (!agent) return res.status(404).json({ error: "agent not found" });
+  res.json({ content: getMemory(agent.id) });
+});
+
+api.delete("/agents/:id/memory", (req, res) => {
+  const agent = getAgent(req.params.id);
+  if (!agent) return res.status(404).json({ error: "agent not found" });
+  clearMemory(agent.id);
+  res.json({ ok: true });
+});
 
 /** 工作区快照导出（Markdown）：把全部时间线/任务/文档/项目打包成一个文件，便于反馈与归档 */
 api.get("/export.md", (_req, res) => {

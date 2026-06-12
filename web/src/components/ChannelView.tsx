@@ -1,8 +1,74 @@
 import { useEffect, useRef, useState } from "react";
 import { useWorkspace } from "../store";
+import type { Doc, Task } from "../types";
 import { MessageItem } from "./MessageItem";
 import { Composer } from "./Composer";
 import { AgentAvatar } from "./Avatar";
+import { DocViewerModal, docKindMeta } from "./DocsView";
+
+const STATUS_LABEL: Record<Task["status"], string> = { todo: "待办", doing: "进行", review: "待评审", done: "完成" };
+
+/** 频道右侧任务面板（Hive 设计：进度/产出物贴着对话看，不用切视图） */
+function ChannelPanel({ channelId, onOpenDoc }: { channelId: string; onOpenDoc: (d: Doc) => void }) {
+  const ws = useWorkspace();
+  const tasks = ws.tasks.filter((t) => t.channel_id === channelId);
+  const docs = ws.documents.filter((d) => d.channel_id === channelId).slice(0, 10);
+  const order: Task["status"][] = ["doing", "review", "todo", "done"];
+  const active = tasks.filter((t) => t.status !== "done");
+  const sorted = [...active].sort((a, b) => order.indexOf(a.status) - order.indexOf(b.status));
+
+  return (
+    <aside className="flex w-[264px] shrink-0 flex-col overflow-y-auto border-l border-line bg-panel/50 px-3 py-3">
+      <div className="mb-1.5 flex items-baseline gap-1.5 px-1">
+        <span className="text-[12.5px] font-semibold">任务</span>
+        <span className="font-mono text-[10.5px] text-ink-3">{active.length}</span>
+      </div>
+      {sorted.length === 0 && <div className="px-1 py-2 text-[12px] text-ink-3">本频道暂无进行中的任务</div>}
+      <div className="flex flex-col gap-1">
+        {sorted.map((t) => {
+          const assignee = ws.agentById(t.assignee_agent_id);
+          return (
+            <div key={t.id} className="rounded-lg border border-line bg-panel px-2 py-1.5">
+              <div className="flex items-center gap-1.5">
+                <span
+                  className={`rounded px-1 font-mono text-[9.5px] leading-4 ${
+                    t.status === "doing" ? "bg-accent-soft text-accent" : "bg-sel text-ink-3"
+                  }`}
+                >
+                  {STATUS_LABEL[t.status]}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-[12px]" title={t.title}>
+                  {t.title}
+                </span>
+                {assignee && <AgentAvatar agent={assignee} size={16} />}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="mt-4 mb-1.5 flex items-baseline gap-1.5 px-1">
+        <span className="text-[12.5px] font-semibold">交付物</span>
+        <span className="font-mono text-[10.5px] text-ink-3">{docs.length}</span>
+      </div>
+      {docs.length === 0 && <div className="px-1 py-2 text-[12px] text-ink-3">还没有交付物</div>}
+      <div className="flex flex-col gap-1">
+        {docs.map((d) => (
+          <button
+            key={d.id}
+            onClick={() => onOpenDoc(d)}
+            className="flex items-center gap-1.5 rounded-lg border border-line bg-panel px-2 py-1.5 text-left hover:border-accent/40"
+          >
+            <span className="text-[12px]">{docKindMeta(d.kind).icon}</span>
+            <span className="min-w-0 flex-1 truncate text-[12px]" title={d.title}>
+              {d.title}
+            </span>
+          </button>
+        ))}
+      </div>
+    </aside>
+  );
+}
 
 export function ChannelView({ channelId }: { channelId: string }) {
   const ws = useWorkspace();
@@ -11,6 +77,15 @@ export function ChannelView({ channelId }: { channelId: string }) {
   const statuses = Object.values(ws.statuses[channelId] ?? {});
   const scrollRef = useRef<HTMLDivElement>(null);
   const [pinned, setPinned] = useState(true);
+  const [panelOpen, setPanelOpen] = useState(() => localStorage.getItem("aiteam-panel") !== "off");
+  const [openDoc, setOpenDoc] = useState<Doc | null>(null);
+
+  function togglePanel() {
+    setPanelOpen((o) => {
+      localStorage.setItem("aiteam-panel", o ? "off" : "on");
+      return !o;
+    });
+  }
 
   // 新内容到达时：若用户停留在底部则跟随滚动
   useEffect(() => {
@@ -33,9 +108,20 @@ export function ChannelView({ channelId }: { channelId: string }) {
             </div>
           ))}
         </div>
-        <span className="text-[12px] text-ink-3">{members.length + 1} 名成员</span>
+        <span className="font-mono text-[11px] text-ink-3">{members.length + 1} 名成员</span>
+        {channel.kind === "channel" && (
+          <button
+            onClick={togglePanel}
+            className={`rounded px-1.5 py-0.5 font-mono text-[12px] ${panelOpen ? "bg-sel text-ink" : "text-ink-3 hover:bg-sel"}`}
+            title={panelOpen ? "收起任务面板" : "展开任务面板"}
+          >
+            ⫿
+          </button>
+        )}
       </header>
 
+      <div className="flex min-h-0 flex-1">
+        <div className="flex min-w-0 flex-1 flex-col">
       <div
         ref={scrollRef}
         onScroll={(e) => {
@@ -90,6 +176,10 @@ export function ChannelView({ channelId }: { channelId: string }) {
         agents={members as NonNullable<(typeof members)[number]>[]}
         onSend={(content) => ws.send(channelId, content)}
       />
+        </div>
+        {panelOpen && channel.kind === "channel" && <ChannelPanel channelId={channelId} onOpenDoc={setOpenDoc} />}
+      </div>
+      {openDoc && <DocViewerModal doc={openDoc} onClose={() => setOpenDoc(null)} />}
     </div>
   );
 }

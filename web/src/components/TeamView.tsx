@@ -18,7 +18,7 @@ interface Routine {
   instruction: string;
 }
 
-export function TeamView() {
+export function TeamView({ onOpenProfile }: { onOpenProfile: (a: import("../types").Agent) => void }) {
   const ws = useWorkspace();
   const [members, setMembers] = useState<Member[]>([]);
   const [routines, setRoutines] = useState<Routine[]>([]);
@@ -60,7 +60,12 @@ export function TeamView() {
             if (!agent) return null;
             const working = m.state === "working";
             return (
-              <div key={m.agent_id} className="rounded-xl border border-line bg-panel p-4 shadow-sm">
+              <div
+                key={m.agent_id}
+                onClick={() => onOpenProfile(agent)}
+                className="cursor-pointer rounded-xl border border-line bg-panel p-4 shadow-sm transition-colors hover:border-accent/40"
+                title="点击查看档案（身份/模型/记忆）"
+              >
                 <div className="flex items-center gap-2.5">
                   <AgentAvatar agent={agent} size={36} />
                   <div className="min-w-0">
