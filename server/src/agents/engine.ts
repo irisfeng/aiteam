@@ -55,52 +55,68 @@ interface Runtime {
   official: boolean;
   /** 是否启用 Anthropic 服务端联网工具（官方恒可用；兼容端点按 provider.web_tools） */
   webTools: boolean;
+  /** 来源 provider id（env 官方为 null）——用于联网工具失败后的按通道熔断 */
+  providerId: string | null;
   model: string;
   maxTokens: number;
 }
 
+/** 实测不接受联网工具的通道（运行期熔断，重启后重试） */
+const webToolsBroken = new Set<string>();
+
+interface RuntimeOpts {
+  /** 验收/汇总走最强通道 */
+  preferStrong?: boolean;
+  /** light = 轻量低成本模型（重复性/格式化任务），standard = 全力模型 */
+  tier?: "light" | "standard";
+}
+
 /**
- * preferStrong：验收与汇总是质量闭环的下限，官方通道可用时强制走最强模型
- *（AITEAM_STRONG_MODEL 可覆盖，默认 claude-opus-4-8）。
+ * 模型分级路由（choose model wisely）：
+ * - preferStrong：验收/汇总是质量闭环的下限，官方通道可用时强制最强模型
+ *   （AITEAM_STRONG_MODEL 可覆盖，默认 claude-opus-4-8）；
+ * - tier=light：重复性/格式化/单一明确的执行任务走轻量模型
+ *   （provider.light_model，官方默认 AITEAM_LIGHT_MODEL || claude-haiku-4-5），大幅降本。
  */
-function resolveRuntime(agent: Agent, preferStrong = false): Runtime {
-  if (preferStrong && envClient) {
+function resolveRuntime(agent: Agent, opts: RuntimeOpts = {}): Runtime {
+  const light = opts.tier === "light";
+  if (opts.preferStrong && envClient) {
     return {
       client: envClient,
       official: true,
       webTools: true,
+      providerId: null,
       model: process.env.AITEAM_STRONG_MODEL || "claude-opus-4-8",
       maxTokens: 16000,
     };
   }
+  const fromProvider = (p: NonNullable<ReturnType<typeof getProvider>>, agentModel: string): Runtime => ({
+    client: new Anthropic({ apiKey: p.api_key, baseURL: p.base_url || undefined }),
+    official: !p.base_url, // 自定义 base_url 一律按"非官方"做缓存等门控
+    webTools: (!p.base_url || Boolean(p.web_tools)) && !webToolsBroken.has(p.id),
+    providerId: p.id,
+    model: light ? p.light_model || p.default_model || agentModel : agentModel || p.default_model || "claude-opus-4-8",
+    maxTokens: p.max_tokens || 16000,
+  });
   if (agent.provider_id) {
     const p = getProvider(agent.provider_id);
-    if (p?.api_key) {
-      return {
-        client: new Anthropic({ apiKey: p.api_key, baseURL: p.base_url || undefined }),
-        official: !p.base_url, // 自定义 base_url 一律按"非官方"做缓存等门控
-        webTools: !p.base_url || Boolean(p.web_tools),
-        model: agent.model || p.default_model || "claude-opus-4-8",
-        maxTokens: p.max_tokens || 16000,
-      };
-    }
+    if (p?.api_key) return fromProvider(p, agent.model);
   }
   if (envClient) {
-    return { client: envClient, official: true, webTools: true, model: agent.model || "claude-opus-4-8", maxTokens: 16000 };
+    return {
+      client: envClient,
+      official: true,
+      webTools: true,
+      providerId: null,
+      model: light ? process.env.AITEAM_LIGHT_MODEL || "claude-haiku-4-5" : agent.model || "claude-opus-4-8",
+      maxTokens: 16000,
+    };
   }
   // 无官方 key 时：回退到首个带 key 的供应商（工作区默认通道），
   // 模型用供应商默认值——内置同事的 claude-* 模型名在第三方端点上可能不存在
   const fallback = listProviders().find((p) => p.api_key);
-  if (fallback) {
-    return {
-      client: new Anthropic({ apiKey: fallback.api_key, baseURL: fallback.base_url || undefined }),
-      official: !fallback.base_url,
-      webTools: !fallback.base_url || Boolean(fallback.web_tools),
-      model: fallback.default_model || agent.model,
-      maxTokens: fallback.max_tokens || 16000,
-    };
-  }
-  return { client: null, official: true, webTools: true, model: agent.model, maxTokens: 16000 };
+  if (fallback) return fromProvider(fallback, fallback.default_model || agent.model);
+  return { client: null, official: true, webTools: true, providerId: null, model: agent.model, maxTokens: 16000 };
 }
 
 function supportsAdaptiveThinking(model: string): boolean {
@@ -182,7 +198,7 @@ async function runChat(agent: Agent, channel: Channel, depth: number, extraSyste
   const ctx = newCtx(agent, channel, "chat");
   const transcript = buildTranscript(channel.id);
   const prompt = `以下是频道 #${channel.name} 的最近对话记录：\n\n<transcript>\n${transcript}\n</transcript>\n\n现在请你以「${agent.name}」的身份，针对最新一条消息给出回复。直接输出回复内容本身，不要带姓名前缀或时间戳。`;
-  const done = await streamRun(ctx, prompt, 6, depth, extraSystem);
+  const done = await streamRun(ctx, prompt, 6, depth, { extraSystem });
   // 代理链：本条回复中 @ 了其他同事则接力
   if (done) onMessage(done);
 }
@@ -248,9 +264,12 @@ export function onTaskAssigned(task: Task) {
       return runTaskWork(agent, task.id);
     })
     .catch((err) => {
-      const t = getTask(task.id);
-      if (t?.channel_id) audit(t.channel_id, `⚠️ ${agent.name} 处理任务「${task.title}」失败：${err?.message ?? err}`);
       console.error(`[engine] task work failed:`, err);
+      // 失败的任务不能卡在 doing：退回待办，重新指派负责人即可重试
+      const t = getTask(task.id);
+      if (t && t.status === "doing") setTaskStatus(task.id, "todo");
+      if (t?.channel_id)
+        audit(t.channel_id, `⚠️ ${agent.name} 处理任务「${task.title}」失败：${err?.message ?? err}。任务已退回待办，重新指派负责人即可重试。`);
     })
     .finally(() => {
       runningTasks.delete(task.id);
@@ -324,7 +343,7 @@ async function runTaskWork(agent: Agent, taskId: string) {
     broadcast({ type: "task:upsert", payload: task });
   }
 
-  audit(channel.id, `🚀 ${agent.name} 开始处理任务「${task.title}」`);
+  audit(channel.id, `🚀 ${agent.name} 开始处理任务「${task.title}」${task.model_tier === "light" ? "（⚡ 轻量通道）" : ""}`);
   setTaskStatus(task.id, "doing");
 
   let feedback: string | null = null; // 上一轮验收意见（返工时注入）
@@ -333,7 +352,7 @@ async function runTaskWork(agent: Agent, taskId: string) {
   for (let attempt = 0; attempt <= MAX_REVISIONS; attempt++) {
     const ctx = newCtx(agent, channel, "work", task.id);
     const prompt = feedback ? buildReworkBrief(task, channel, feedback) : buildWorkBrief(task, channel);
-    await streamRun(ctx, prompt, MAX_WORK_ITERATIONS);
+    await streamRun(ctx, prompt, MAX_WORK_ITERATIONS, 0, { tier: task.model_tier === "light" ? "light" : "standard" });
     lastDocIds = ctx.createdDocIds.length > 0 ? ctx.createdDocIds : lastDocIds;
 
     if (cancelledTasks.delete(task.id)) {
@@ -490,7 +509,7 @@ async function runVerification(
 
   const ctx = newCtx(verifier, channel, "verify", task.id);
   // 验收是质量闭环的下限：官方通道可用时强制走最强模型
-  await streamRun(ctx, prompt, 3, 0, undefined, verifierTools, true);
+  await streamRun(ctx, prompt, 3, 0, { toolsOverride: verifierTools, preferStrong: true });
   if (!ctx.verdict) {
     audit(channel.id, `ℹ️ ${verifier.name} 未提交结构化裁决，按通过处理`);
     return { result: "pass", reasons: "" };
@@ -564,7 +583,7 @@ async function runSynthesis(lead: Agent, channel: Channel, projectId: string) {
   ].join("\n");
 
   // 汇总同样走最强通道
-  await streamRun(ctx, prompt, MAX_WORK_ITERATIONS, 0, undefined, undefined, true);
+  await streamRun(ctx, prompt, MAX_WORK_ITERATIONS, 0, { preferStrong: true });
 
   const summaryDocId = ctx.createdDocIds[ctx.createdDocIds.length - 1] ?? null;
   const updated = updateProject(projectId, { summary_doc_id: summaryDocId });
@@ -654,6 +673,12 @@ const TOOLS: Anthropic.ToolUnion[] = [
                 items: { type: "integer" },
                 description: "依赖的任务在本数组中的下标（0 起），只能引用排在前面的任务",
               },
+              model_tier: {
+                type: "string",
+                enum: ["standard", "light"],
+                description:
+                  "为该任务明智地选择模型档位以降本：分析/创作/调研/需要判断 → standard（全力模型）；重复性/格式整理/数据搬运/单一明确的执行 → light（轻量模型）。默认 standard。",
+              },
             },
             required: ["title", "assignee"],
           },
@@ -673,6 +698,11 @@ const TOOLS: Anthropic.ToolUnion[] = [
         description: { type: "string", description: "任务详情，包含足够的背景（负责人将据此独立完成）" },
         acceptance_criteria: { type: "string", description: "逐条可核验的验收标准" },
         assignee: { type: "string", description: "负责人的名字（AI 同事名，或留空表示未分配）" },
+        model_tier: {
+          type: "string",
+          enum: ["standard", "light"],
+          description: "模型档位：重复性/格式化/单一明确的执行任务用 light 降本；分析/创作/调研用 standard（默认）",
+        },
       },
       required: ["title"],
     },
@@ -798,6 +828,7 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
           created_by: agent.id,
           project_id: project.id,
           depends_on: deps,
+          model_tier: it.model_tier === "light" ? "light" : "standard",
         });
         created.push(task);
         broadcast({ type: "task:upsert", payload: task });
@@ -837,6 +868,7 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
         status: "todo",
         assignee_agent_id: assignee?.id ?? null,
         created_by: agent.id,
+        model_tier: input.model_tier === "light" ? "light" : "standard",
       });
       broadcast({ type: "task:upsert", payload: task });
       audit(channel.id, `🗂️ ${agent.name} 创建了任务「${task.title}」${assignee ? `，指派给 ${assignee.name}` : ""}`);
@@ -968,7 +1000,8 @@ async function runRoutine(routine: Routine) {
     ``,
     `注意：上下文里有当前的任务看板与文档列表；如职责涉及汇总进展，请以看板与最新讨论为准，实事求是。`,
   ].join("\n");
-  await streamRun(ctx, prompt, 6);
+  // 例行任务多为汇总/提醒类，走轻量通道降本
+  await streamRun(ctx, prompt, 6, 0, { tier: "light" });
 }
 
 function toolLabel(name: string): string {
@@ -999,14 +1032,17 @@ function status(agent: Agent, channelId: string, state: "thinking" | "tool" | "r
   broadcast({ type: "agent:status", payload: { agent_id: agent.id, channel_id: channelId, state, detail } });
 }
 
+interface StreamRunOpts extends RuntimeOpts {
+  extraSystem?: string;
+  toolsOverride?: Anthropic.ToolUnion[];
+}
+
 async function streamRun(
   ctx: RunCtx,
   userPrompt: string,
   maxIterations: number,
   depth = 0,
-  extraSystem?: string,
-  toolsOverride?: Anthropic.ToolUnion[],
-  preferStrong = false
+  opts: StreamRunOpts = {}
 ): Promise<Message | null> {
   const { agent, channel } = ctx;
   status(agent, channel.id, "thinking");
@@ -1028,11 +1064,11 @@ async function streamRun(
 
   try {
     let usage = { input_tokens: 0, output_tokens: 0 };
-    const rt = resolveRuntime(agent, preferStrong);
+    const rt = resolveRuntime(agent, opts);
     if (!rt.client) {
       await mockRun(ctx, emit);
     } else {
-      usage = await llmLoop(ctx, rt, userPrompt, maxIterations, emit, extraSystem, toolsOverride);
+      usage = await llmLoop(ctx, rt, userPrompt, maxIterations, emit, opts.extraSystem, opts.toolsOverride);
     }
     const usageJson = JSON.stringify(usage);
     updateMessage(row.id, { content, status: "complete", usage_json: usageJson });
@@ -1073,12 +1109,14 @@ async function llmLoop(
     { type: "text", text: dynamicCtx + (extraSystem ? `\n\n${extraSystem}` : "") },
   ];
   const messages: Anthropic.MessageParam[] = [{ role: "user", content: userPrompt }];
-  const tools: Anthropic.ToolUnion[] = toolsOverride ?? (rt.webTools ? [...TOOLS, ...WEB_TOOLS] : [...TOOLS]);
+  let tools: Anthropic.ToolUnion[] = toolsOverride ?? (rt.webTools ? [...TOOLS, ...WEB_TOOLS] : [...TOOLS]);
+  const isWebTool = (t: Anthropic.ToolUnion) => "type" in t && typeof t.type === "string" && t.type.startsWith("web_");
 
   const usage = { input_tokens: 0, output_tokens: 0 };
   let firstText = true;
   let emitted = false;
   let steerSince = Date.now(); // 运行中插话：此刻之后的用户消息会注入下一轮迭代
+  let transientRetries = 0; // 瞬时网络错误（terminated/重置/5xx）重试计数
 
   for (let iteration = 0; iteration < maxIterations; iteration++) {
     // 停止开关：在迭代边界停下（标志位由 runTaskWork 消费并落状态）
@@ -1104,7 +1142,36 @@ async function llmLoop(
       emitted = true;
     });
 
-    const final = await stream.finalMessage();
+    let final: Anthropic.Message;
+    try {
+      final = await stream.finalMessage();
+    } catch (err: any) {
+      const errStatus = err?.status ?? err?.response?.status;
+      const errMsg = String(err?.message ?? err);
+      // 兼容端点对服务端联网工具的支持不一（如声明支持实测 4xx）：自动熔断该通道的
+      // web 工具并重试本轮；熔断记录在内存，重启后会再探测一次
+      if (rt.providerId && tools.some(isWebTool) && errStatus >= 400 && errStatus < 500) {
+        webToolsBroken.add(rt.providerId);
+        tools = tools.filter((t) => !isWebTool(t));
+        audit(channel.id, `ℹ️ 当前模型通道不接受联网工具（${errMsg.slice(0, 80)}），已自动停用并重试`);
+        iteration--;
+        continue;
+      }
+      // 瞬时网络错误（连接中断 terminated / 重置 / 5xx / 限流）：退避重试，不让长任务白跑
+      const transient =
+        errStatus === undefined ||
+        errStatus >= 500 ||
+        errStatus === 429 ||
+        /terminated|ECONNRESET|ETIMEDOUT|fetch failed|socket|aborted|network/i.test(errMsg);
+      if (transient && transientRetries < 3) {
+        transientRetries++;
+        status(agent, channel.id, "thinking", `连接中断，第 ${transientRetries} 次重试…`);
+        await new Promise((r) => setTimeout(r, 2000 * transientRetries));
+        iteration--;
+        continue;
+      }
+      throw err;
+    }
     usage.input_tokens +=
       final.usage.input_tokens +
       (final.usage.cache_read_input_tokens ?? 0) +

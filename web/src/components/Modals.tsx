@@ -173,35 +173,63 @@ export function NewAgentModal({ onClose }: { onClose: () => void }) {
 
 export function SettingsModal({ onClose }: { onClose: () => void }) {
   const ws = useWorkspace();
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [defaultModel, setDefaultModel] = useState("");
+  const [lightModel, setLightModel] = useState("");
   const [maxTokens, setMaxTokens] = useState("");
   const [webTools, setWebTools] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  async function add() {
-    if (!name.trim() || !apiKey.trim() || busy) return;
+  function resetForm() {
+    setEditingId(null);
+    setName("");
+    setBaseUrl("");
+    setApiKey("");
+    setDefaultModel("");
+    setLightModel("");
+    setMaxTokens("");
+    setWebTools(false);
+    setError("");
+  }
+
+  function startEdit(id: string) {
+    const p = ws.providers.find((x) => x.id === id);
+    if (!p) return;
+    setEditingId(id);
+    setName(p.name);
+    setBaseUrl(p.base_url);
+    setApiKey(""); // 留空 = 保持原 key
+    setDefaultModel(p.default_model);
+    setLightModel(p.light_model ?? "");
+    setMaxTokens(p.max_tokens && p.max_tokens !== 16000 ? String(p.max_tokens) : "");
+    setWebTools(Boolean(p.web_tools));
+    setError("");
+  }
+
+  async function submit() {
+    if (!name.trim() || busy) return;
+    if (!editingId && !apiKey.trim()) return;
     setBusy(true);
     setError("");
+    const data = {
+      name: name.trim(),
+      base_url: baseUrl.trim(),
+      api_key: apiKey.trim(), // 编辑时留空 = 不改 key
+      default_model: defaultModel.trim(),
+      light_model: lightModel.trim(),
+      max_tokens: Number(maxTokens) || undefined,
+      web_tools: webTools,
+    };
     try {
-      await ws.createProvider({
-        name: name.trim(),
-        base_url: baseUrl.trim(),
-        api_key: apiKey.trim(),
-        default_model: defaultModel.trim(),
-        max_tokens: Number(maxTokens) || undefined,
-        web_tools: webTools,
-      });
-      setName("");
-      setBaseUrl("");
-      setApiKey("");
-      setDefaultModel("");
-      setMaxTokens("");
+      if (editingId) await ws.updateProvider(editingId, data);
+      else await ws.createProvider(data);
+      resetForm();
     } catch (e: any) {
-      setError(e?.message ?? "添加失败");
+      setError(e?.message ?? "保存失败");
     } finally {
       setBusy(false);
     }
@@ -212,20 +240,35 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       <div className="text-[12.5px] leading-relaxed text-ink-2">
         默认推荐 Anthropic 官方（环境变量 <code className="rounded bg-panel px-1">ANTHROPIC_API_KEY</code>）。
         也可接入任何 <span className="font-medium">Anthropic 协议兼容</span>端点：DeepSeek / GLM / Kimi /
-        MiniMax 官方兼容端点，或经 LiteLLM 网关接入 OpenAI 协议供应商与本地模型（Ollama、vLLM…）。
-        注意：第三方通道不支持联网调研（web_search 为 Anthropic 服务端工具）。
+        MiniMax，或经 LiteLLM 网关接入 OpenAI 协议供应商与本地模型（Ollama、vLLM…）。
+        <span className="font-medium">默认模型</span>承担分析/创作，<span className="font-medium">轻量模型</span>承担
+        重复性/格式化任务（拆解时由 Lead 逐任务智能选择，大幅降本）。
       </div>
 
       {ws.providers.length > 0 && (
         <div className="mt-3 flex flex-col gap-1.5">
           {ws.providers.map((p) => (
-            <div key={p.id} className="flex items-center gap-2 rounded-lg border border-line px-3 py-2 text-[13px]">
+            <div
+              key={p.id}
+              className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-[13px] ${editingId === p.id ? "border-accent/60 bg-accent-soft/40" : "border-line"}`}
+            >
               <span className="font-medium">{p.name}</span>
               <span className="min-w-0 flex-1 truncate text-[12px] text-ink-3">
                 {p.base_url || "api.anthropic.com"} · {p.default_model || "未设默认模型"}
+                {p.light_model ? ` · ⚡${p.light_model}` : ""}
               </span>
               <button
-                onClick={() => void ws.deleteProvider(p.id)}
+                onClick={() => startEdit(p.id)}
+                className="rounded px-1.5 text-[12px] text-ink-2 hover:bg-panel hover:text-ink"
+                title="编辑该供应商"
+              >
+                编辑
+              </button>
+              <button
+                onClick={() => {
+                  if (editingId === p.id) resetForm();
+                  void ws.deleteProvider(p.id);
+                }}
                 className="rounded px-1.5 text-ink-3 hover:bg-panel hover:text-ink"
                 title="删除（引用它的同事将回退到官方通道）"
               >
@@ -236,14 +279,37 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         </div>
       )}
 
+      <div className="mt-3 flex items-center gap-2 text-[12.5px] font-medium text-ink">
+        {editingId ? `编辑：${name || "供应商"}` : "新增供应商"}
+        {editingId && (
+          <button onClick={resetForm} className="rounded px-1.5 text-[12px] font-normal text-ink-3 hover:bg-panel">
+            取消编辑
+          </button>
+        )}
+      </div>
+
       <label className={labelCls}>名称</label>
       <input value={name} onChange={(e) => setName(e.target.value)} placeholder="例如 DeepSeek / 本地 Ollama" className={inputCls} />
       <label className={labelCls}>Base URL（Anthropic 协议兼容端点）</label>
       <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://api.deepseek.com/anthropic" className={inputCls} />
       <label className={labelCls}>API Key（仅存服务端，不会下发前端）</label>
-      <input value={apiKey} onChange={(e) => setApiKey(e.target.value)} type="password" placeholder="sk-…" className={inputCls} />
-      <label className={labelCls}>默认模型</label>
-      <input value={defaultModel} onChange={(e) => setDefaultModel(e.target.value)} placeholder="例如 deepseek-v4-pro" className={inputCls} />
+      <input
+        value={apiKey}
+        onChange={(e) => setApiKey(e.target.value)}
+        type="password"
+        placeholder={editingId ? "留空 = 保持原 Key 不变" : "sk-…"}
+        className={inputCls}
+      />
+      <div className="flex gap-2">
+        <div className="flex-1">
+          <label className={labelCls}>默认模型（分析/创作）</label>
+          <input value={defaultModel} onChange={(e) => setDefaultModel(e.target.value)} placeholder="deepseek-v4-pro" className={inputCls} />
+        </div>
+        <div className="flex-1">
+          <label className={labelCls}>轻量模型（重复性任务，可选）</label>
+          <input value={lightModel} onChange={(e) => setLightModel(e.target.value)} placeholder="deepseek-v4-flash" className={inputCls} />
+        </div>
+      </div>
       <label className={labelCls}>单次输出上限 max_tokens（可选）</label>
       <input
         value={maxTokens}
@@ -253,15 +319,16 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       />
       <label className="mt-3 flex cursor-pointer items-center gap-2 text-[12.5px] text-ink-2">
         <input type="checkbox" checked={webTools} onChange={(e) => setWebTools(e.target.checked)} />
-        该端点支持服务端联网工具（web_search/web_fetch）。DeepSeek 官方 Anthropic 端点声明原生支持，可勾选；若运行报错请取消。
+        该端点支持服务端联网工具（web_search/web_fetch）。DeepSeek 官方 Anthropic 端点声明原生支持，可勾选；
+        若实测不支持会自动停用并继续工作。
       </label>
       {error && <div className="mt-2 text-[12px] text-red-500">{error}</div>}
       <button
-        onClick={() => void add()}
-        disabled={!name.trim() || !apiKey.trim() || busy}
+        onClick={() => void submit()}
+        disabled={!name.trim() || (!editingId && !apiKey.trim()) || busy}
         className="mt-4 w-full rounded-lg bg-accent py-2 text-[13.5px] font-medium text-white disabled:opacity-40"
       >
-        添加供应商
+        {editingId ? "保存修改" : "添加供应商"}
       </button>
     </Modal>
   );

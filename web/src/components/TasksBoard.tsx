@@ -24,7 +24,7 @@ function TaskCard({ task, onOpenDoc }: { task: Task; onOpenDoc: (doc: Doc) => vo
 
   return (
     <div className="rounded-lg border border-line bg-white p-3 shadow-sm">
-      {(project || depCount > 0 || task.revision_count > 0) && (
+      {(project || depCount > 0 || task.revision_count > 0 || task.model_tier === "light") && (
         <div className="mb-1 flex flex-wrap items-center gap-1">
           {project && (
             <span className="rounded bg-accent-soft px-1.5 py-px text-[10.5px] text-ink-2" title={project.goal}>
@@ -39,6 +39,11 @@ function TaskCard({ task, onOpenDoc }: { task: Task; onOpenDoc: (doc: Doc) => vo
           {task.revision_count > 0 && (
             <span className="rounded bg-panel px-1.5 py-px text-[10.5px] text-ink-3" title="验收未通过的返工次数">
               ↩ 返工 {task.revision_count}
+            </span>
+          )}
+          {task.model_tier === "light" && (
+            <span className="rounded bg-panel px-1.5 py-px text-[10.5px] text-ink-3" title="轻量模型通道（低成本）">
+              ⚡ 轻量
             </span>
           )}
         </div>

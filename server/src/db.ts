@@ -128,6 +128,8 @@ addColumnIfMissing("projects", "autonomy", "autonomy TEXT NOT NULL DEFAULT 'auto
 addColumnIfMissing("approvals", "kind", "kind TEXT NOT NULL DEFAULT 'action'");
 addColumnIfMissing("approvals", "ref_id", "ref_id TEXT");
 addColumnIfMissing("documents", "kind", "kind TEXT NOT NULL DEFAULT 'report'");
+addColumnIfMissing("providers", "light_model", "light_model TEXT NOT NULL DEFAULT ''");
+addColumnIfMissing("tasks", "model_tier", "model_tier TEXT NOT NULL DEFAULT 'standard'");
 
 export interface Agent {
   id: string;
@@ -147,6 +149,8 @@ export interface Provider {
   base_url: string;
   api_key: string;
   default_model: string;
+  /** 轻量模型（如 deepseek-v4-flash）：重复性/格式化任务走低成本通道；空 = 用 default_model */
+  light_model: string;
   max_tokens: number;
   /** 该端点是否支持 Anthropic 服务端联网工具（web_search/web_fetch）。官方恒为支持；
    *  部分兼容端点（如 DeepSeek）声明原生支持，可手动开启。 */
@@ -184,6 +188,8 @@ export interface Task {
   acceptance_criteria: string;
   /** JSON: 依赖的任务 id 数组；全部交付（review/done）后本任务才会自动开工 */
   depends_on: string;
+  /** 模型档位：standard = 全力模型；light = 轻量低成本模型（重复性/格式化/单一明确的执行） */
+  model_tier: "standard" | "light";
   project_id: string | null;
   revision_count: number;
   created_at: number;
@@ -263,6 +269,7 @@ export function createProvider(p: {
   base_url?: string;
   api_key?: string;
   default_model?: string;
+  light_model?: string;
   max_tokens?: number;
   web_tools?: boolean;
 }): Provider {
@@ -272,15 +279,35 @@ export function createProvider(p: {
     base_url: p.base_url ?? "",
     api_key: p.api_key ?? "",
     default_model: p.default_model ?? "",
+    light_model: p.light_model ?? "",
     max_tokens: p.max_tokens && p.max_tokens > 0 ? p.max_tokens : 16000,
     web_tools: p.web_tools ? 1 : 0,
     is_official: 0,
     created_at: now(),
   };
   db.prepare(
-    "INSERT INTO providers (id, name, base_url, api_key, default_model, max_tokens, web_tools, is_official, created_at) VALUES (@id, @name, @base_url, @api_key, @default_model, @max_tokens, @web_tools, @is_official, @created_at)"
+    "INSERT INTO providers (id, name, base_url, api_key, default_model, light_model, max_tokens, web_tools, is_official, created_at) VALUES (@id, @name, @base_url, @api_key, @default_model, @light_model, @max_tokens, @web_tools, @is_official, @created_at)"
   ).run(provider);
   return provider;
+}
+export function updateProvider(
+  id: string,
+  fields: Partial<Pick<Provider, "name" | "base_url" | "default_model" | "light_model" | "max_tokens" | "web_tools">> & {
+    /** 留空 = 保持原 key 不变 */
+    api_key?: string;
+  }
+): Provider | undefined {
+  const cur = getProvider(id);
+  if (!cur) return undefined;
+  const next: Provider = {
+    ...cur,
+    ...fields,
+    api_key: fields.api_key ? fields.api_key : cur.api_key,
+  };
+  db.prepare(
+    "UPDATE providers SET name = @name, base_url = @base_url, api_key = @api_key, default_model = @default_model, light_model = @light_model, max_tokens = @max_tokens, web_tools = @web_tools WHERE id = @id"
+  ).run(next);
+  return next;
 }
 export function deleteProvider(id: string) {
   db.prepare("UPDATE agents SET provider_id = NULL WHERE provider_id = ?").run(id);
@@ -293,6 +320,7 @@ export function sanitizeProvider(p: Provider) {
     name: p.name,
     base_url: p.base_url,
     default_model: p.default_model,
+    light_model: p.light_model,
     max_tokens: p.max_tokens,
     web_tools: p.web_tools,
     is_official: p.is_official,
@@ -404,6 +432,7 @@ export function createTask(t: {
   created_by?: string;
   acceptance_criteria?: string;
   depends_on?: string[];
+  model_tier?: Task["model_tier"];
   project_id?: string | null;
 }): Task {
   const task: Task = {
@@ -416,13 +445,14 @@ export function createTask(t: {
     created_by: t.created_by ?? "user",
     acceptance_criteria: t.acceptance_criteria ?? "",
     depends_on: JSON.stringify(t.depends_on ?? []),
+    model_tier: t.model_tier === "light" ? "light" : "standard",
     project_id: t.project_id ?? null,
     revision_count: 0,
     created_at: now(),
     updated_at: now(),
   };
   db.prepare(
-    "INSERT INTO tasks (id, channel_id, title, description, status, assignee_agent_id, created_by, acceptance_criteria, depends_on, project_id, revision_count, created_at, updated_at) VALUES (@id, @channel_id, @title, @description, @status, @assignee_agent_id, @created_by, @acceptance_criteria, @depends_on, @project_id, @revision_count, @created_at, @updated_at)"
+    "INSERT INTO tasks (id, channel_id, title, description, status, assignee_agent_id, created_by, acceptance_criteria, depends_on, model_tier, project_id, revision_count, created_at, updated_at) VALUES (@id, @channel_id, @title, @description, @status, @assignee_agent_id, @created_by, @acceptance_criteria, @depends_on, @model_tier, @project_id, @revision_count, @created_at, @updated_at)"
   ).run(task);
   return task;
 }

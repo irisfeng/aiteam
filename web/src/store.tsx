@@ -165,7 +165,8 @@ interface Store extends State {
     model?: string;
     provider_id?: string | null;
   }) => Promise<void>;
-  createProvider: (data: { name: string; base_url: string; api_key: string; default_model?: string; max_tokens?: number; web_tools?: boolean }) => Promise<void>;
+  createProvider: (data: import("./api").ProviderInput) => Promise<void>;
+  updateProvider: (id: string, data: import("./api").ProviderInput) => Promise<void>;
   deleteProvider: (id: string) => Promise<void>;
   moveTask: (task: Task, status: Task["status"]) => Promise<void>;
   resolveApproval: (id: string, approve: boolean) => Promise<void>;
@@ -280,6 +281,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       createProvider: async (data) => {
         const provider = await api.createProvider(data);
         dispatch({ type: "providers:set", providers: [...state.providers, provider] });
+      },
+      updateProvider: async (id, data) => {
+        const provider = await api.updateProvider(id, data);
+        dispatch({ type: "providers:set", providers: state.providers.map((p) => (p.id === id ? provider : p)) });
       },
       deleteProvider: async (id) => {
         await api.deleteProvider(id);

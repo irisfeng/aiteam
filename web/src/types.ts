@@ -13,6 +13,7 @@ export interface Provider {
   name: string;
   base_url: string;
   default_model: string;
+  light_model: string;
   max_tokens: number;
   web_tools: number;
   is_official: number;
@@ -47,6 +48,7 @@ export interface Task {
   created_by: string;
   acceptance_criteria: string;
   depends_on: string;
+  model_tier: "standard" | "light";
   project_id: string | null;
   revision_count: number;
   created_at: number;

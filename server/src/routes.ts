@@ -26,6 +26,7 @@ import {
   listProviders,
   listRoutines,
   sanitizeProvider,
+  updateProvider,
 } from "./db.js";
 import {
   isMock,
@@ -119,16 +120,32 @@ api.post("/agents", (req, res) => {
 });
 
 api.post("/providers", (req, res) => {
-  const { name, base_url, api_key, default_model, max_tokens, web_tools } = req.body ?? {};
+  const { name, base_url, api_key, default_model, light_model, max_tokens, web_tools } = req.body ?? {};
   if (!name || !api_key) return res.status(400).json({ error: "name and api_key required" });
   const provider = createProvider({
     name: String(name).trim(),
     base_url: String(base_url ?? "").trim().replace(/\/$/, ""),
     api_key: String(api_key).trim(),
     default_model: String(default_model ?? "").trim(),
+    light_model: String(light_model ?? "").trim(),
     max_tokens: Number(max_tokens) || undefined,
     web_tools: Boolean(web_tools),
   });
+  res.json(sanitizeProvider(provider));
+});
+
+api.patch("/providers/:id", (req, res) => {
+  const { name, base_url, api_key, default_model, light_model, max_tokens, web_tools } = req.body ?? {};
+  const provider = updateProvider(req.params.id, {
+    ...(name !== undefined ? { name: String(name).trim() } : {}),
+    ...(base_url !== undefined ? { base_url: String(base_url).trim().replace(/\/$/, "") } : {}),
+    ...(api_key !== undefined ? { api_key: String(api_key).trim() } : {}),
+    ...(default_model !== undefined ? { default_model: String(default_model).trim() } : {}),
+    ...(light_model !== undefined ? { light_model: String(light_model).trim() } : {}),
+    ...(max_tokens !== undefined ? { max_tokens: Number(max_tokens) || 16000 } : {}),
+    ...(web_tools !== undefined ? { web_tools: web_tools ? 1 : 0 } : {}),
+  });
+  if (!provider) return res.status(404).json({ error: "provider not found" });
   res.json(sanitizeProvider(provider));
 });
 
@@ -182,6 +199,49 @@ api.post("/tasks/:id/stop", (req, res) => {
 api.get("/documents", (_req, res) => res.json(listDocuments()));
 
 api.get("/team", (_req, res) => res.json({ members: teamStatus(), routines: listRoutines() }));
+
+/** 工作区快照导出（Markdown）：把全部时间线/任务/文档/项目打包成一个文件，便于反馈与归档 */
+api.get("/export.md", (_req, res) => {
+  const agentName = (id: string | null) => (id ? getAgent(id)?.name ?? id : "—");
+  const ts = (n: number) => new Date(n).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
+  const lines: string[] = [`# AITeam 工作区快照`, ``, `> 导出时间：${ts(Date.now())}`, ``];
+
+  lines.push(`## AI 同事`, ``);
+  for (const a of listAgents()) lines.push(`- ${a.emoji} **${a.name}**（${a.role}）模型: ${a.model}${a.provider_id ? " @自定义供应商" : ""}`);
+
+  const projects = listProjects();
+  if (projects.length) {
+    lines.push(``, `## 项目`, ``);
+    for (const p of projects) lines.push(`- [${p.status}] **${p.title}** — ${p.goal.slice(0, 120)}（Lead: ${agentName(p.lead_agent_id)}，自主度: ${p.autonomy}）`);
+  }
+
+  lines.push(``, `## 任务看板`, ``, `| 状态 | 任务 | 负责人 | 档位 | 返工 |`, `|---|---|---|---|---|`);
+  for (const t of listTasks()) lines.push(`| ${t.status} | ${t.title} | ${agentName(t.assignee_agent_id)} | ${t.model_tier} | ${t.revision_count} |`);
+
+  const docs = listDocuments();
+  if (docs.length) {
+    lines.push(``, `## 文档库`, ``);
+    for (const d of docs) lines.push(`- [${d.kind}]《${d.title}》by ${agentName(d.agent_id)}，${d.content.length} 字，${ts(d.created_at)}`);
+  }
+
+  const approvals = listApprovals();
+  if (approvals.length) {
+    lines.push(``, `## 审批`, ``);
+    for (const a of approvals) lines.push(`- [${a.status}] (${a.kind}) ${a.title} — ${agentName(a.agent_id)}`);
+  }
+
+  for (const c of listChannels()) {
+    lines.push(``, `## 频道 ${c.kind === "dm" ? "私信" : "#"}${c.name}`, ``);
+    for (const m of listMessages(c.id, 200)) {
+      const who = m.author_type === "user" ? "用户" : m.author_type === "system" ? "[系统]" : `${agentName(m.author_id)}(AI)`;
+      const body = m.content.length > 1500 ? m.content.slice(0, 1500) + `\n…（截断，全文 ${m.content.length} 字）` : m.content;
+      lines.push(`**${who}** · ${ts(m.created_at)}${m.status === "error" ? " · ⚠️中断" : ""}`, ``, body, ``, `---`, ``);
+    }
+  }
+
+  res.setHeader("Content-Type", "text/markdown; charset=utf-8");
+  res.send(lines.join("\n"));
+});
 
 api.delete("/routines/:id", (req, res) => {
   deleteRoutine(req.params.id);

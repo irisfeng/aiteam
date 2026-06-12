@@ -24,6 +24,17 @@ export interface Bootstrap {
   providers: Provider[];
 }
 
+export interface ProviderInput {
+  name: string;
+  base_url: string;
+  /** 编辑时留空 = 保持原 key */
+  api_key: string;
+  default_model?: string;
+  light_model?: string;
+  max_tokens?: number;
+  web_tools?: boolean;
+}
+
 export const api = {
   bootstrap: () => req<Bootstrap>("/bootstrap"),
   messages: (channelId: string) => req<Message[]>(`/channels/${channelId}/messages`),
@@ -40,8 +51,9 @@ export const api = {
     model?: string;
     provider_id?: string | null;
   }) => req<Agent>("/agents", { method: "POST", body: JSON.stringify(data) }),
-  createProvider: (data: { name: string; base_url: string; api_key: string; default_model?: string; max_tokens?: number; web_tools?: boolean }) =>
-    req<Provider>("/providers", { method: "POST", body: JSON.stringify(data) }),
+  createProvider: (data: ProviderInput) => req<Provider>("/providers", { method: "POST", body: JSON.stringify(data) }),
+  updateProvider: (id: string, data: ProviderInput) =>
+    req<Provider>(`/providers/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
   deleteProvider: (id: string) => req<{ ok: boolean }>(`/providers/${id}`, { method: "DELETE" }),
   createTask: (data: { title: string; description?: string; channel_id?: string | null; assignee_agent_id?: string | null }) =>
     req<Task>("/tasks", { method: "POST", body: JSON.stringify(data) }),
