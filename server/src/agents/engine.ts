@@ -1071,7 +1071,7 @@ async function streamRun(
       usage = await llmLoop(ctx, rt, userPrompt, maxIterations, emit, opts.extraSystem, opts.toolsOverride);
     }
     const usageJson = JSON.stringify(usage);
-    updateMessage(row.id, { content, status: "complete", usage_json: usageJson });
+    updateMessage(row.id, { content, status: "complete", usage_json: usageJson, model: rt.client ? rt.model : "mock" });
     broadcast({ type: "message:done", payload: { id: row.id, channel_id: channel.id, content, usage_json: usageJson } });
     status(agent, channel.id, "idle");
     return { ...row, content, status: "complete", reply_depth: depth };

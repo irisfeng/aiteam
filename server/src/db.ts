@@ -128,6 +128,7 @@ addColumnIfMissing("projects", "autonomy", "autonomy TEXT NOT NULL DEFAULT 'auto
 addColumnIfMissing("approvals", "kind", "kind TEXT NOT NULL DEFAULT 'action'");
 addColumnIfMissing("approvals", "ref_id", "ref_id TEXT");
 addColumnIfMissing("documents", "kind", "kind TEXT NOT NULL DEFAULT 'report'");
+addColumnIfMissing("messages", "model", "model TEXT NOT NULL DEFAULT ''");
 addColumnIfMissing("providers", "light_model", "light_model TEXT NOT NULL DEFAULT ''");
 addColumnIfMissing("tasks", "model_tier", "model_tier TEXT NOT NULL DEFAULT 'standard'");
 
@@ -175,6 +176,8 @@ export interface Message {
   status: "streaming" | "complete" | "error";
   reply_depth: number;
   usage_json: string | null;
+  /** 服务该消息的模型（模型归因，用量账本用） */
+  model: string;
   created_at: number;
 }
 export interface Task {
@@ -396,22 +399,72 @@ export function insertMessage(m: {
     status: m.status ?? "complete",
     reply_depth: m.reply_depth ?? 0,
     usage_json: null,
+    model: "",
     created_at: now(),
   };
   db.prepare(
-    "INSERT INTO messages (id, channel_id, author_type, author_id, content, status, reply_depth, usage_json, created_at) VALUES (@id, @channel_id, @author_type, @author_id, @content, @status, @reply_depth, @usage_json, @created_at)"
+    "INSERT INTO messages (id, channel_id, author_type, author_id, content, status, reply_depth, usage_json, model, created_at) VALUES (@id, @channel_id, @author_type, @author_id, @content, @status, @reply_depth, @usage_json, @model, @created_at)"
   ).run(msg);
   return msg;
 }
-export function updateMessage(id: string, fields: { content?: string; status?: Message["status"]; usage_json?: string | null }) {
+export function updateMessage(
+  id: string,
+  fields: { content?: string; status?: Message["status"]; usage_json?: string | null; model?: string }
+) {
   const cur = db.prepare("SELECT * FROM messages WHERE id = ?").get(id) as Message | undefined;
   if (!cur) return;
-  db.prepare("UPDATE messages SET content = ?, status = ?, usage_json = ? WHERE id = ?").run(
+  db.prepare("UPDATE messages SET content = ?, status = ?, usage_json = ?, model = ? WHERE id = ?").run(
     fields.content ?? cur.content,
     fields.status ?? cur.status,
     fields.usage_json !== undefined ? fields.usage_json : cur.usage_json,
+    fields.model ?? cur.model,
     id
   );
+}
+
+// ---- 用量统计（Helio 用量页同构：每日消耗 + 最近活动账本，含模型归因） ----
+export function usageDaily(days = 14): { date: string; input: number; output: number }[] {
+  const since = Date.now() - days * 86400_000;
+  const rows = db
+    .prepare("SELECT created_at, usage_json FROM messages WHERE author_type = 'agent' AND usage_json IS NOT NULL AND created_at >= ?")
+    .all(since) as { created_at: number; usage_json: string }[];
+  const byDay = new Map<string, { input: number; output: number }>();
+  for (const r of rows) {
+    const date = new Date(r.created_at).toLocaleDateString("sv-SE", { timeZone: "Asia/Shanghai" });
+    const s = byDay.get(date) ?? { input: 0, output: 0 };
+    try {
+      const u = JSON.parse(r.usage_json);
+      s.input += u.input_tokens ?? 0;
+      s.output += u.output_tokens ?? 0;
+    } catch { /* ignore */ }
+    byDay.set(date, s);
+  }
+  const out: { date: string; input: number; output: number }[] = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const date = new Date(Date.now() - i * 86400_000).toLocaleDateString("sv-SE", { timeZone: "Asia/Shanghai" });
+    out.push({ date, ...(byDay.get(date) ?? { input: 0, output: 0 }) });
+  }
+  return out;
+}
+export function usageRecent(limit = 40) {
+  return db
+    .prepare(
+      "SELECT id, channel_id, author_id, model, usage_json, created_at, substr(content, 1, 80) AS snippet FROM messages WHERE author_type = 'agent' AND usage_json IS NOT NULL ORDER BY created_at DESC LIMIT ?"
+    )
+    .all(limit) as { id: string; channel_id: string; author_id: string; model: string; usage_json: string; created_at: number; snippet: string }[];
+}
+
+// ---- 频道管理 ----
+export function renameChannel(id: string, name: string): Channel | undefined {
+  db.prepare("UPDATE channels SET name = ? WHERE id = ?").run(name, id);
+  return getChannel(id);
+}
+export function deleteChannel(id: string) {
+  db.prepare("UPDATE tasks SET channel_id = NULL WHERE channel_id = ?").run(id);
+  db.prepare("DELETE FROM messages WHERE channel_id = ?").run(id);
+  db.prepare("DELETE FROM channel_agents WHERE channel_id = ?").run(id);
+  db.prepare("DELETE FROM routines WHERE channel_id = ?").run(id);
+  db.prepare("DELETE FROM channels WHERE id = ?").run(id);
 }
 
 // ---- tasks ----

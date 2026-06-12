@@ -36,6 +36,7 @@ export interface Message {
   status: "streaming" | "complete" | "error";
   reply_depth: number;
   usage_json: string | null;
+  model?: string;
   created_at: number;
 }
 export interface Task {
@@ -100,4 +101,5 @@ export type View =
   | { kind: "tasks" }
   | { kind: "inbox" }
   | { kind: "docs" }
-  | { kind: "team" };
+  | { kind: "team" }
+  | { kind: "usage" };

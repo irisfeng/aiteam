@@ -142,17 +142,44 @@ export function Sidebar({
         <Item active={ws.view.kind === "team"} onClick={() => ws.setView({ kind: "team" })}>
           <span className="mr-1.5 font-mono text-[10.5px] text-ink-3">04</span>团队
         </Item>
+        <Item active={ws.view.kind === "usage"} onClick={() => ws.setView({ kind: "usage" })}>
+          <span className="mr-1.5 font-mono text-[10.5px] text-ink-3">05</span>用量
+        </Item>
 
         <SectionTitle onAdd={onNewChannel}>频道</SectionTitle>
         {channels.map((c) => (
-          <Item
+          <div
             key={c.id}
-            active={ws.view.kind === "channel" && ws.view.id === c.id}
-            onClick={() => ws.openChannel(c.id)}
+            className={`group flex w-full items-center gap-1 rounded-md px-3 py-1.5 text-[13.5px] ${
+              ws.view.kind === "channel" && ws.view.id === c.id
+                ? "bg-accent-soft font-medium text-ink"
+                : "text-ink-2 hover:bg-sel"
+            }`}
           >
-            <span className="text-ink-3"># </span>
-            {c.name}
-          </Item>
+            <button onClick={() => ws.openChannel(c.id)} className="min-w-0 flex-1 truncate text-left">
+              <span className="text-ink-3"># </span>
+              {c.name}
+            </button>
+            <button
+              onClick={() => {
+                const name = window.prompt("重命名频道", c.name);
+                if (name?.trim()) void ws.renameChannel(c.id, name.trim());
+              }}
+              className="rounded px-0.5 text-[11px] text-ink-3 opacity-0 hover:text-ink group-hover:opacity-100"
+              title="重命名频道"
+            >
+              ✎
+            </button>
+            <button
+              onClick={() => {
+                if (window.confirm(`删除频道 #${c.name}？消息记录将一并删除（任务与文档保留）。`)) void ws.deleteChannel(c.id);
+              }}
+              className="rounded px-0.5 text-[11px] text-ink-3 opacity-0 hover:text-red-500 group-hover:opacity-100"
+              title="删除频道"
+            >
+              ✕
+            </button>
+          </div>
         ))}
 
         <SectionTitle onAdd={onNewAgent}>AI 队友</SectionTitle>

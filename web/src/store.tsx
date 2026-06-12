@@ -42,6 +42,8 @@ type Action =
   | { type: "providers:set"; providers: Provider[] }
   | { type: "approval:upsert"; approval: Approval }
   | { type: "channel:new"; channel: Channel }
+  | { type: "channel:update"; channel: Channel }
+  | { type: "channel:delete"; id: string }
   | { type: "agent:new"; agent: Agent };
 
 const initial: State = {
@@ -144,6 +146,14 @@ function reducer(state: State, action: Action): State {
       return state.channels.some((c) => c.id === action.channel.id)
         ? state
         : { ...state, channels: [...state.channels, action.channel] };
+    case "channel:update":
+      return { ...state, channels: state.channels.map((c) => (c.id === action.channel.id ? action.channel : c)) };
+    case "channel:delete": {
+      const channels = state.channels.filter((c) => c.id !== action.id);
+      const view =
+        state.view.kind === "channel" && state.view.id === action.id ? ({ kind: "tasks" } as View) : state.view;
+      return { ...state, channels, view };
+    }
     case "agent:new":
       return state.agents.some((a) => a.id === action.agent.id)
         ? state
@@ -159,6 +169,8 @@ interface Store extends State {
   send: (channelId: string, content: string) => Promise<void>;
   openDm: (agentId: string) => Promise<void>;
   createChannel: (name: string, agentIds: string[]) => Promise<void>;
+  renameChannel: (id: string, name: string) => Promise<void>;
+  deleteChannel: (id: string) => Promise<void>;
   /** 从角色模板一键实例化（幂等），返回该 Agent */
   installTemplate: (templateId: string) => Promise<Agent>;
   createAgent: (data: {
@@ -237,6 +249,12 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
           case "channel:new":
             dispatch({ type: "channel:new", channel: payload });
             break;
+          case "channel:update":
+            dispatch({ type: "channel:update", channel: payload });
+            break;
+          case "channel:delete":
+            dispatch({ type: "channel:delete", id: payload.id });
+            break;
         }
       };
       ws.onclose = () => {
@@ -277,6 +295,14 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         const channel = await api.createChannel(name, agentIds);
         dispatch({ type: "channel:new", channel });
         openChannel(channel.id);
+      },
+      renameChannel: async (id, name) => {
+        const channel = await api.renameChannel(id, name);
+        dispatch({ type: "channel:update", channel });
+      },
+      deleteChannel: async (id) => {
+        await api.deleteChannel(id);
+        dispatch({ type: "channel:delete", id });
       },
       createAgent: async (data) => {
         const agent = await api.createAgent(data);

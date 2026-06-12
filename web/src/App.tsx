@@ -8,6 +8,7 @@ import { TasksBoard } from "./components/TasksBoard";
 import { InboxView } from "./components/InboxView";
 import { DocsView } from "./components/DocsView";
 import { TeamView } from "./components/TeamView";
+import { UsageView } from "./components/UsageView";
 import { NewAgentModal, NewChannelModal, SettingsModal } from "./components/Modals";
 
 export default function App() {
@@ -33,6 +34,7 @@ export default function App() {
         {ws.view.kind === "inbox" && <InboxView />}
         {ws.view.kind === "docs" && <DocsView />}
         {ws.view.kind === "team" && <TeamView onOpenProfile={setProfileAgent} />}
+        {ws.view.kind === "usage" && <UsageView />}
       </main>
       {modal === "channel" && <NewChannelModal onClose={() => setModal(null)} onCustomRole={() => setModal("agent")} />}
       {modal === "agent" && <NewAgentModal onClose={() => setModal(null)} />}

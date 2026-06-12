@@ -2,6 +2,10 @@ import { Router } from "express";
 import {
   clearMemory,
   createAgent,
+  deleteChannel,
+  renameChannel,
+  usageDaily,
+  usageRecent,
   createChannel,
   createTask,
   findDm,
@@ -122,6 +126,46 @@ api.post("/agents", (req, res) => {
   }
 });
 
+api.get("/usage", (_req, res) => {
+  const agents = Object.fromEntries(listAgents().map((a) => [a.id, a.name]));
+  res.json({
+    daily: usageDaily(14),
+    recent: usageRecent(40).map((r) => {
+      let input = 0, output = 0;
+      try {
+        const u = JSON.parse(r.usage_json);
+        input = u.input_tokens ?? 0;
+        output = u.output_tokens ?? 0;
+      } catch { /* ignore */ }
+      return {
+        ts: r.created_at,
+        agent: agents[r.author_id] ?? r.author_id,
+        model: r.model || "—",
+        snippet: r.snippet,
+        input,
+        output,
+      };
+    }),
+  });
+});
+
+api.patch("/channels/:id", (req, res) => {
+  const name = String(req.body?.name ?? "").trim().replace(/^#/, "");
+  if (!name) return res.status(400).json({ error: "name required" });
+  const channel = renameChannel(req.params.id, name);
+  if (!channel) return res.status(404).json({ error: "channel not found" });
+  broadcast({ type: "channel:update", payload: channel });
+  res.json(channel);
+});
+
+api.delete("/channels/:id", (req, res) => {
+  const channel = getChannel(req.params.id);
+  if (!channel) return res.status(404).json({ error: "channel not found" });
+  deleteChannel(channel.id);
+  broadcast({ type: "channel:delete", payload: { id: channel.id } });
+  res.json({ ok: true });
+});
+
 api.get("/agent-templates", (_req, res) => {
   const existing = new Set(listAgents().map((a) => a.name));
   res.json(
@@ -131,6 +175,7 @@ api.get("/agent-templates", (_req, res) => {
       emoji: t.emoji,
       role: t.role,
       desc: t.desc,
+      category: t.category,
       installed: existing.has(t.name),
     }))
   );

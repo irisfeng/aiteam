@@ -41,6 +41,7 @@ export interface AgentTemplateInfo {
   emoji: string;
   role: string;
   desc: string;
+  category: string;
   installed: boolean;
 }
 
@@ -55,6 +56,9 @@ export const api = {
   createChannel: (name: string, agent_ids: string[]) =>
     req<Channel>("/channels", { method: "POST", body: JSON.stringify({ name, agent_ids }) }),
   openDm: (agent_id: string) => req<Channel>("/dms", { method: "POST", body: JSON.stringify({ agent_id }) }),
+  renameChannel: (id: string, name: string) =>
+    req<Channel>(`/channels/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }),
+  deleteChannel: (id: string) => req<{ ok: boolean }>(`/channels/${id}`, { method: "DELETE" }),
   createAgent: (data: {
     name: string;
     emoji: string;

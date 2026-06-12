@@ -129,20 +129,23 @@ export function NewChannelModal({ onClose, onCustomRole }: { onClose: () => void
       {templates.some((t) => !t.installed) && (
         <>
           <label className={labelCls}>扩展角色模板（一键加入团队）</label>
-          <div className="flex flex-wrap gap-1.5">
-            {templates
-              .filter((t) => !t.installed)
-              .map((t) => (
-                <button
-                  key={t.id}
-                  onClick={() => void addTemplate(t)}
-                  className="rounded-full border border-line px-2.5 py-1 text-[12.5px] text-ink-2 transition-colors hover:border-accent/50 hover:text-ink"
-                  title={t.desc}
-                >
-                  {t.emoji} {t.name}
-                </button>
-              ))}
-          </div>
+          {[...new Set(templates.filter((t) => !t.installed).map((t) => t.category))].map((cat) => (
+            <div key={cat} className="mb-1.5 flex flex-wrap items-center gap-1.5">
+              <span className="w-8 shrink-0 font-mono text-[10px] text-ink-3">{cat}</span>
+              {templates
+                .filter((t) => !t.installed && t.category === cat)
+                .map((t) => (
+                  <button
+                    key={t.id}
+                    onClick={() => void addTemplate(t)}
+                    className="rounded-full border border-line px-2.5 py-1 text-[12.5px] text-ink-2 transition-colors hover:border-accent/50 hover:text-ink"
+                    title={t.desc}
+                  >
+                    {t.emoji} {t.name}
+                  </button>
+                ))}
+            </div>
+          ))}
         </>
       )}
       <button
