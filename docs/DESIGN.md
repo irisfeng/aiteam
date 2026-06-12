@@ -140,6 +140,22 @@ Helio（helio.im）自称 "the AI-native team workspace"。核心信息来自官
 - **模型分工**（choose model wisely）：验收与汇总是质量闭环的下限 → 强制走工作区
   最强通道；worker 按任务类型选；预算护栏防失控。
 
+### D.3 全景榜单交叉验证（2026-06，外部研究吸收）
+
+一份独立研究（ChatGPT）按"多 Agent 分工/调度/共享上下文/审批/治理/观测"标准给出榜单：
+商业 Top5 = Helio、Relevance AI、Microsoft Copilot Studio、Salesforce Agentforce、腾讯 Marvis；
+开源 Top5 = Paperclip、LangGraph、CrewAI、Microsoft Agent Framework、OpenAgents。
+其推荐路线（Paperclip 治理 + Helio 人机界面 + LangGraph/CrewAI 编排 + Marvis OS 上下文）
+与本项目已实现的架构一致，互为印证。吸收的增量结论：
+
+| 来源 | 精华 | 落点 |
+|---|---|---|
+| Helio 集成面 | 真干活靠集成（Slack/GitHub/Linear/Gmail/Claude Code/MCP…），**MCP 一个协议撬动工具生态** | **M5 首选：工作台级 MCP server 配置，工具注入工作循环** |
+| Microsoft Agent Framework | durability：长任务可恢复（AutoGen 已由其后继，HITL 三档思想保留） | **已实现：服务重启后自动恢复卡在 doing 的任务** |
+| OpenAgents / Paperclip | BYOA：外部 agent runtime（Claude Code/Codex…）经心跳/协议作为"同事"接入工作区 | M6 方向 |
+| Salesforce / Google ADK | 治理成熟度清单：Agent Identity / Registry / trace / Simulation & Evaluation | 企业化对标清单（远期） |
+| Relevance AI | "AI Workforce" 商业叙事；guardrails 与知识库 first-class | 产品叙事参考 |
+
 ---
 
 ## 二、产品定义

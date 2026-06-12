@@ -279,6 +279,15 @@ export function teamStatus() {
   });
 }
 
+/** Durability（借鉴 Microsoft Agent Framework）：服务重启时，恢复上次运行中被打断的任务。 */
+export function recoverInFlightTasks() {
+  const stuck = listTasks().filter((t) => t.status === "doing" && t.assignee_agent_id);
+  for (const task of stuck) {
+    if (task.channel_id) audit(task.channel_id, `🔁 服务重启，恢复执行任务「${task.title}」`);
+    onTaskAssigned(task);
+  }
+}
+
 /** 任务交付（review/done）后调用：解锁依赖它的任务，并检查项目是否可汇总。 */
 export function onTaskDelivered(task: Task) {
   for (const t of listTasks()) {
