@@ -31,7 +31,7 @@ const SCENES: { icon: string; name: string; desc: string; channel: string; roleK
   { icon: "🔬", name: "调研与报告", desc: "联网调研 → 分析报告 + 数据表", channel: "research", roleKeys: ["产品", "工程", "分析"], templateIds: ["analyst"] },
   { icon: "🚀", name: "产品立项", desc: "拆解分工 → 并行交付 → 汇总", channel: "project", roleKeys: ["产品", "工程", "评审"], templateIds: [] },
   { icon: "✍️", name: "内容与增长", desc: "选题 → 成文 → 校对 → SEO", channel: "content", roleKeys: ["SEO", "增长", "内容", "文案", "校对"], templateIds: ["writer", "proofreader"] },
-  { icon: "📑", name: "翻译与本地化", desc: "批量翻译 → 校对 → 术语表", channel: "translate", roleKeys: ["翻译", "校对"], templateIds: ["translator", "proofreader"] },
+  { icon: "🧰", name: "解决方案", desc: "需求澄清 → 选型对比 → 实施方案", channel: "solution", roleKeys: ["方案", "产品", "工程"], templateIds: ["solution"] },
 ];
 
 export function NewChannelModal({ onClose, onCustomRole }: { onClose: () => void; onCustomRole: () => void }) {
