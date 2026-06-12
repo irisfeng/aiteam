@@ -5,10 +5,13 @@ export function Composer({
   placeholder,
   agents,
   onSend,
+  contextHint,
 }: {
   placeholder: string;
   agents: Agent[];
   onSend: (content: string) => Promise<void>;
+  /** 下一轮对话上下文的估算 tokens（Osaurus 式余量表） */
+  contextHint?: number;
 }) {
   const [value, setValue] = useState("");
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
@@ -100,8 +103,13 @@ export function Composer({
           发送
         </button>
       </div>
-      <div className="mt-1.5 px-1 text-[11.5px] text-ink-3">
-        Enter 发送 · Shift+Enter 换行 · @ 指定 AI 同事
+      <div className="mt-1.5 flex items-center px-1 text-[11.5px] text-ink-3">
+        <span>Enter 发送 · Shift+Enter 换行 · @ 指定 AI 同事</span>
+        {contextHint !== undefined && contextHint > 0 && (
+          <span className="ml-auto font-mono text-[10.5px]" title="下一轮注入的频道上下文估算（窗口为最近 40 条）">
+            ~{contextHint >= 1000 ? `${(contextHint / 1000).toFixed(1)}k` : contextHint} ctx
+          </span>
+        )}
       </div>
     </div>
   );

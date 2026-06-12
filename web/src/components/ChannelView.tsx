@@ -94,6 +94,9 @@ export function ChannelView({ channelId }: { channelId: string }) {
 
   if (!channel) return null;
   const members = (channel.agent_ids ?? []).map((id) => ws.agentById(id)).filter(Boolean);
+  // 上下文余量表（Osaurus）：估算下一轮注入的频道转写体量（最近 40 条，中文 ≈ 1 字/token 粗估 ÷1.6）
+  const ctxChars = messages.slice(-40).reduce((n, m) => n + m.content.length, 0);
+  const ctxEstimate = Math.round(ctxChars / 1.6);
 
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col">
@@ -175,6 +178,7 @@ export function ChannelView({ channelId }: { channelId: string }) {
         placeholder={channel.kind === "dm" ? `给 ${channel.name} 发私信` : `发送到 #${channel.name}`}
         agents={members as NonNullable<(typeof members)[number]>[]}
         onSend={(content) => ws.send(channelId, content)}
+        contextHint={ctxEstimate}
       />
         </div>
         {panelOpen && channel.kind === "channel" && <ChannelPanel channelId={channelId} onOpenDoc={setOpenDoc} />}
