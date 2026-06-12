@@ -152,6 +152,8 @@ addColumnIfMissing("messages", "model", "model TEXT NOT NULL DEFAULT ''");
 addColumnIfMissing("messages", "reply_to", "reply_to TEXT");
 addColumnIfMissing("providers", "light_model", "light_model TEXT NOT NULL DEFAULT ''");
 addColumnIfMissing("tasks", "model_tier", "model_tier TEXT NOT NULL DEFAULT 'standard'");
+addColumnIfMissing("providers", "is_strong", "is_strong INTEGER NOT NULL DEFAULT 0");
+db.exec(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '')`);
 
 export interface Agent {
   id: string;
@@ -177,6 +179,8 @@ export interface Provider {
   /** 该端点是否支持 Anthropic 服务端联网工具（web_search/web_fetch）。官方恒为支持；
    *  部分兼容端点（如 DeepSeek）声明原生支持，可手动开启。 */
   web_tools: number;
+  /** 强通道标志：无官方 key 时，验收/汇总（preferStrong）优先走该供应商的 default_model */
+  is_strong: number;
   is_official: number;
   created_at: number;
 }
@@ -318,6 +322,7 @@ export function createProvider(p: {
   light_model?: string;
   max_tokens?: number;
   web_tools?: boolean;
+  is_strong?: boolean;
 }): Provider {
   const provider: Provider = {
     id: nanoid(10),
@@ -328,17 +333,18 @@ export function createProvider(p: {
     light_model: p.light_model ?? "",
     max_tokens: p.max_tokens && p.max_tokens > 0 ? p.max_tokens : 16000,
     web_tools: p.web_tools ? 1 : 0,
+    is_strong: p.is_strong ? 1 : 0,
     is_official: 0,
     created_at: now(),
   };
   db.prepare(
-    "INSERT INTO providers (id, name, base_url, api_key, default_model, light_model, max_tokens, web_tools, is_official, created_at) VALUES (@id, @name, @base_url, @api_key, @default_model, @light_model, @max_tokens, @web_tools, @is_official, @created_at)"
+    "INSERT INTO providers (id, name, base_url, api_key, default_model, light_model, max_tokens, web_tools, is_strong, is_official, created_at) VALUES (@id, @name, @base_url, @api_key, @default_model, @light_model, @max_tokens, @web_tools, @is_strong, @is_official, @created_at)"
   ).run(provider);
   return provider;
 }
 export function updateProvider(
   id: string,
-  fields: Partial<Pick<Provider, "name" | "base_url" | "default_model" | "light_model" | "max_tokens" | "web_tools">> & {
+  fields: Partial<Pick<Provider, "name" | "base_url" | "default_model" | "light_model" | "max_tokens" | "web_tools" | "is_strong">> & {
     /** 留空 = 保持原 key 不变 */
     api_key?: string;
   }
@@ -351,7 +357,7 @@ export function updateProvider(
     api_key: fields.api_key ? fields.api_key : cur.api_key,
   };
   db.prepare(
-    "UPDATE providers SET name = @name, base_url = @base_url, api_key = @api_key, default_model = @default_model, light_model = @light_model, max_tokens = @max_tokens, web_tools = @web_tools WHERE id = @id"
+    "UPDATE providers SET name = @name, base_url = @base_url, api_key = @api_key, default_model = @default_model, light_model = @light_model, max_tokens = @max_tokens, web_tools = @web_tools, is_strong = @is_strong WHERE id = @id"
   ).run(next);
   return next;
 }
@@ -369,9 +375,55 @@ export function sanitizeProvider(p: Provider) {
     light_model: p.light_model,
     max_tokens: p.max_tokens,
     web_tools: p.web_tools,
+    is_strong: p.is_strong,
     is_official: p.is_official,
     has_key: Boolean(p.api_key),
   };
+}
+
+// ---- app settings（服务端键值配置）与图像生成供应商 ----
+export function getSetting(key: string): string {
+  const row = db.prepare("SELECT value FROM app_settings WHERE key = ?").get(key) as { value: string } | undefined;
+  return row?.value ?? "";
+}
+export function setSetting(key: string, value: string) {
+  db.prepare(
+    "INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+  ).run(key, value);
+}
+
+/** 图像生成供应商（Seedream 等 OpenAI images/generations 协议端点），key 只存服务端 */
+export interface ImageProvider {
+  base_url: string;
+  api_key: string;
+  model: string;
+}
+export function getImageProvider(): ImageProvider {
+  try {
+    const raw = JSON.parse(getSetting("image_provider") || "{}");
+    return {
+      base_url: String(raw.base_url ?? ""),
+      api_key: String(raw.api_key ?? ""),
+      model: String(raw.model ?? ""),
+    };
+  } catch {
+    return { base_url: "", api_key: "", model: "" };
+  }
+}
+export function setImageProvider(p: { base_url?: string; api_key?: string; model?: string }): ImageProvider {
+  const cur = getImageProvider();
+  const next: ImageProvider = {
+    base_url: (p.base_url ?? cur.base_url).trim().replace(/\/$/, ""),
+    // 留空 = 保持原 key；传 "-" 显式清除
+    api_key: p.api_key === "-" ? "" : p.api_key ? p.api_key.trim() : cur.api_key,
+    model: (p.model ?? cur.model).trim(),
+  };
+  setSetting("image_provider", JSON.stringify(next));
+  return next;
+}
+/** 给前端的脱敏视图：永不下发 api_key */
+export function sanitizeImageProvider(p: ImageProvider) {
+  return { base_url: p.base_url, model: p.model, has_key: Boolean(p.api_key) };
 }
 
 // ---- channels ----

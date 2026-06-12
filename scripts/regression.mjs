@@ -195,6 +195,37 @@ try {
     }
   }
 
+  // Q1 真 .pptx 导出（slides → 可编辑 pptx，zip 头校验）
+  {
+    const slides = (await J("/documents")).body.find((d) => d.kind === "slides");
+    const res = await fetch(`${BASE}/documents/${slides.id}/pptx`);
+    const buf = Buffer.from(await res.arrayBuffer());
+    const isZip = buf[0] === 0x50 && buf[1] === 0x4b; // "PK"
+    const report = (await J("/documents")).body.find((d) => d.kind === "report");
+    const rejected = !(await fetch(`${BASE}/documents/${report.id}/pptx`)).ok;
+    check("Q1", "真 .pptx 导出：slides 出合法 zip 包，report 被拒", res.ok && isZip && rejected,
+      `${buf.length} bytes`);
+  }
+
+  // Q2 图像生成供应商配置：key 只存服务端
+  {
+    const saved = (await J("/image-provider", { method: "PUT", body: JSON.stringify({ api_key: "img-secret-y", model: "doubao-seedream-5-0-260128" }) })).body;
+    const got = (await J("/image-provider")).body;
+    const dump = JSON.stringify((await J("/bootstrap")).body) + JSON.stringify(got);
+    const leak = dump.includes("img-secret-y");
+    await J("/image-provider", { method: "PUT", body: JSON.stringify({ api_key: "-" }) }); // 清除
+    const offAgain = !(await J("/image-provider")).body.has_key;
+    check("Q2", "图像生成配置：保存/读取/清除，key 永不下发", saved.has_key && got.model.includes("seedream") && !leak && offAgain);
+  }
+
+  // Q3 强通道标志 is_strong 全链路
+  {
+    const prov = (await J("/providers", { method: "POST", body: JSON.stringify({ name: "回归strong", api_key: "sk-s", default_model: "m-pro", is_strong: true }) })).body;
+    const off = (await J(`/providers/${prov.id}`, { method: "PATCH", body: JSON.stringify({ is_strong: false }) })).body;
+    await J(`/providers/${prov.id}`, { method: "DELETE" });
+    check("Q3", "强通道标志：创建/编辑往返", prov.is_strong === 1 && off.is_strong === 0);
+  }
+
   // 用量 / 导出 / 模板幂等 / 频道管理 / 记忆 / 供应商脱敏
   {
     const usage = (await J("/usage")).body;

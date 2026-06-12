@@ -37,12 +37,15 @@ import {
 } from "../db.js";
 import { broadcast } from "../bus.js";
 import { callMcpTool, isMcpTool, mcpToolDefs } from "./mcp.js";
+import { IMAGE_TOOL, generateImage, imageGenAvailable } from "./images.js";
 
 const MAX_CHAIN_DEPTH = Number(process.env.AGENT_CHAIN_DEPTH ?? 2);
 const MAX_REVISIONS = Number(process.env.TASK_MAX_REVISIONS ?? 1);
 const TRANSCRIPT_WINDOW = 30;
 /** 每次运行的 MCP 插件调用上限（外部检索按次计费，防烧爆） */
 const MCP_CALLS_PER_RUN = Number(process.env.AITEAM_MCP_CALLS_PER_RUN ?? 5);
+/** 每次运行的图片生成上限（文生图按张计费） */
+const IMAGES_PER_RUN = Number(process.env.AITEAM_IMAGES_PER_RUN ?? 3);
 const MAX_WORK_ITERATIONS = 8;
 const MAX_CONCURRENT_WORK = 8;
 
@@ -105,16 +108,6 @@ interface RuntimeOpts {
  */
 function resolveRuntime(agent: Agent, opts: RuntimeOpts = {}): Runtime {
   const light = opts.tier === "light";
-  if (opts.preferStrong && envClient) {
-    return {
-      client: envClient,
-      official: true,
-      webTools: true,
-      providerId: null,
-      model: process.env.AITEAM_STRONG_MODEL || "claude-opus-4-8",
-      maxTokens: 16000,
-    };
-  }
   const fromProvider = (p: NonNullable<ReturnType<typeof getProvider>>, agentModel: string): Runtime => ({
     client: new Anthropic({ apiKey: p.api_key, baseURL: p.base_url || undefined }),
     official: !p.base_url, // 自定义 base_url 一律按"非官方"做缓存等门控
@@ -123,6 +116,21 @@ function resolveRuntime(agent: Agent, opts: RuntimeOpts = {}): Runtime {
     model: light ? p.light_model || p.default_model || agentModel : agentModel || p.default_model || "claude-opus-4-8",
     maxTokens: p.max_tokens || 16000,
   });
+  if (opts.preferStrong) {
+    if (envClient) {
+      return {
+        client: envClient,
+        official: true,
+        webTools: true,
+        providerId: null,
+        model: process.env.AITEAM_STRONG_MODEL || "claude-opus-4-8",
+        maxTokens: 16000,
+      };
+    }
+    // 无官方 key：用户标记了「强通道」的供应商承担验收/汇总（用其 default_model 全力档）
+    const strong = listProviders().find((p) => p.api_key && p.is_strong);
+    if (strong) return fromProvider(strong, strong.default_model || agent.model);
+  }
   if (agent.provider_id) {
     const p = getProvider(agent.provider_id);
     if (p?.api_key) return fromProvider(p, agent.model);
@@ -442,7 +450,7 @@ function buildWorkBrief(task: Task, channel: Channel): string {
     `工作要求：`,
     `1. 开工前先查阅你的长期记忆（见系统上下文），其中"核实过的事实/通用规则"优先遵循；`,
     `2. 如需要事实、数据或最新外部信息，先用 web_search / web_fetch 或可用插件调研，不要凭空编造；外部检索按次计费——先想清楚要查什么、合并关键词，单任务尽量不超过 3 次；能从已有文档（read_document）获得的不要重复检索。研究/写作类任务按"多视角列问题 → 搭大纲 → 成文"推进，重要事实注明来源；`,
-    `3. 用 write_document 产出完整、可直接使用的交付物，按任务性质选格式 kind：报告/方案用 report，需要演示就交 slides（Marp 分页），数据/报表交 sheet（CSV）——必要时可以多份组合（如 report + slides）；正文要详尽，逐条覆盖验收标准；`,
+    `3. 用 write_document 产出完整、可直接使用的交付物，按任务性质选格式 kind：报告/方案用 report，需要演示就交 slides（Marp 分页），数据/报表交 sheet（CSV）——必要时可以多份组合（如 report + slides）；正文要详尽，逐条覆盖验收标准；${imageGenAvailable() ? "需要视觉表达（封面/概念示意/PPT 配图）时可用 generate_image 生成 1-2 张点睛配图，把返回的 Markdown 图片行原样放进交付物正文（数据图表交 sheet 即可，不要用文生图画图表）；" : ""}`,
     `4. 交付前用 save_memory 记录至多 1 条本次任务沉淀的「核实过的事实」或「通用规则」（不要记流水账）；`,
     `5. 在回复正文给出简短交付摘要：做了什么、关键结论、需要谁跟进什么；`,
     `6. 任务状态由系统管理，不要调用 update_task 改本任务状态；关单（done）只能由人类完成；`,
@@ -1063,6 +1071,7 @@ function toolLabel(name: string): string {
     case "save_memory": return "正在沉淀经验…";
     case "schedule_routine": return "正在设置例行任务…";
     case "submit_verdict": return "正在提交验收裁决…";
+    case "generate_image": return "正在生成配图…";
     default: {
       const mcp = name.match(/^mcp__(.+?)__(.+)$/);
       return mcp ? `正在使用插件 ${mcp[1]}:${mcp[2]}…` : `正在使用 ${name}…`;
@@ -1171,7 +1180,12 @@ async function llmLoop(
     }
   }
   const buildTools = (): Anthropic.ToolUnion[] =>
-    toolsOverride ?? [...TOOLS, ...(rt.webTools ? webToolsFor(webStage) : []), ...mcpDefs];
+    toolsOverride ?? [
+      ...TOOLS,
+      ...(imageGenAvailable() ? [IMAGE_TOOL] : []),
+      ...(rt.webTools ? webToolsFor(webStage) : []),
+      ...mcpDefs,
+    ];
   let tools: Anthropic.ToolUnion[] = buildTools();
   const isWebTool = (t: Anthropic.ToolUnion) => "type" in t && typeof t.type === "string" && t.type.startsWith("web_");
   // 兼容端点不接受服务端内容块（搜索结果/server tool 等）回传——回传前剥离，只保留文本与客户端工具调用
@@ -1184,6 +1198,7 @@ async function llmLoop(
   let steerSince = Date.now(); // 运行中插话：此刻之后的用户消息会注入下一轮迭代
   let transientRetries = 0; // 瞬时网络错误（terminated/重置/5xx）重试计数
   let mcpCalls = 0; // 本次运行已消耗的外部插件调用数
+  let imageCalls = 0; // 本次运行已生成的图片数（按张计费，设上限）
 
   for (let iteration = 0; iteration < maxIterations; iteration++) {
     // 停止开关：在迭代边界停下（标志位由 runTaskWork 消费并落状态）
@@ -1266,6 +1281,14 @@ async function llmLoop(
           } else {
             mcpCalls++;
             result = await callMcpTool(tu.name, tu.input);
+          }
+        } else if (tu.name === "generate_image") {
+          if (imageCalls >= IMAGES_PER_RUN) {
+            result = `⚠️ 本次运行的图片生成已达上限（${IMAGES_PER_RUN} 张，按张计费）。请用已生成的图完成交付。`;
+          } else {
+            imageCalls++;
+            result = await generateImage(tu.input);
+            audit(channel.id, `🎨 ${agent.name} 生成了一张配图（${String((tu.input as any)?.prompt ?? "").slice(0, 60)}）`);
           }
         } else {
           result = execTool(ctx, tu.name, tu.input);

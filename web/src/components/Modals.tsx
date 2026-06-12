@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useWorkspace } from "../store";
-import { api, type AgentTemplateInfo } from "../api";
+import { api, type AgentTemplateInfo, type ImageProviderInfo } from "../api";
 import { McpTab, SkillsTab } from "./IntegrationsTabs";
 
 function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
@@ -276,6 +276,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [lightModel, setLightModel] = useState("");
   const [maxTokens, setMaxTokens] = useState("");
   const [webTools, setWebTools] = useState(false);
+  const [isStrong, setIsStrong] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -288,6 +289,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     setLightModel("");
     setMaxTokens("");
     setWebTools(false);
+    setIsStrong(false);
     setError("");
   }
 
@@ -302,6 +304,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     setLightModel(p.light_model ?? "");
     setMaxTokens(p.max_tokens && p.max_tokens !== 16000 ? String(p.max_tokens) : "");
     setWebTools(Boolean(p.web_tools));
+    setIsStrong(Boolean(p.is_strong));
     setError("");
   }
 
@@ -318,6 +321,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       light_model: lightModel.trim(),
       max_tokens: Number(maxTokens) || undefined,
       web_tools: webTools,
+      is_strong: isStrong,
     };
     try {
       if (editingId) await ws.updateProvider(editingId, data);
@@ -435,6 +439,11 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         该端点支持服务端联网工具（web_search/web_fetch）。DeepSeek 官方 Anthropic 端点声明原生支持，可勾选；
         若实测不支持会自动停用并继续工作。
       </label>
+      <label className="mt-2 flex cursor-pointer items-center gap-2 text-[12.5px] text-ink-2">
+        <input type="checkbox" checked={isStrong} onChange={(e) => setIsStrong(e.target.checked)} />
+        ⭐ 用作强通道：没有官方 Anthropic key 时，验收与项目汇总优先走该供应商的默认模型
+        （质量闭环的下限，建议指给最强的一家）。
+      </label>
       {error && <div className="mt-2 text-[12px] text-red-500">{error}</div>}
       <button
         onClick={() => void submit()}
@@ -443,8 +452,86 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       >
         {editingId ? "保存修改" : "添加供应商"}
       </button>
+
+      <ImageProviderSection />
         </div>
       )}
     </Modal>
+  );
+}
+
+/** 图像生成供应商（Seedream / 火山方舟，OpenAI images 协议）。配置后全员获得 generate_image 工具。 */
+function ImageProviderSection() {
+  const [info, setInfo] = useState<ImageProviderInfo | null>(null);
+  const [baseUrl, setBaseUrl] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [model, setModel] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    api.getImageProvider().then((p) => {
+      setInfo(p);
+      setBaseUrl(p.base_url);
+      setModel(p.model);
+    }).catch(() => undefined);
+  }, []);
+
+  async function save() {
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const next = await api.saveImageProvider({ base_url: baseUrl, api_key: apiKey, model });
+      setInfo((prev) => ({ ...next, default_base_url: prev?.default_base_url }));
+      setApiKey("");
+    } catch (e: any) {
+      setError(e?.message ?? "保存失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-5 border-t border-line pt-4">
+      <div className="flex items-center gap-2 text-[12.5px] font-medium text-ink">
+        🎨 图像生成（Seedream）
+        {info?.has_key && <span className="rounded bg-sel px-1.5 py-px font-mono text-[10px] text-accent">已启用</span>}
+      </div>
+      <div className="mt-1 text-[12px] leading-relaxed text-ink-3">
+        接入字节火山方舟的 Seedream 文生图后，AI 同事获得 generate_image 工具，可为报告/PPT 生成配图
+        （按张计费，单次运行上限 3 张）。在方舟控制台开通 Seedream 并创建接入点，把接入点 ID 填到模型一栏。
+      </div>
+      <label className={labelCls}>Base URL</label>
+      <input
+        value={baseUrl}
+        onChange={(e) => setBaseUrl(e.target.value)}
+        placeholder={info?.default_base_url || "https://ark.cn-beijing.volces.com/api/v3"}
+        className={inputCls}
+      />
+      <label className={labelCls}>API Key（仅存服务端，不会下发前端）</label>
+      <input
+        value={apiKey}
+        onChange={(e) => setApiKey(e.target.value)}
+        type="password"
+        placeholder={info?.has_key ? "留空 = 保持原 Key 不变" : "方舟 API Key"}
+        className={inputCls}
+      />
+      <label className={labelCls}>模型 / 接入点 ID</label>
+      <input
+        value={model}
+        onChange={(e) => setModel(e.target.value)}
+        placeholder="例如 doubao-seedream-5-0-260128（以方舟控制台为准）"
+        className={inputCls}
+      />
+      {error && <div className="mt-2 text-[12px] text-red-500">{error}</div>}
+      <button
+        onClick={() => void save()}
+        disabled={busy || (!info?.has_key && !apiKey.trim()) || !model.trim()}
+        className="mt-3 w-full rounded-lg border border-accent/50 py-1.5 text-[13px] font-medium text-accent hover:bg-accent-soft disabled:opacity-40"
+      >
+        保存图像生成配置
+      </button>
+    </div>
   );
 }

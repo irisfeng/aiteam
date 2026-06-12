@@ -40,14 +40,20 @@ import {
   createProvider,
   deleteProvider,
   deleteRoutine,
+  getDocument,
+  getImageProvider,
   getProvider,
   listDocuments,
   listProjects,
   listProviders,
   listRoutines,
+  sanitizeImageProvider,
   sanitizeProvider,
+  setImageProvider,
   updateProvider,
 } from "./db.js";
+import { slidesToPptx } from "./pptx.js";
+import { DEFAULT_IMAGE_BASE_URL } from "./agents/images.js";
 import {
   isMock,
   onMessage,
@@ -74,6 +80,7 @@ api.get("/bootstrap", (_req, res) => {
     projects: listProjects(),
     skills: listSkills(),
     mcp_servers: listMcpServers().map(sanitizeMcpServer),
+    image_provider: sanitizeImageProvider(getImageProvider()),
   });
 });
 
@@ -290,7 +297,7 @@ api.post("/agents/from-template", (req, res) => {
 });
 
 api.post("/providers", (req, res) => {
-  const { name, base_url, api_key, default_model, light_model, max_tokens, web_tools } = req.body ?? {};
+  const { name, base_url, api_key, default_model, light_model, max_tokens, web_tools, is_strong } = req.body ?? {};
   if (!name || !api_key) return res.status(400).json({ error: "name and api_key required" });
   const provider = createProvider({
     name: String(name).trim(),
@@ -300,12 +307,13 @@ api.post("/providers", (req, res) => {
     light_model: String(light_model ?? "").trim(),
     max_tokens: Number(max_tokens) || undefined,
     web_tools: Boolean(web_tools),
+    is_strong: Boolean(is_strong),
   });
   res.json(sanitizeProvider(provider));
 });
 
 api.patch("/providers/:id", (req, res) => {
-  const { name, base_url, api_key, default_model, light_model, max_tokens, web_tools } = req.body ?? {};
+  const { name, base_url, api_key, default_model, light_model, max_tokens, web_tools, is_strong } = req.body ?? {};
   const provider = updateProvider(req.params.id, {
     ...(name !== undefined ? { name: String(name).trim() } : {}),
     ...(base_url !== undefined ? { base_url: String(base_url).trim().replace(/\/$/, "") } : {}),
@@ -314,6 +322,7 @@ api.patch("/providers/:id", (req, res) => {
     ...(light_model !== undefined ? { light_model: String(light_model).trim() } : {}),
     ...(max_tokens !== undefined ? { max_tokens: Number(max_tokens) || 16000 } : {}),
     ...(web_tools !== undefined ? { web_tools: web_tools ? 1 : 0 } : {}),
+    ...(is_strong !== undefined ? { is_strong: is_strong ? 1 : 0 } : {}),
   });
   if (!provider) return res.status(404).json({ error: "provider not found" });
   res.json(sanitizeProvider(provider));
@@ -367,6 +376,35 @@ api.post("/tasks/:id/stop", (req, res) => {
 });
 
 api.get("/documents", (_req, res) => res.json(listDocuments()));
+
+/** slides 文档导出为真 .pptx（可编辑文本 + Hive 主题 + 讲者备注 + 嵌入生成图） */
+api.get("/documents/:id/pptx", (req, res) => {
+  const doc = getDocument(req.params.id);
+  if (!doc) return res.status(404).json({ error: "document not found" });
+  if (doc.kind !== "slides") return res.status(400).json({ error: "only slides documents can be exported as pptx" });
+  slidesToPptx(doc)
+    .then((buf) => {
+      const filename = encodeURIComponent(doc.title.replace(/[\\/:*?"<>|]/g, "_") + ".pptx");
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.presentationml.presentation");
+      res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${filename}`);
+      res.send(buf);
+    })
+    .catch((err) => res.status(500).json({ error: String(err?.message ?? err) }));
+});
+
+/** 图像生成供应商（Seedream / OpenAI images 协议）：key 只存服务端 */
+api.get("/image-provider", (_req, res) =>
+  res.json({ ...sanitizeImageProvider(getImageProvider()), default_base_url: DEFAULT_IMAGE_BASE_URL })
+);
+api.put("/image-provider", (req, res) => {
+  const { base_url, api_key, model } = req.body ?? {};
+  const next = setImageProvider({
+    ...(base_url !== undefined ? { base_url: String(base_url) } : {}),
+    ...(api_key !== undefined ? { api_key: String(api_key) } : {}),
+    ...(model !== undefined ? { model: String(model) } : {}),
+  });
+  res.json(sanitizeImageProvider(next));
+});
 
 api.get("/team", (_req, res) => res.json({ members: teamStatus(), routines: listRoutines() }));
 

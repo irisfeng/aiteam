@@ -8,6 +8,7 @@ import { api } from "./routes.js";
 import { attachBus } from "./bus.js";
 import { seedIfEmpty } from "./seed.js";
 import { isMock, recoverInFlightTasks, startScheduler } from "./agents/engine.js";
+import { assetsDir } from "./agents/images.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 8787);
@@ -19,6 +20,7 @@ recoverInFlightTasks();
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 app.use("/api", api);
+app.use("/assets", express.static(assetsDir, { maxAge: "30d", immutable: true })); // 生成图资产
 
 // 生产模式下托管前端构建产物
 const webDist = join(__dirname, "..", "..", "web", "dist");

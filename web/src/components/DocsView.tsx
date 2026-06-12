@@ -1,4 +1,5 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import * as echarts from "echarts";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useWorkspace } from "../store";
@@ -109,32 +110,96 @@ function splitSlides(content: string): string[] {
   return pages.filter((p, i) => p !== "" && !(i === 0 && isFrontmatter(p)));
 }
 
+const num = (v: unknown) => parseFloat(String(v ?? "").replace(/[%,￥$\s]/g, ""));
+
+function cssVar(name: string, fallback: string) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
+
+/** ECharts 数据可视化：自动识别全部数值列（多系列），柱/折线/饼三种视图，跟随主题色 */
 function SheetChart({ rows }: { rows: string[][] }) {
-  const [head, ...body] = rows;
-  // 取第一列为标签，第一个"多数行可解析为数字"的列为数值
-  let valueCol = -1;
+  const [head, ...allBody] = rows;
+  const body = allBody.slice(0, 60);
+  const [type, setType] = useState<"bar" | "line" | "pie">("bar");
+  const ref = useRef<HTMLDivElement>(null);
+
+  // 数值列 = 60% 以上行可解析为数字的列（第一列固定作为标签）
+  const valueCols: number[] = [];
   for (let c = 1; c < head.length; c++) {
-    const ok = body.filter((r) => r[c] !== undefined && r[c] !== "" && !isNaN(parseFloat(String(r[c]).replace(/[%,￥$]/g, ""))));
-    if (ok.length >= Math.max(1, body.length * 0.6)) { valueCol = c; break; }
+    const ok = body.filter((r) => r[c] !== undefined && r[c] !== "" && !isNaN(num(r[c])));
+    if (ok.length >= Math.max(1, body.length * 0.6)) valueCols.push(c);
   }
-  if (valueCol === -1) return <div className="text-[12.5px] text-ink-3">没有可作图的数值列，请切回表格视图。</div>;
-  const items = body.slice(0, 30).map((r) => ({
-    label: r[0] ?? "",
-    value: parseFloat(String(r[valueCol] ?? "0").replace(/[%,￥$]/g, "")) || 0,
-  }));
-  const max = Math.max(1, ...items.map((i) => Math.abs(i.value)));
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || valueCols.length === 0) return;
+    const ink = cssVar("--t-ink", "#26241f");
+    const dim = cssVar("--t-dim", "#8a877e");
+    const line = cssVar("--t-line", "#e6e3db");
+    const accent = cssVar("--t-accent", "#c28a1e");
+    const palette = [accent, "#7c9a6d", "#5e87b0", "#b06a5e", "#8a7ab0", "#b0985e"];
+    const labels = body.map((r) => r[0] ?? "");
+    const chart = echarts.init(el);
+    const axisStyle = {
+      axisLabel: { color: dim, fontSize: 11 },
+      axisLine: { lineStyle: { color: line } },
+      splitLine: { lineStyle: { color: line } },
+    };
+    chart.setOption({
+      color: palette,
+      textStyle: { color: ink },
+      tooltip: { trigger: type === "pie" ? "item" : "axis", textStyle: { fontSize: 12 } },
+      legend: valueCols.length > 1 || type === "pie"
+        ? { textStyle: { color: dim, fontSize: 11 }, top: 0 }
+        : undefined,
+      grid: type === "pie" ? undefined : { left: 8, right: 16, top: valueCols.length > 1 ? 32 : 16, bottom: 8, containLabel: true },
+      xAxis: type === "pie" ? undefined : { type: "category", data: labels, ...axisStyle },
+      yAxis: type === "pie" ? undefined : { type: "value", ...axisStyle },
+      series:
+        type === "pie"
+          ? [{
+              type: "pie",
+              radius: ["32%", "68%"],
+              label: { color: ink, fontSize: 11, formatter: "{b}: {c}" },
+              data: body.map((r) => ({ name: r[0] ?? "", value: Math.abs(num(r[valueCols[0]])) || 0 })),
+            }]
+          : valueCols.map((c) => ({
+              name: head[c],
+              type,
+              smooth: type === "line",
+              barMaxWidth: 28,
+              data: body.map((r) => num(r[c]) || 0),
+            })),
+    });
+    const onResize = () => chart.resize();
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      chart.dispose();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [type, rows]);
+
+  if (valueCols.length === 0)
+    return <div className="text-[12.5px] text-ink-3">没有可作图的数值列，请切回表格视图。</div>;
   return (
     <div>
-      <div className="mb-2 text-[12px] text-ink-3">{head[0]} × {head[valueCol]}（前 {items.length} 行）</div>
-      <div className="flex flex-col gap-1.5">
-        {items.map((it, i) => (
-          <div key={i} className="flex items-center gap-2">
-            <span className="w-36 shrink-0 truncate text-right text-[12px] text-ink-2" title={it.label}>{it.label}</span>
-            <div className="h-4 rounded bg-accent/80" style={{ width: `${(Math.abs(it.value) / max) * 100}%`, minWidth: 2 }} />
-            <span className="font-mono text-[11px] text-ink-2">{it.value.toLocaleString()}</span>
-          </div>
+      <div className="mb-2 flex items-center gap-1">
+        {(["bar", "line", "pie"] as const).map((t) => (
+          <button
+            key={t}
+            onClick={() => setType(t)}
+            className={`rounded px-2 py-0.5 text-[12px] ${type === t ? "bg-sel font-medium text-ink" : "text-ink-3 hover:bg-sel/60"}`}
+          >
+            {t === "bar" ? "柱状" : t === "line" ? "折线" : "饼图"}
+          </button>
         ))}
+        <span className="ml-2 text-[11.5px] text-ink-3">
+          {head[0]} × {type === "pie" ? head[valueCols[0]] : valueCols.map((c) => head[c]).join("、")}（前 {body.length} 行）
+        </span>
       </div>
+      <div ref={ref} style={{ height: Math.max(280, Math.min(460, body.length * 14 + 120)) }} />
     </div>
   );
 }
@@ -242,6 +307,15 @@ export function DocViewerModal({ doc, onClose }: { doc: Doc; onClose: () => void
           >
             ⬇{doc.kind === "sheet" && !doc.content.trimStart().startsWith("|") ? " .csv" : " .md"}
           </button>
+          {doc.kind === "slides" && (
+            <a
+              href={`/api/documents/${doc.id}/pptx`}
+              className="rounded-lg border border-accent/50 px-2.5 py-1 text-[12px] font-medium text-accent hover:bg-accent-soft"
+              title="导出真 .pptx：可编辑文本、主题配色、讲者备注、嵌入配图，PowerPoint/WPS/Keynote 直接打开"
+            >
+              ⬇ .pptx
+            </a>
+          )}
           <button
             onClick={() => contentRef.current && exportWord(doc.title, contentRef.current.innerHTML)}
             className="rounded-lg border border-line px-2.5 py-1 text-[12px] text-ink-2 hover:bg-sel"

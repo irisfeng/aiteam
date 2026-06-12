@@ -16,6 +16,7 @@ export interface Provider {
   light_model: string;
   max_tokens: number;
   web_tools: number;
+  is_strong: number;
   is_official: number;
   has_key: boolean;
 }

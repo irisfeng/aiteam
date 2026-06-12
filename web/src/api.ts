@@ -33,6 +33,14 @@ export interface ProviderInput {
   light_model?: string;
   max_tokens?: number;
   web_tools?: boolean;
+  is_strong?: boolean;
+}
+
+export interface ImageProviderInfo {
+  base_url: string;
+  model: string;
+  has_key: boolean;
+  default_base_url?: string;
 }
 
 export interface AgentTemplateInfo {
@@ -75,6 +83,9 @@ export const api = {
   updateProvider: (id: string, data: ProviderInput) =>
     req<Provider>(`/providers/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
   deleteProvider: (id: string) => req<{ ok: boolean }>(`/providers/${id}`, { method: "DELETE" }),
+  getImageProvider: () => req<ImageProviderInfo>("/image-provider"),
+  saveImageProvider: (data: { base_url?: string; api_key?: string; model?: string }) =>
+    req<ImageProviderInfo>("/image-provider", { method: "PUT", body: JSON.stringify(data) }),
   createTask: (data: { title: string; description?: string; channel_id?: string | null; assignee_agent_id?: string | null }) =>
     req<Task>("/tasks", { method: "POST", body: JSON.stringify(data) }),
   updateTask: (id: string, data: Partial<Pick<Task, "title" | "description" | "status" | "assignee_agent_id">>) =>
