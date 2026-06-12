@@ -35,7 +35,19 @@ export interface ProviderInput {
   web_tools?: boolean;
 }
 
+export interface AgentTemplateInfo {
+  id: string;
+  name: string;
+  emoji: string;
+  role: string;
+  desc: string;
+  installed: boolean;
+}
+
 export const api = {
+  listAgentTemplates: () => req<AgentTemplateInfo[]>("/agent-templates"),
+  createAgentFromTemplate: (template_id: string) =>
+    req<Agent>("/agents/from-template", { method: "POST", body: JSON.stringify({ template_id }) }),
   bootstrap: () => req<Bootstrap>("/bootstrap"),
   messages: (channelId: string) => req<Message[]>(`/channels/${channelId}/messages`),
   send: (channelId: string, content: string) =>

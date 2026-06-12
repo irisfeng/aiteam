@@ -34,7 +34,7 @@ export default function App() {
         {ws.view.kind === "docs" && <DocsView />}
         {ws.view.kind === "team" && <TeamView onOpenProfile={setProfileAgent} />}
       </main>
-      {modal === "channel" && <NewChannelModal onClose={() => setModal(null)} />}
+      {modal === "channel" && <NewChannelModal onClose={() => setModal(null)} onCustomRole={() => setModal("agent")} />}
       {modal === "agent" && <NewAgentModal onClose={() => setModal(null)} />}
       {modal === "settings" && <SettingsModal onClose={() => setModal(null)} />}
       {profileAgent && <AgentProfileModal agent={profileAgent} onClose={() => setProfileAgent(null)} />}

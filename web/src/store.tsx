@@ -145,7 +145,9 @@ function reducer(state: State, action: Action): State {
         ? state
         : { ...state, channels: [...state.channels, action.channel] };
     case "agent:new":
-      return { ...state, agents: [...state.agents, action.agent] };
+      return state.agents.some((a) => a.id === action.agent.id)
+        ? state
+        : { ...state, agents: [...state.agents, action.agent] };
     default:
       return state;
   }
@@ -157,6 +159,8 @@ interface Store extends State {
   send: (channelId: string, content: string) => Promise<void>;
   openDm: (agentId: string) => Promise<void>;
   createChannel: (name: string, agentIds: string[]) => Promise<void>;
+  /** 从角色模板一键实例化（幂等），返回该 Agent */
+  installTemplate: (templateId: string) => Promise<Agent>;
   createAgent: (data: {
     name: string;
     emoji: string;
@@ -277,6 +281,11 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       createAgent: async (data) => {
         const agent = await api.createAgent(data);
         dispatch({ type: "agent:new", agent });
+      },
+      installTemplate: async (templateId) => {
+        const agent = await api.createAgentFromTemplate(templateId);
+        dispatch({ type: "agent:new", agent });
+        return agent;
       },
       createProvider: async (data) => {
         const provider = await api.createProvider(data);

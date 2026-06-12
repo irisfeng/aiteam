@@ -1,6 +1,6 @@
 import { createAgent, createChannel, insertMessage, listAgents, listChannels } from "./db.js";
 
-const SHARED_RULES = `
+export const SHARED_RULES = `
 你在一个名为 AITeam 的团队工作台中作为 AI 同事工作，与人类用户和其他 AI 同事在频道里协作。
 
 工作守则：

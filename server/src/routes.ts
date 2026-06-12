@@ -18,6 +18,7 @@ import {
   updateTask,
 } from "./db.js";
 import { broadcast } from "./bus.js";
+import { AGENT_TEMPLATES, getTemplate } from "./agents/templates.js";
 import {
   createProvider,
   deleteProvider,
@@ -119,6 +120,34 @@ api.post("/agents", (req, res) => {
   } catch (err: any) {
     res.status(400).json({ error: err?.message ?? "create failed" });
   }
+});
+
+api.get("/agent-templates", (_req, res) => {
+  const existing = new Set(listAgents().map((a) => a.name));
+  res.json(
+    AGENT_TEMPLATES.map((t) => ({
+      id: t.id,
+      name: t.name,
+      emoji: t.emoji,
+      role: t.role,
+      desc: t.desc,
+      installed: existing.has(t.name),
+    }))
+  );
+});
+
+api.post("/agents/from-template", (req, res) => {
+  const template = getTemplate(String(req.body?.template_id ?? ""));
+  if (!template) return res.status(404).json({ error: "template not found" });
+  const existing = listAgents().find((a) => a.name === template.name);
+  if (existing) return res.json(existing); // 幂等：已实例化则直接返回
+  const agent = createAgent({
+    name: template.name,
+    emoji: template.emoji,
+    role: template.role,
+    system_prompt: template.system_prompt,
+  });
+  res.json(agent);
 });
 
 api.post("/providers", (req, res) => {

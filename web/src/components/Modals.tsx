@@ -1,5 +1,6 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useWorkspace } from "../store";
+import { api, type AgentTemplateInfo } from "../api";
 
 function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
   return (
@@ -24,30 +25,46 @@ const inputCls =
   "w-full rounded-lg border border-line bg-panel px-3 py-2 text-[13.5px] outline-none focus:border-accent/50";
 const labelCls = "mb-1 mt-3 block text-[12.5px] font-medium text-ink-2 first:mt-0";
 
-/** 场景组队模板（Hive 设计：3-4 张场景卡一键组队，零输入成本；按角色关键词匹配现有成员） */
-const SCENES: { icon: string; name: string; desc: string; channel: string; roleKeys: string[] }[] = [
-  { icon: "🔬", name: "调研与报告", desc: "联网调研 → 分析报告", channel: "research", roleKeys: ["产品", "工程"] },
-  { icon: "🚀", name: "产品立项", desc: "拆解分工 → 并行交付 → 汇总", channel: "project", roleKeys: ["产品", "工程", "评审"] },
-  { icon: "✍️", name: "内容与增长", desc: "选题 → 成文 → SEO 优化", channel: "content", roleKeys: ["产品", "SEO", "增长", "内容"] },
-  { icon: "🔍", name: "评审把关", desc: "方案/交付物的独立核验", channel: "review", roleKeys: ["评审", "工程"] },
+/** 场景组队模板（Hive 设计：3-4 张场景卡一键组队，零输入成本）。
+ *  roleKeys 匹配已有成员；templateIds 指向角色模板库——选卡时自动实例化。 */
+const SCENES: { icon: string; name: string; desc: string; channel: string; roleKeys: string[]; templateIds: string[] }[] = [
+  { icon: "🔬", name: "调研与报告", desc: "联网调研 → 分析报告 + 数据表", channel: "research", roleKeys: ["产品", "工程", "分析"], templateIds: ["analyst"] },
+  { icon: "🚀", name: "产品立项", desc: "拆解分工 → 并行交付 → 汇总", channel: "project", roleKeys: ["产品", "工程", "评审"], templateIds: [] },
+  { icon: "✍️", name: "内容与增长", desc: "选题 → 成文 → 校对 → SEO", channel: "content", roleKeys: ["SEO", "增长", "内容", "文案", "校对"], templateIds: ["writer", "proofreader"] },
+  { icon: "📑", name: "翻译与本地化", desc: "批量翻译 → 校对 → 术语表", channel: "translate", roleKeys: ["翻译", "校对"], templateIds: ["translator", "proofreader"] },
 ];
 
-export function NewChannelModal({ onClose }: { onClose: () => void }) {
+export function NewChannelModal({ onClose, onCustomRole }: { onClose: () => void; onCustomRole: () => void }) {
   const ws = useWorkspace();
   const [name, setName] = useState("");
   const [scene, setScene] = useState<number | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set(ws.agents.map((a) => a.id)));
+  const [templates, setTemplates] = useState<AgentTemplateInfo[]>([]);
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api.listAgentTemplates().then(setTemplates).catch(() => undefined);
+  }, [ws.agents.length]);
 
   function sceneAgents(i: number) {
     const keys = SCENES[i].roleKeys;
     return ws.agents.filter((a) => keys.some((k) => a.name.includes(k) || a.role.includes(k)));
   }
 
-  function pickScene(i: number) {
+  async function pickScene(i: number) {
     setScene(i);
-    setSelected(new Set(sceneAgents(i).map((a) => a.id)));
+    // 场景需要的模板角色未实例化时自动添加（幂等）
+    const added = await Promise.all(SCENES[i].templateIds.map((id) => ws.installTemplate(id).catch(() => null)));
+    const ids = new Set(sceneAgents(i).map((a) => a.id));
+    for (const a of added) if (a) ids.add(a.id);
+    setSelected(ids);
     if (!name.trim() || SCENES.some((s) => s.channel === name.trim())) setName(SCENES[i].channel);
+  }
+
+  async function addTemplate(tpl: AgentTemplateInfo) {
+    const agent = await ws.installTemplate(tpl.id);
+    setSelected((prev) => new Set(prev).add(agent.id));
+    setTemplates((ts) => ts.map((t) => (t.id === tpl.id ? { ...t, installed: true } : t)));
   }
 
   async function create() {
@@ -109,10 +126,38 @@ export function NewChannelModal({ onClose }: { onClose: () => void }) {
           </label>
         ))}
       </div>
+      {templates.some((t) => !t.installed) && (
+        <>
+          <label className={labelCls}>扩展角色模板（一键加入团队）</label>
+          <div className="flex flex-wrap gap-1.5">
+            {templates
+              .filter((t) => !t.installed)
+              .map((t) => (
+                <button
+                  key={t.id}
+                  onClick={() => void addTemplate(t)}
+                  className="rounded-full border border-line px-2.5 py-1 text-[12.5px] text-ink-2 transition-colors hover:border-accent/50 hover:text-ink"
+                  title={t.desc}
+                >
+                  {t.emoji} {t.name}
+                </button>
+              ))}
+          </div>
+        </>
+      )}
+      <button
+        onClick={() => {
+          onClose();
+          onCustomRole();
+        }}
+        className="mt-3 w-full rounded-lg border border-dashed border-line py-1.5 text-[12.5px] text-ink-3 hover:border-accent/40 hover:text-ink-2"
+      >
+        ✚ 创作自定义角色（自拟人设与工作方式）
+      </button>
       <button
         onClick={() => void create()}
         disabled={!name.trim() || busy}
-        className="mt-4 w-full rounded-lg bg-accent py-2 text-[13.5px] font-medium text-white disabled:opacity-40"
+        className="mt-3 w-full rounded-lg bg-accent py-2 text-[13.5px] font-medium text-white disabled:opacity-40"
       >
         创建频道
       </button>
