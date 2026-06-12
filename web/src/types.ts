@@ -83,6 +83,7 @@ export interface Doc {
   agent_id: string | null;
   title: string;
   content: string;
+  kind: "report" | "slides" | "sheet";
   created_at: number;
   updated_at: number;
 }

@@ -127,6 +127,7 @@ addColumnIfMissing("providers", "web_tools", "web_tools INTEGER NOT NULL DEFAULT
 addColumnIfMissing("projects", "autonomy", "autonomy TEXT NOT NULL DEFAULT 'auto'");
 addColumnIfMissing("approvals", "kind", "kind TEXT NOT NULL DEFAULT 'action'");
 addColumnIfMissing("approvals", "ref_id", "ref_id TEXT");
+addColumnIfMissing("documents", "kind", "kind TEXT NOT NULL DEFAULT 'report'");
 
 export interface Agent {
   id: string;
@@ -541,6 +542,8 @@ export interface Doc {
   agent_id: string | null;
   title: string;
   content: string;
+  /** report = Markdown 报告；slides = Marp 风格演示文稿（--- 分页）；sheet = CSV/表格数据 */
+  kind: "report" | "slides" | "sheet";
   created_at: number;
   updated_at: number;
 }
@@ -556,6 +559,7 @@ export function createDocument(d: {
   agent_id?: string | null;
   title: string;
   content: string;
+  kind?: Doc["kind"];
 }): Doc {
   const doc: Doc = {
     id: nanoid(10),
@@ -564,11 +568,12 @@ export function createDocument(d: {
     agent_id: d.agent_id ?? null,
     title: d.title,
     content: d.content,
+    kind: d.kind ?? "report",
     created_at: now(),
     updated_at: now(),
   };
   db.prepare(
-    "INSERT INTO documents (id, channel_id, task_id, agent_id, title, content, created_at, updated_at) VALUES (@id, @channel_id, @task_id, @agent_id, @title, @content, @created_at, @updated_at)"
+    "INSERT INTO documents (id, channel_id, task_id, agent_id, title, content, kind, created_at, updated_at) VALUES (@id, @channel_id, @task_id, @agent_id, @title, @content, @kind, @created_at, @updated_at)"
   ).run(doc);
   return doc;
 }

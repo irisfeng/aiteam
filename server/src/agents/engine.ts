@@ -389,7 +389,7 @@ function buildWorkBrief(task: Task, channel: Channel): string {
     `工作要求：`,
     `1. 开工前先查阅你的长期记忆（见系统上下文），其中"核实过的事实/通用规则"优先遵循；`,
     `2. 如需要事实、数据或最新外部信息，先用 web_search / web_fetch 调研，不要凭空编造；研究/写作类任务建议按"多视角列问题 → 搭大纲 → 成文"推进，重要事实注明来源；`,
-    `3. 用 write_document 产出一份完整、可直接使用的交付物文档（Markdown 正文要详尽，逐条覆盖验收标准）；`,
+    `3. 用 write_document 产出完整、可直接使用的交付物，按任务性质选格式 kind：报告/方案用 report，需要演示就交 slides（Marp 分页），数据/报表交 sheet（CSV）——必要时可以多份组合（如 report + slides）；正文要详尽，逐条覆盖验收标准；`,
     `4. 交付前用 save_memory 记录至多 1 条本次任务沉淀的「核实过的事实」或「通用规则」（不要记流水账）；`,
     `5. 在回复正文给出简短交付摘要：做了什么、关键结论、需要谁跟进什么；`,
     `6. 任务状态由系统管理，不要调用 update_task 改本任务状态；关单（done）只能由人类完成；`,
@@ -688,12 +688,13 @@ const TOOLS: Anthropic.ToolUnion[] = [
   {
     name: "write_document",
     description:
-      "把一份正式交付物（报告、PRD、方案、评估等）写入工作区文档库。文档应当完整、可直接使用，而不是片段。",
+      "把一份正式交付物写入工作区文档库。文档应当完整、可直接使用，而不是片段。按交付物性质选择 kind：report=报告/PRD/方案（Markdown）；slides=演示文稿（Marp 约定：每页之间用单独一行 --- 分隔，首页为标题页，每页一个要点群，可直接生成 PPT）；sheet=表格/报表（标准 CSV：首行表头，逗号分隔，含逗号的字段用双引号包裹，可直接导入 Excel）。",
     input_schema: {
       type: "object" as const,
       properties: {
         title: { type: "string", description: "文档标题" },
-        content: { type: "string", description: "完整的 Markdown 正文" },
+        content: { type: "string", description: "完整正文：report 为 Markdown；slides 为 --- 分页的 Marp Markdown；sheet 为 CSV" },
+        kind: { type: "string", enum: ["report", "slides", "sheet"], description: "交付物格式，默认 report" },
       },
       required: ["title", "content"],
     },
@@ -854,17 +855,20 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
       return `已更新任务（id: ${task.id}，状态: ${task.status}）`;
     }
     case "write_document": {
+      const kind = ["report", "slides", "sheet"].includes(input.kind) ? input.kind : "report";
       const doc = createDocument({
         channel_id: channel.id,
         task_id: ctx.taskId,
         agent_id: agent.id,
         title: String(input.title ?? "未命名").slice(0, 200),
         content: String(input.content ?? ""),
+        kind,
       });
       ctx.createdDocIds.push(doc.id);
       broadcast({ type: "doc:upsert", payload: doc });
-      audit(channel.id, `📄 ${agent.name} 写好了文档《${doc.title}》（${doc.content.length} 字）`);
-      return `文档已保存（id: ${doc.id}）。`;
+      const kindLabel = kind === "slides" ? "演示文稿" : kind === "sheet" ? "数据表" : "文档";
+      audit(channel.id, `${kind === "slides" ? "🖥️" : kind === "sheet" ? "📊" : "📄"} ${agent.name} 写好了${kindLabel}《${doc.title}》（${doc.content.length} 字）`);
+      return `${kindLabel}已保存（id: ${doc.id}，kind: ${kind}）。`;
     }
     case "read_document": {
       const doc = getDocument(String(input.doc_id));
