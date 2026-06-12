@@ -166,7 +166,7 @@ function reducer(state: State, action: Action): State {
 interface Store extends State {
   setView: (v: View) => void;
   openChannel: (id: string) => void;
-  send: (channelId: string, content: string) => Promise<void>;
+  send: (channelId: string, content: string, replyTo?: string | null) => Promise<void>;
   openDm: (agentId: string) => Promise<void>;
   createChannel: (name: string, agentIds: string[]) => Promise<void>;
   renameChannel: (id: string, name: string) => Promise<void>;
@@ -283,8 +283,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       ...state,
       setView: (view) => dispatch({ type: "view", view }),
       openChannel,
-      send: async (channelId, content) => {
-        await api.send(channelId, content);
+      send: async (channelId, content, replyTo) => {
+        await api.send(channelId, content, replyTo);
       },
       openDm: async (agentId) => {
         const channel = await api.openDm(agentId);

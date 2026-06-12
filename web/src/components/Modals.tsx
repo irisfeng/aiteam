@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useWorkspace } from "../store";
 import { api, type AgentTemplateInfo } from "../api";
+import { McpTab, SkillsTab } from "./IntegrationsTabs";
 
 function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
   return (
@@ -266,6 +267,7 @@ export function NewAgentModal({ onClose }: { onClose: () => void }) {
 
 export function SettingsModal({ onClose }: { onClose: () => void }) {
   const ws = useWorkspace();
+  const [tab, setTab] = useState<"providers" | "mcp" | "skills">("providers");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
@@ -328,8 +330,26 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     }
   }
 
+  const tabBtn = (key: typeof tab, label: string) => (
+    <button
+      onClick={() => setTab(key)}
+      className={`rounded-lg px-3 py-1 text-[13px] ${tab === key ? "bg-sel font-medium text-ink" : "text-ink-2 hover:bg-sel/60"}`}
+    >
+      {label}
+    </button>
+  );
+
   return (
-    <Modal title="模型供应商" onClose={onClose}>
+    <Modal title="设置" onClose={onClose}>
+      <div className="mb-3 flex gap-1 border-b border-line pb-2">
+        {tabBtn("providers", "模型供应商")}
+        {tabBtn("mcp", "MCP 插件")}
+        {tabBtn("skills", "技能")}
+      </div>
+      {tab === "mcp" && <McpTab />}
+      {tab === "skills" && <SkillsTab />}
+      {tab === "providers" && (
+        <div>
       <div className="text-[12.5px] leading-relaxed text-ink-2">
         默认推荐 Anthropic 官方（环境变量 <code className="rounded bg-panel px-1">ANTHROPIC_API_KEY</code>）。
         也可接入任何 <span className="font-medium">Anthropic 协议兼容</span>端点：DeepSeek / GLM / Kimi /
@@ -423,6 +443,8 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       >
         {editingId ? "保存修改" : "添加供应商"}
       </button>
+        </div>
+      )}
     </Modal>
   );
 }

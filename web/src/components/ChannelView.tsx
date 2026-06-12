@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useWorkspace } from "../store";
-import type { Doc, Task } from "../types";
+import type { Doc, Message, Task } from "../types";
 import { MessageItem } from "./MessageItem";
 import { Composer } from "./Composer";
 import { AgentAvatar } from "./Avatar";
@@ -79,6 +79,7 @@ export function ChannelView({ channelId }: { channelId: string }) {
   const [pinned, setPinned] = useState(true);
   const [panelOpen, setPanelOpen] = useState(() => localStorage.getItem("aiteam-panel") !== "off");
   const [openDoc, setOpenDoc] = useState<Doc | null>(null);
+  const [replyTarget, setReplyTarget] = useState<Message | null>(null);
 
   function togglePanel() {
     setPanelOpen((o) => {
@@ -139,7 +140,7 @@ export function ChannelView({ channelId }: { channelId: string }) {
           </div>
         )}
         {messages.map((m) => (
-          <MessageItem key={m.id} message={m} />
+          <MessageItem key={m.id} message={m} onReply={setReplyTarget} />
         ))}
       </div>
 
@@ -177,8 +178,20 @@ export function ChannelView({ channelId }: { channelId: string }) {
       <Composer
         placeholder={channel.kind === "dm" ? `给 ${channel.name} 发私信` : `发送到 #${channel.name}`}
         agents={members as NonNullable<(typeof members)[number]>[]}
-        onSend={(content) => ws.send(channelId, content)}
+        onSend={async (content) => {
+          await ws.send(channelId, content, replyTarget?.id ?? null);
+          setReplyTarget(null);
+        }}
         contextHint={ctxEstimate}
+        replyTo={
+          replyTarget
+            ? {
+                author: replyTarget.author_type === "user" ? ws.user.name : ws.agentById(replyTarget.author_id)?.name ?? "AI",
+                snippet: replyTarget.content.slice(0, 60),
+                onCancel: () => setReplyTarget(null),
+              }
+            : undefined
+        }
       />
         </div>
         {panelOpen && channel.kind === "channel" && <ChannelPanel channelId={channelId} onOpenDoc={setOpenDoc} />}

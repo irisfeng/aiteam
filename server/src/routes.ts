@@ -2,8 +2,19 @@ import { Router } from "express";
 import {
   clearMemory,
   createAgent,
+  createMcpServer,
+  createSkill,
   deleteChannel,
+  deleteMcpServer,
+  deleteSkill,
+  getMcpServer,
+  getMessage,
+  listMcpServers,
+  listSkills,
   renameChannel,
+  sanitizeMcpServer,
+  setMcpServerEnabled,
+  updateSkill,
   usageDaily,
   usageRecent,
   createChannel,
@@ -23,6 +34,7 @@ import {
 } from "./db.js";
 import { broadcast } from "./bus.js";
 import { AGENT_TEMPLATES, getTemplate } from "./agents/templates.js";
+import { dropConnection, testMcpServer } from "./agents/mcp.js";
 import {
   createProvider,
   deleteProvider,
@@ -59,6 +71,8 @@ api.get("/bootstrap", (_req, res) => {
     approvals: listApprovals(),
     documents: listDocuments(),
     projects: listProjects(),
+    skills: listSkills(),
+    mcp_servers: listMcpServers().map(sanitizeMcpServer),
   });
 });
 
@@ -73,7 +87,12 @@ api.post("/channels/:id/messages", (req, res) => {
   if (!channel) return res.status(404).json({ error: "channel not found" });
   const content = String(req.body?.content ?? "").trim();
   if (!content) return res.status(400).json({ error: "content required" });
-  const msg = insertMessage({ channel_id: channel.id, author_type: "user", author_id: "user", content });
+  let replyTo: string | null = null;
+  if (req.body?.reply_to) {
+    const target = getMessage(String(req.body.reply_to));
+    if (target && target.channel_id === channel.id) replyTo = target.id;
+  }
+  const msg = insertMessage({ channel_id: channel.id, author_type: "user", author_id: "user", content, reply_to: replyTo });
   broadcast({ type: "message:new", payload: msg });
   onMessage(msg);
   res.json(msg);
@@ -124,6 +143,70 @@ api.post("/agents", (req, res) => {
   } catch (err: any) {
     res.status(400).json({ error: err?.message ?? "create failed" });
   }
+});
+
+api.get("/mcp-servers", (_req, res) => res.json(listMcpServers().map(sanitizeMcpServer)));
+
+api.post("/mcp-servers", (req, res) => {
+  const { name, kind, url, auth_token, command, args } = req.body ?? {};
+  if (!name) return res.status(400).json({ error: "name required" });
+  if (kind === "stdio" && !command) return res.status(400).json({ error: "command required for stdio" });
+  if (kind !== "stdio" && !url) return res.status(400).json({ error: "url required for http" });
+  const server = createMcpServer({
+    name: String(name).trim(),
+    kind: kind === "stdio" ? "stdio" : "http",
+    url: String(url ?? "").trim(),
+    auth_token: String(auth_token ?? "").trim(),
+    command: String(command ?? "").trim(),
+    args: Array.isArray(args) ? args.map(String) : String(args ?? "").split(/\s+/).filter(Boolean),
+  });
+  res.json(sanitizeMcpServer(server));
+});
+
+api.post("/mcp-servers/:id/toggle", (req, res) => {
+  const server = setMcpServerEnabled(req.params.id, Boolean(req.body?.enabled));
+  if (!server) return res.status(404).json({ error: "not found" });
+  if (!server.enabled) dropConnection(server.id);
+  res.json(sanitizeMcpServer(server));
+});
+
+api.post("/mcp-servers/:id/test", (req, res) => {
+  const server = getMcpServer(req.params.id);
+  if (!server) return res.status(404).json({ error: "not found" });
+  testMcpServer(server)
+    .then((count) => res.json({ ok: true, tools: count }))
+    .catch((err) => res.status(502).json({ error: String(err?.message ?? err) }));
+});
+
+api.delete("/mcp-servers/:id", (req, res) => {
+  dropConnection(req.params.id);
+  deleteMcpServer(req.params.id);
+  res.json({ ok: true });
+});
+
+api.get("/skills", (_req, res) => res.json(listSkills()));
+
+api.post("/skills", (req, res) => {
+  const { name, desc, content } = req.body ?? {};
+  if (!name || !content) return res.status(400).json({ error: "name and content required" });
+  res.json(createSkill({ name: String(name).trim(), desc: String(desc ?? "").trim(), content: String(content) }));
+});
+
+api.patch("/skills/:id", (req, res) => {
+  const { enabled, name, desc, content } = req.body ?? {};
+  const skill = updateSkill(req.params.id, {
+    ...(enabled !== undefined ? { enabled: Boolean(enabled) } : {}),
+    ...(name !== undefined ? { name: String(name) } : {}),
+    ...(desc !== undefined ? { desc: String(desc) } : {}),
+    ...(content !== undefined ? { content: String(content) } : {}),
+  });
+  if (!skill) return res.status(404).json({ error: "not found" });
+  res.json(skill);
+});
+
+api.delete("/skills/:id", (req, res) => {
+  deleteSkill(req.params.id); // builtin 不可删（SQL 层保护）
+  res.json({ ok: true });
 });
 
 api.get("/usage", (_req, res) => {

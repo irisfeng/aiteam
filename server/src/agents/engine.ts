@@ -11,6 +11,7 @@ import {
   getProvider,
   listProviders,
   listRoutines,
+  listSkills,
   markRoutineRun,
   createApproval,
   createDocument,
@@ -20,6 +21,7 @@ import {
   getChannel,
   getDocument,
   getMemory,
+  getMessage,
   getProject,
   getTask,
   insertMessage,
@@ -34,6 +36,7 @@ import {
   updateTask,
 } from "../db.js";
 import { broadcast } from "../bus.js";
+import { callMcpTool, isMcpTool, mcpToolDefs } from "./mcp.js";
 
 const MAX_CHAIN_DEPTH = Number(process.env.AGENT_CHAIN_DEPTH ?? 2);
 const MAX_REVISIONS = Number(process.env.TASK_MAX_REVISIONS ?? 1);
@@ -608,7 +611,16 @@ function authorLabel(m: Message): string {
 
 function buildTranscript(channelId: string, window = TRANSCRIPT_WINDOW): string {
   const msgs = listMessages(channelId, window).filter((m) => m.status !== "streaming");
-  return msgs.map((m) => `[${fmtTime(m.created_at)}] ${authorLabel(m)}: ${m.content}`).join("\n\n");
+  return msgs
+    .map((m) => {
+      let quote = "";
+      if (m.reply_to) {
+        const target = getMessage(m.reply_to);
+        if (target) quote = `[回复 ${authorLabel(target)} 的消息「${target.content.slice(0, 40)}…」] `;
+      }
+      return `[${fmtTime(m.created_at)}] ${authorLabel(m)}: ${quote}${m.content}`;
+    })
+    .join("\n\n");
 }
 
 function buildDynamicContext(agent: Agent, channel: Channel): string {
@@ -629,6 +641,16 @@ function buildDynamicContext(agent: Agent, channel: Channel): string {
     .map((d) => `- 《${d.title}》（id: ${d.id}，作者: ${d.agent_id ? getAgent(d.agent_id)?.name ?? "?" : "用户"}）`)
     .join("\n");
   const memory = getMemory(agent.id);
+  // 技能（Osaurus）：横切的工作方法，启用后注入所有同事；总量封顶防上下文膨胀
+  let skillsBlock = "";
+  let skillBudget = 4000;
+  for (const sk of listSkills()) {
+    if (!sk.enabled) continue;
+    const piece = `### 技能：${sk.name}\n${sk.content}`;
+    if (piece.length > skillBudget) break;
+    skillBudget -= piece.length;
+    skillsBlock += (skillsBlock ? "\n\n" : "") + piece;
+  }
   const nowStr = new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
   return [
     `## 当前工作区上下文`,
@@ -638,6 +660,7 @@ function buildDynamicContext(agent: Agent, channel: Channel): string {
     tasks ? `频道任务看板：\n${tasks}` : `任务看板目前为空。`,
     docs ? `工作区文档（可用 read_document 阅读全文）：\n${docs}` : "",
     memory ? `## 你的长期记忆（先查阅，"核实过的事实/通用规则"优先遵循）\n${memory}` : "",
+    skillsBlock ? `## 已启用的工作方法（执行任务时遵循）\n${skillsBlock}` : "",
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -1015,7 +1038,10 @@ function toolLabel(name: string): string {
     case "save_memory": return "正在沉淀经验…";
     case "schedule_routine": return "正在设置例行任务…";
     case "submit_verdict": return "正在提交验收裁决…";
-    default: return `正在使用 ${name}…`;
+    default: {
+      const mcp = name.match(/^mcp__(.+?)__(.+)$/);
+      return mcp ? `正在使用插件 ${mcp[1]}:${mcp[2]}…` : `正在使用 ${name}…`;
+    }
   }
 }
 
@@ -1110,6 +1136,13 @@ async function llmLoop(
   ];
   const messages: Anthropic.MessageParam[] = [{ role: "user", content: userPrompt }];
   let tools: Anthropic.ToolUnion[] = toolsOverride ?? (rt.webTools ? [...TOOLS, ...WEB_TOOLS] : [...TOOLS]);
+  if (!toolsOverride) {
+    try {
+      tools = [...tools, ...(await mcpToolDefs())]; // MCP 插件工具（懒连接，失败自动跳过）
+    } catch (err) {
+      console.error("[engine] mcp tools unavailable:", err);
+    }
+  }
   const isWebTool = (t: Anthropic.ToolUnion) => "type" in t && typeof t.type === "string" && t.type.startsWith("web_");
 
   const usage = { input_tokens: 0, output_tokens: 0 };
@@ -1193,7 +1226,7 @@ async function llmLoop(
       status(agent, channel.id, "tool", toolLabel(tu.name));
       let result: string;
       try {
-        result = execTool(ctx, tu.name, tu.input);
+        result = isMcpTool(tu.name) ? await callMcpTool(tu.name, tu.input) : execTool(ctx, tu.name, tu.input);
       } catch (err: any) {
         result = `工具执行失败：${err?.message ?? err}`;
       }

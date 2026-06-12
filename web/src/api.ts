@@ -51,8 +51,11 @@ export const api = {
     req<Agent>("/agents/from-template", { method: "POST", body: JSON.stringify({ template_id }) }),
   bootstrap: () => req<Bootstrap>("/bootstrap"),
   messages: (channelId: string) => req<Message[]>(`/channels/${channelId}/messages`),
-  send: (channelId: string, content: string) =>
-    req<Message>(`/channels/${channelId}/messages`, { method: "POST", body: JSON.stringify({ content }) }),
+  send: (channelId: string, content: string, replyTo?: string | null) =>
+    req<Message>(`/channels/${channelId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ content, reply_to: replyTo ?? undefined }),
+    }),
   createChannel: (name: string, agent_ids: string[]) =>
     req<Channel>("/channels", { method: "POST", body: JSON.stringify({ name, agent_ids }) }),
   openDm: (agent_id: string) => req<Channel>("/dms", { method: "POST", body: JSON.stringify({ agent_id }) }),

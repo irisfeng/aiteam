@@ -91,6 +91,26 @@ CREATE TABLE IF NOT EXISTS providers (
   is_official INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS mcp_servers (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'http',
+  url TEXT NOT NULL DEFAULT '',
+  auth_token TEXT NOT NULL DEFAULT '',
+  command TEXT NOT NULL DEFAULT '',
+  args_json TEXT NOT NULL DEFAULT '[]',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS skills (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  desc TEXT NOT NULL DEFAULT '',
+  content TEXT NOT NULL DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 0,
+  builtin INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS routines (
   id TEXT PRIMARY KEY,
   channel_id TEXT NOT NULL,
@@ -129,6 +149,7 @@ addColumnIfMissing("approvals", "kind", "kind TEXT NOT NULL DEFAULT 'action'");
 addColumnIfMissing("approvals", "ref_id", "ref_id TEXT");
 addColumnIfMissing("documents", "kind", "kind TEXT NOT NULL DEFAULT 'report'");
 addColumnIfMissing("messages", "model", "model TEXT NOT NULL DEFAULT ''");
+addColumnIfMissing("messages", "reply_to", "reply_to TEXT");
 addColumnIfMissing("providers", "light_model", "light_model TEXT NOT NULL DEFAULT ''");
 addColumnIfMissing("tasks", "model_tier", "model_tier TEXT NOT NULL DEFAULT 'standard'");
 
@@ -178,6 +199,28 @@ export interface Message {
   usage_json: string | null;
   /** 服务该消息的模型（模型归因，用量账本用） */
   model: string;
+  /** 引用回复的目标消息 id */
+  reply_to: string | null;
+  created_at: number;
+}
+export interface McpServer {
+  id: string;
+  name: string;
+  kind: "http" | "stdio";
+  url: string;
+  auth_token: string;
+  command: string;
+  args_json: string;
+  enabled: number;
+  created_at: number;
+}
+export interface Skill {
+  id: string;
+  name: string;
+  desc: string;
+  content: string;
+  enabled: number;
+  builtin: number;
   created_at: number;
 }
 export interface Task {
@@ -389,6 +432,7 @@ export function insertMessage(m: {
   content?: string;
   status?: Message["status"];
   reply_depth?: number;
+  reply_to?: string | null;
 }): Message {
   const msg: Message = {
     id: nanoid(12),
@@ -400,12 +444,104 @@ export function insertMessage(m: {
     reply_depth: m.reply_depth ?? 0,
     usage_json: null,
     model: "",
+    reply_to: m.reply_to ?? null,
     created_at: now(),
   };
   db.prepare(
-    "INSERT INTO messages (id, channel_id, author_type, author_id, content, status, reply_depth, usage_json, model, created_at) VALUES (@id, @channel_id, @author_type, @author_id, @content, @status, @reply_depth, @usage_json, @model, @created_at)"
+    "INSERT INTO messages (id, channel_id, author_type, author_id, content, status, reply_depth, usage_json, model, reply_to, created_at) VALUES (@id, @channel_id, @author_type, @author_id, @content, @status, @reply_depth, @usage_json, @model, @reply_to, @created_at)"
   ).run(msg);
   return msg;
+}
+export function getMessage(id: string): Message | undefined {
+  return db.prepare("SELECT * FROM messages WHERE id = ?").get(id) as Message | undefined;
+}
+
+// ---- MCP servers ----
+export function listMcpServers(): McpServer[] {
+  return db.prepare("SELECT * FROM mcp_servers ORDER BY created_at").all() as McpServer[];
+}
+export function getMcpServer(id: string): McpServer | undefined {
+  return db.prepare("SELECT * FROM mcp_servers WHERE id = ?").get(id) as McpServer | undefined;
+}
+export function createMcpServer(s: {
+  name: string;
+  kind: McpServer["kind"];
+  url?: string;
+  auth_token?: string;
+  command?: string;
+  args?: string[];
+}): McpServer {
+  const server: McpServer = {
+    id: nanoid(10),
+    name: s.name,
+    kind: s.kind,
+    url: s.url ?? "",
+    auth_token: s.auth_token ?? "",
+    command: s.command ?? "",
+    args_json: JSON.stringify(s.args ?? []),
+    enabled: 1,
+    created_at: now(),
+  };
+  db.prepare(
+    "INSERT INTO mcp_servers (id, name, kind, url, auth_token, command, args_json, enabled, created_at) VALUES (@id, @name, @kind, @url, @auth_token, @command, @args_json, @enabled, @created_at)"
+  ).run(server);
+  return server;
+}
+export function setMcpServerEnabled(id: string, enabled: boolean): McpServer | undefined {
+  db.prepare("UPDATE mcp_servers SET enabled = ? WHERE id = ?").run(enabled ? 1 : 0, id);
+  return getMcpServer(id);
+}
+export function deleteMcpServer(id: string) {
+  db.prepare("DELETE FROM mcp_servers WHERE id = ?").run(id);
+}
+/** 脱敏：auth_token 永不下发前端 */
+export function sanitizeMcpServer(s: McpServer) {
+  return {
+    id: s.id,
+    name: s.name,
+    kind: s.kind,
+    url: s.url,
+    command: s.command,
+    args_json: s.args_json,
+    enabled: s.enabled,
+    has_token: Boolean(s.auth_token),
+  };
+}
+
+// ---- skills（技能：横切的工作方法，可注入任意同事）----
+export function listSkills(): Skill[] {
+  return db.prepare("SELECT * FROM skills ORDER BY builtin DESC, created_at").all() as Skill[];
+}
+export function createSkill(s: { name: string; desc?: string; content: string; enabled?: boolean; builtin?: boolean }): Skill {
+  const skill: Skill = {
+    id: nanoid(10),
+    name: s.name,
+    desc: s.desc ?? "",
+    content: s.content,
+    enabled: s.enabled ? 1 : 0,
+    builtin: s.builtin ? 1 : 0,
+    created_at: now(),
+  };
+  db.prepare(
+    "INSERT INTO skills (id, name, desc, content, enabled, builtin, created_at) VALUES (@id, @name, @desc, @content, @enabled, @builtin, @created_at)"
+  ).run(skill);
+  return skill;
+}
+export function updateSkill(id: string, fields: { enabled?: boolean; name?: string; desc?: string; content?: string }): Skill | undefined {
+  const cur = db.prepare("SELECT * FROM skills WHERE id = ?").get(id) as Skill | undefined;
+  if (!cur) return undefined;
+  const next: Skill = {
+    ...cur,
+    ...(fields.name !== undefined ? { name: fields.name } : {}),
+    ...(fields.desc !== undefined ? { desc: fields.desc } : {}),
+    ...(fields.content !== undefined ? { content: fields.content } : {}),
+    ...(fields.enabled !== undefined ? { enabled: fields.enabled ? 1 : 0 } : {}),
+  };
+  db.prepare("UPDATE skills SET name = @name, desc = @desc, content = @content, enabled = @enabled WHERE id = @id").run(next);
+  return next;
+}
+export function deleteSkill(id: string) {
+  db.prepare("DELETE FROM skills WHERE id = ? AND builtin = 0").run(id);
 }
 export function updateMessage(
   id: string,

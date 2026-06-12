@@ -37,6 +37,7 @@ export interface Message {
   reply_depth: number;
   usage_json: string | null;
   model?: string;
+  reply_to?: string | null;
   created_at: number;
 }
 export interface Task {

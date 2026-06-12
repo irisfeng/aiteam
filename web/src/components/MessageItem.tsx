@@ -21,8 +21,21 @@ function usageLabel(usageJson: string | null): string | null {
   }
 }
 
-export const MessageItem = memo(function MessageItem({ message }: { message: Message }) {
+export const MessageItem = memo(function MessageItem({
+  message,
+  onReply,
+}: {
+  message: Message;
+  onReply?: (m: Message) => void;
+}) {
   const ws = useWorkspace();
+  const channelMsgs = ws.messages[message.channel_id] ?? [];
+  const quoted = message.reply_to ? channelMsgs.find((x) => x.id === message.reply_to) : undefined;
+  const quotedAuthor = quoted
+    ? quoted.author_type === "user"
+      ? ws.user.name
+      : ws.agentById(quoted.author_id)?.name ?? "AI"
+    : "";
 
   if (message.author_type === "system") {
     return (
@@ -45,7 +58,22 @@ export const MessageItem = memo(function MessageItem({ message }: { message: Mes
           <span className="text-[13.5px] font-semibold">{name}</span>
           {isAgent && <AiBadge />}
           <span className="font-mono text-[11px] text-ink-3">{fmtTime(message.created_at)}</span>
+          {onReply && message.status === "complete" && (
+            <button
+              onClick={() => onReply(message)}
+              className="ml-1 rounded px-1 font-mono text-[11px] text-ink-3 opacity-0 transition-opacity hover:bg-sel hover:text-ink group-hover:opacity-100"
+              title="引用回复"
+            >
+              ↩
+            </button>
+          )}
         </div>
+        {quoted && (
+          <div className="mt-0.5 max-w-xl rounded-md border-l-2 border-accent/50 bg-sel/60 px-2 py-1 text-[12px] text-ink-2">
+            <span className="font-medium">↩ {quotedAuthor}</span>
+            <span className="text-ink-3">：{quoted.content.slice(0, 80)}{quoted.content.length > 80 ? "…" : ""}</span>
+          </div>
+        )}
         <div className={`md mt-0.5 text-[14px] ${message.status === "streaming" ? "stream-cursor" : ""}`}>
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
         </div>

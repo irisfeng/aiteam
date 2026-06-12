@@ -6,12 +6,15 @@ export function Composer({
   agents,
   onSend,
   contextHint,
+  replyTo,
 }: {
   placeholder: string;
   agents: Agent[];
   onSend: (content: string) => Promise<void>;
   /** 下一轮对话上下文的估算 tokens（Osaurus 式余量表） */
   contextHint?: number;
+  /** 引用回复目标（预览条，可取消） */
+  replyTo?: { author: string; snippet: string; onCancel: () => void };
 }) {
   const [value, setValue] = useState("");
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
@@ -74,6 +77,17 @@ export function Composer({
               <span className="truncate text-[12px] text-ink-3">{a.role}</span>
             </button>
           ))}
+        </div>
+      )}
+      {replyTo && (
+        <div className="mb-1 flex items-center gap-2 rounded-lg border border-line bg-sel/70 px-3 py-1.5 text-[12px] text-ink-2">
+          <span className="font-mono text-ink-3">↩</span>
+          <span className="min-w-0 flex-1 truncate">
+            回复 <span className="font-medium">{replyTo.author}</span>：{replyTo.snippet}
+          </span>
+          <button onClick={replyTo.onCancel} className="rounded px-1 text-ink-3 hover:bg-sel hover:text-ink" title="取消引用">
+            ✕
+          </button>
         </div>
       )}
       <div className="flex items-end gap-2 rounded-xl border border-line bg-panel px-3 py-2 focus-within:border-accent/50">
