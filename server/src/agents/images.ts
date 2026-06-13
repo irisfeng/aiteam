@@ -6,8 +6,8 @@ import { nanoid } from "nanoid";
 import { getImageProvider } from "../db.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-/** 生成图资产目录（与 sqlite 同级），由 index.ts 以 /assets 静态托管 */
-export const assetsDir = join(__dirname, "..", "..", "data", "assets");
+/** 生成图资产目录（与 sqlite 同级），由 index.ts 以 /assets 静态托管；跟随 AITEAM_DATA_DIR 隔离 */
+export const assetsDir = join(process.env.AITEAM_DATA_DIR || join(__dirname, "..", "..", "data"), "assets");
 mkdirSync(assetsDir, { recursive: true });
 
 /** 火山方舟 Seedream 默认端点（OpenAI images/generations 协议） */

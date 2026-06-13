@@ -89,6 +89,8 @@ export interface Doc {
   title: string;
   content: string;
   kind: "report" | "slides" | "sheet";
+  version: number;
+  superseded_by: string | null;
   created_at: number;
   updated_at: number;
 }

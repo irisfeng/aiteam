@@ -6,11 +6,17 @@
  * 用法：npm run build && node scripts/regression.mjs
  */
 import { spawn, execSync } from "node:child_process";
-import { rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+// 隔离测试库：所有读写（含 Phase 2 spawn 的子进程，env 继承）落在临时目录，
+// 绝不触碰 server/data 生产工作区（那里有用户的密钥配置/项目/文档）。
+const testDataDir = mkdtempSync(join(tmpdir(), "aiteam-regress-"));
+process.env.AITEAM_DATA_DIR = testDataDir;
 const PORT = 8799;
 const BASE = `http://localhost:${PORT}/api`;
 
@@ -35,8 +41,6 @@ async function waitFor(fn, timeout = 20000, interval = 400) {
 // ---------------------------------------------------------------------------
 // Phase 1：进程内直驱引擎（DAG / 计划把关 / 停止 / 预算 / 断点恢复）
 // ---------------------------------------------------------------------------
-rmSync(join(root, "server/data"), { recursive: true, force: true });
-
 const db = await import(join(root, "server/dist/db.js"));
 const { seedIfEmpty } = await import(join(root, "server/dist/seed.js"));
 const engine = await import(join(root, "server/dist/agents/engine.js"));
@@ -106,6 +110,45 @@ check("P0", "种子：4 内置同事 + 4 内置技能", agents.length === 4 && d
   engine.recoverInFlightTasks();
   const ok = await waitFor(() => db.getTask(T.id).status === "review", 20000);
   check("D5", "断点恢复：doing 任务重启后续跑至交付", ok);
+}
+
+// QW1 验收防放水：校验者未给结构化裁决时，兜底为 revise（fail-closed），绝不默认通过
+check(
+  "QW1",
+  "验收防放水：无结构化裁决兜底为 revise 而非 pass",
+  engine.NO_VERDICT_FALLBACK.result === "revise" && engine.NO_VERDICT_FALLBACK.reasons.length > 0
+);
+
+// QW2 产出规范上移：buildWorkBrief 第 5 点强制结论先行 + 来源标注 + 交付自查表（运行时普惠所有任务）
+{
+  const T = db.createTask({ channel_id: ch.id, title: "回归-自查", assignee_agent_id: eng.id, created_by: "user" });
+  const brief = engine.buildWorkBrief(db.getTask(T.id), ch);
+  const ok = brief.includes("自查表") && brief.includes("结论先行") && brief.includes("来源");
+  check("QW2", "产出规范常驻：工作简报强制结论先行+来源+自查表", ok);
+}
+
+// QW3 计费分列：缓存读/写单独累计且加权计费，老行（无 cache_* 字段）向后兼容
+{
+  const u = db.readUsage(JSON.stringify({ input_tokens: 100, output_tokens: 50, cache_read_tokens: 1000, cache_creation_tokens: 200 }));
+  // promptTotal=100+1000+200=1300；billable=100+50+200*1.25+1000*0.1=500（缓存读按 1/10 价）
+  const fresh = u.promptTotal === 1300 && u.billable === 500;
+  const old = db.readUsage(JSON.stringify({ input_tokens: 300, output_tokens: 60 }));
+  const compat = old.promptTotal === 300 && old.billable === 360; // 老行无缓存字段：promptTotal=纯输入，billable=输入+输出
+  check("QW3", "计费分列：缓存读/写加权计费 + 老行兼容", fresh && compat);
+}
+
+// DOC1 文档版本归并：同 (task_id,kind) 再写即出新版覆盖旧版，listDocuments 只显当前版，历史可查
+{
+  const T = db.createTask({ channel_id: ch.id, title: "回归-文档版本", assignee_agent_id: eng.id, created_by: "user" });
+  const v1 = db.createDocument({ channel_id: ch.id, task_id: T.id, agent_id: eng.id, title: "回归报告 v1", content: "一", kind: "report" });
+  const v2 = db.createDocument({ channel_id: ch.id, task_id: T.id, agent_id: eng.id, title: "回归报告 v2", content: "二", kind: "report" });
+  const current = db.listDocuments().filter((d) => d.task_id === T.id);
+  const v1row = db.getDocument(v1.id);
+  const versions = db.listDocumentVersions(T.id, "report");
+  const ok =
+    current.length === 1 && current[0].id === v2.id && current[0].version === 2 &&
+    v1row.superseded_by === v2.id && versions.length === 2;
+  check("DOC1", "文档版本归并：同任务同 kind 再写出新版、列表只显当前版、历史可查", ok);
 }
 
 // ---------------------------------------------------------------------------
@@ -251,6 +294,7 @@ try {
   }
 } finally {
   server.kill();
+  rmSync(testDataDir, { recursive: true, force: true });
 }
 
 console.log("\n——— 回归结果 ———");

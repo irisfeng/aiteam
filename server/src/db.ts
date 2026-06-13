@@ -6,7 +6,8 @@ import { nanoid } from "nanoid";
 import { currentOwner } from "./ownerScope.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const dataDir = join(__dirname, "..", "data");
+// AITEAM_DATA_DIR：测试/多实例可指向隔离目录；不设则用默认 server/data
+const dataDir = process.env.AITEAM_DATA_DIR || join(__dirname, "..", "data");
 mkdirSync(dataDir, { recursive: true });
 
 export const db = new Database(join(dataDir, "aiteam.db"));
@@ -168,7 +169,13 @@ addColumnIfMissing("messages", "reply_to", "reply_to TEXT");
 addColumnIfMissing("providers", "light_model", "light_model TEXT NOT NULL DEFAULT ''");
 addColumnIfMissing("tasks", "model_tier", "model_tier TEXT NOT NULL DEFAULT 'standard'");
 addColumnIfMissing("providers", "is_strong", "is_strong INTEGER NOT NULL DEFAULT 0");
+// 文档版本归并：version=第几版（1 起）；superseded_by=被哪条新版取代（NULL=当前版）。
+// 返工再写同 (task_id,kind) 不再并列堆叠——旧版自动标 superseded，列表默认只显当前版。
+addColumnIfMissing("documents", "version", "version INTEGER NOT NULL DEFAULT 1");
+addColumnIfMissing("documents", "superseded_by", "superseded_by TEXT");
+db.exec(`CREATE INDEX IF NOT EXISTS idx_documents_task_kind ON documents(task_id, kind, superseded_by)`);
 db.exec(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '')`);
+backfillDocVersions(); // 一次性把存量重复版本按 (task_id,kind) 链成版本（幂等，仅处理多当前版的组）
 
 export interface Agent {
   id: string;
@@ -634,7 +641,34 @@ export function updateMessage(
   );
 }
 
-// ---- 用量统计（每用户私有：只统计当前 owner 的消息/任务）----
+// ---- 用量统计（每用户私有：只统计当前 owner；Helio 同构：每日消耗 + 活动账本，含模型归因）----
+// 计费权重：缓存读 ≈ 全价 1/10，缓存写 ≈ 1.25 倍（贴近 Anthropic 计费）。预算护栏据此估真实成本。
+const CACHE_READ_WEIGHT = 0.1;
+const CACHE_CREATE_WEIGHT = 1.25;
+/**
+ * 统一解析 usage_json（兼容老行：老行 input_tokens 已含缓存、无 cache_* 字段）。
+ * - promptTotal：展示用的总输入 token（纯输入 + 缓存读 + 缓存写），保持与历史展示口径一致；
+ * - billable：加权计费 token，缓存读/写按权重折算，供预算护栏更贴近真实成本。
+ */
+export function readUsage(json: string | null): {
+  input: number; output: number; cacheRead: number; cacheCreation: number; promptTotal: number; billable: number;
+} {
+  let input = 0, output = 0, cacheRead = 0, cacheCreation = 0;
+  if (json) {
+    try {
+      const u = JSON.parse(json);
+      input = u.input_tokens ?? 0;
+      output = u.output_tokens ?? 0;
+      cacheRead = u.cache_read_tokens ?? 0;
+      cacheCreation = u.cache_creation_tokens ?? 0;
+    } catch { /* ignore */ }
+  }
+  const promptTotal = input + cacheRead + cacheCreation;
+  // 取整：token 计数本就是整数，且避免 0.1 等权重引入浮点尾差（如 1000*0.1=100.0000…1）
+  const billable = Math.round(input + output + cacheCreation * CACHE_CREATE_WEIGHT + cacheRead * CACHE_READ_WEIGHT);
+  return { input, output, cacheRead, cacheCreation, promptTotal, billable };
+}
+
 export function usageDaily(days = 14): { date: string; input: number; output: number }[] {
   const since = Date.now() - days * 86400_000;
   const rows = db
@@ -644,11 +678,9 @@ export function usageDaily(days = 14): { date: string; input: number; output: nu
   for (const r of rows) {
     const date = new Date(r.created_at).toLocaleDateString("sv-SE", { timeZone: "Asia/Shanghai" });
     const s = byDay.get(date) ?? { input: 0, output: 0 };
-    try {
-      const u = JSON.parse(r.usage_json);
-      s.input += u.input_tokens ?? 0;
-      s.output += u.output_tokens ?? 0;
-    } catch { /* ignore */ }
+    const u = readUsage(r.usage_json);
+    s.input += u.promptTotal;
+    s.output += u.output;
     byDay.set(date, s);
   }
   const out: { date: string; input: number; output: number }[] = [];
@@ -800,6 +832,23 @@ export function updateProject(
   ).run(next);
   return next;
 }
+/**
+ * 项目级批量关单（human-only 的关闭动作，一次决策关掉整个项目）：
+ * 把该项目所有"待评审/进行中/待办"的任务一次性置 done，并把项目本身置 done。
+ * 返回被改动的任务（供前端/SSE 增量更新）与项目。
+ */
+export function closeProject(projectId: string): { project: Project | undefined; tasks: Task[] } {
+  const project = getProject(projectId);
+  if (!project) return { project: undefined, tasks: [] };
+  const open = (db.prepare("SELECT * FROM tasks WHERE project_id = ? AND status != 'done'").all(projectId) as Task[]);
+  const updated: Task[] = [];
+  for (const t of open) {
+    const next = updateTask(t.id, { status: "done" });
+    if (next) updated.push(next);
+  }
+  const nextProject = updateProject(projectId, { status: "done" });
+  return { project: nextProject, tasks: updated };
+}
 
 // ---- approvals（每用户私有）----
 export function listApprovals(): Approval[] {
@@ -850,11 +899,45 @@ export interface Doc {
   content: string;
   /** report = Markdown 报告；slides = Marp 风格演示文稿（--- 分页）；sheet = CSV/表格数据 */
   kind: "report" | "slides" | "sheet";
+  /** 版本号（1 起）；同 (task_id,kind) 返工再写即递增 */
+  version: number;
+  /** 被哪条新版取代的 doc id；NULL = 当前版 */
+  superseded_by: string | null;
   created_at: number;
   updated_at: number;
 }
+/** 默认只返回当前版（superseded_by IS NULL），把返工产生的旧版从主列表收起。 */
 export function listDocuments(): Doc[] {
-  return db.prepare("SELECT * FROM documents WHERE owner_id = ? ORDER BY created_at DESC").all(currentOwner()) as Doc[];
+  return db.prepare("SELECT * FROM documents WHERE owner_id = ? AND superseded_by IS NULL ORDER BY created_at DESC").all(currentOwner()) as Doc[];
+}
+/** 某任务（可指定 kind）的全部历史版本，含已被取代的旧版，按版本号降序，供「查看历史版本」用。 */
+export function listDocumentVersions(taskId: string, kind?: Doc["kind"]): Doc[] {
+  const sql = kind
+    ? "SELECT * FROM documents WHERE task_id = ? AND kind = ? ORDER BY version DESC"
+    : "SELECT * FROM documents WHERE task_id = ? ORDER BY kind, version DESC";
+  return db.prepare(sql).all(...(kind ? [taskId, kind] : [taskId])) as Doc[];
+}
+/** 一次性回填：把存量同 (task_id,kind) 的多个「当前版」按时间链成版本（幂等，只处理多当前版的组）。 */
+export function backfillDocVersions(): number {
+  const groups = db
+    .prepare(
+      "SELECT task_id, kind FROM documents WHERE task_id IS NOT NULL AND superseded_by IS NULL GROUP BY task_id, kind HAVING COUNT(*) > 1"
+    )
+    .all() as { task_id: string; kind: Doc["kind"] }[];
+  if (groups.length === 0) return 0;
+  const tx = db.transaction(() => {
+    for (const g of groups) {
+      const rows = db
+        .prepare("SELECT id FROM documents WHERE task_id = ? AND kind = ? AND superseded_by IS NULL ORDER BY created_at ASC, id ASC")
+        .all(g.task_id, g.kind) as { id: string }[];
+      for (let i = 0; i < rows.length; i++) {
+        const supersededBy = i < rows.length - 1 ? rows[i + 1].id : null;
+        db.prepare("UPDATE documents SET version = ?, superseded_by = ? WHERE id = ?").run(i + 1, supersededBy, rows[i].id);
+      }
+    }
+  });
+  tx();
+  return groups.length;
 }
 export function getDocument(id: string): Doc | undefined {
   return db.prepare("SELECT * FROM documents WHERE id = ? AND owner_id = ?").get(id, currentOwner()) as Doc | undefined;
@@ -867,22 +950,46 @@ export function createDocument(d: {
   content: string;
   kind?: Doc["kind"];
 }): Doc {
-  const doc: Doc = {
-    id: nanoid(10),
-    owner_id: currentOwner(),
-    channel_id: d.channel_id ?? null,
-    task_id: d.task_id ?? null,
-    agent_id: d.agent_id ?? null,
-    title: d.title,
-    content: d.content,
-    kind: d.kind ?? "report",
-    created_at: now(),
-    updated_at: now(),
-  };
-  db.prepare(
-    "INSERT INTO documents (id, owner_id, channel_id, task_id, agent_id, title, content, kind, created_at, updated_at) VALUES (@id, @owner_id, @channel_id, @task_id, @agent_id, @title, @content, @kind, @created_at, @updated_at)"
-  ).run(doc);
-  return doc;
+  const kind = d.kind ?? "report";
+  const taskId = d.task_id ?? null;
+  const owner = currentOwner();
+  // 版本感知：带 task_id 时，同 (owner,task_id,kind) 的现存当前版会被本次新版取代（不再并列堆叠）。
+  const insert = db.transaction((): Doc => {
+    let version = 1;
+    let prevCurrentId: string | null = null;
+    if (taskId) {
+      const prev = db
+        .prepare("SELECT id, version FROM documents WHERE owner_id = ? AND task_id = ? AND kind = ? AND superseded_by IS NULL ORDER BY version DESC LIMIT 1")
+        .get(owner, taskId, kind) as { id: string; version: number } | undefined;
+      if (prev) {
+        version = prev.version + 1;
+        prevCurrentId = prev.id;
+      }
+    }
+    const doc: Doc = {
+      id: nanoid(10),
+      owner_id: owner,
+      channel_id: d.channel_id ?? null,
+      task_id: taskId,
+      agent_id: d.agent_id ?? null,
+      title: d.title,
+      content: d.content,
+      kind,
+      version,
+      superseded_by: null,
+      created_at: now(),
+      updated_at: now(),
+    };
+    db.prepare(
+      "INSERT INTO documents (id, owner_id, channel_id, task_id, agent_id, title, content, kind, version, superseded_by, created_at, updated_at) VALUES (@id, @owner_id, @channel_id, @task_id, @agent_id, @title, @content, @kind, @version, @superseded_by, @created_at, @updated_at)"
+    ).run(doc);
+    if (prevCurrentId) db.prepare("UPDATE documents SET superseded_by = ? WHERE id = ?").run(doc.id, prevCurrentId);
+    return doc;
+  });
+  return insert();
+}
+export function deleteDocument(id: string): void {
+  db.prepare("DELETE FROM documents WHERE id = ? AND owner_id = ?").run(id, currentOwner());
 }
 export function updateDocument(id: string, fields: { title?: string; content?: string }): Doc | undefined {
   const cur = getDocument(id);
@@ -929,7 +1036,8 @@ export function deleteRoutine(id: string) {
   db.prepare("DELETE FROM routines WHERE id = ? AND owner_id = ?").run(id, currentOwner());
 }
 export function markRoutineRun(id: string, date: string) {
-  db.prepare("UPDATE routines SET last_run_date = ? WHERE id = ?").run(date, id);
+  // 防御性 owner 约束：调度器已在 withOwner 上下文内调用，避免任何路径下跨 owner 误更新
+  db.prepare("UPDATE routines SET last_run_date = ? WHERE id = ? AND owner_id = ?").run(date, id, currentOwner());
 }
 
 // ---------------------------------------------------------------------------
@@ -946,20 +1054,19 @@ export function listRoutinesAllOwners(): Routine[] {
 }
 
 /** 今日各 Agent 的消息用量（tokens）与交付数（当前 owner），供团队视图使用 */
-export function agentDailyStats(sinceTs: number): Map<string, { input: number; output: number; delivered: number }> {
+export function agentDailyStats(sinceTs: number): Map<string, { input: number; output: number; billable: number; delivered: number }> {
   const owner = currentOwner();
-  const stats = new Map<string, { input: number; output: number; delivered: number }>();
+  const stats = new Map<string, { input: number; output: number; billable: number; delivered: number }>();
   const rows = db
     .prepare("SELECT author_id, usage_json FROM messages WHERE owner_id = ? AND author_type = 'agent' AND created_at >= ?")
     .all(owner, sinceTs) as { author_id: string; usage_json: string | null }[];
   for (const r of rows) {
     if (!r.author_id || !r.usage_json) continue;
-    const s = stats.get(r.author_id) ?? { input: 0, output: 0, delivered: 0 };
-    try {
-      const u = JSON.parse(r.usage_json);
-      s.input += u.input_tokens ?? 0;
-      s.output += u.output_tokens ?? 0;
-    } catch { /* ignore */ }
+    const s = stats.get(r.author_id) ?? { input: 0, output: 0, billable: 0, delivered: 0 };
+    const u = readUsage(r.usage_json);
+    s.input += u.promptTotal; // 展示口径：总输入 token
+    s.output += u.output;
+    s.billable += u.billable; // 预算口径：加权计费 token
     stats.set(r.author_id, s);
   }
   const delivered = db
@@ -968,7 +1075,7 @@ export function agentDailyStats(sinceTs: number): Map<string, { input: number; o
     )
     .all(owner, sinceTs) as { id: string; n: number }[];
   for (const d of delivered) {
-    const s = stats.get(d.id) ?? { input: 0, output: 0, delivered: 0 };
+    const s = stats.get(d.id) ?? { input: 0, output: 0, billable: 0, delivered: 0 };
     s.delivered = d.n;
     stats.set(d.id, s);
   }

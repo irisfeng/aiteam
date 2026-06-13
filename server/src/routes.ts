@@ -2,6 +2,7 @@ import { Router } from "express";
 import {
   clearChannelMessages,
   clearMemory,
+  closeProject,
   createAgent,
   createMcpServer,
   createSkill,
@@ -12,6 +13,7 @@ import {
   getMessage,
   listMcpServers,
   listSkills,
+  readUsage,
   renameChannel,
   sanitizeMcpServer,
   setMcpServerEnabled,
@@ -20,10 +22,12 @@ import {
   usageRecent,
   createChannel,
   createTask,
+  deleteDocument,
   findDm,
   getAgent,
   getChannel,
   getMemory,
+  listDocumentVersions,
   insertMessage,
   listAgents,
   listApprovals,
@@ -225,19 +229,14 @@ api.get("/usage", (_req, res) => {
   res.json({
     daily: usageDaily(14),
     recent: usageRecent(40).map((r) => {
-      let input = 0, output = 0;
-      try {
-        const u = JSON.parse(r.usage_json);
-        input = u.input_tokens ?? 0;
-        output = u.output_tokens ?? 0;
-      } catch { /* ignore */ }
+      const u = readUsage(r.usage_json);
       return {
         ts: r.created_at,
         agent: agents[r.author_id] ?? r.author_id,
         model: r.model || "—",
         snippet: r.snippet,
-        input,
-        output,
+        input: u.promptTotal,
+        output: u.output,
       };
     }),
   });
@@ -378,7 +377,33 @@ api.post("/tasks/:id/stop", (req, res) => {
   res.json({ ok: true });
 });
 
+/** 项目级批量关单（human-only）：一次决策把整个项目的剩余任务与项目本身置 done */
+api.post("/projects/:id/close", (req, res) => {
+  const { project, tasks } = closeProject(req.params.id);
+  if (!project) return res.status(404).json({ error: "project not found" });
+  for (const t of tasks) broadcast({ type: "task:upsert", payload: t });
+  broadcast({ type: "project:upsert", payload: project });
+  res.json({ project, tasks });
+});
+
 api.get("/documents", (_req, res) => res.json(listDocuments()));
+
+/** 某文档的全部历史版本（含已被取代的旧版），供前端「查看历史版本」抽屉。 */
+api.get("/documents/:id/versions", (req, res) => {
+  const doc = getDocument(req.params.id);
+  if (!doc) return res.status(404).json({ error: "document not found" });
+  res.json(doc.task_id ? listDocumentVersions(doc.task_id, doc.kind) : [doc]);
+});
+
+/** 删除文档（清理 Mock 残留等）：连带其历史版本一并删除。 */
+api.delete("/documents/:id", (req, res) => {
+  const doc = getDocument(req.params.id);
+  if (!doc) return res.status(404).json({ error: "document not found" });
+  const versions = doc.task_id ? listDocumentVersions(doc.task_id, doc.kind) : [doc];
+  for (const v of versions) deleteDocument(v.id);
+  broadcast({ type: "doc:delete", payload: { ids: versions.map((v) => v.id) } });
+  res.json({ ok: true, deleted: versions.map((v) => v.id) });
+});
 
 /** slides 文档导出为真 .pptx（可编辑文本 + Hive 主题 + 讲者备注 + 嵌入生成图） */
 api.get("/documents/:id/pptx", (req, res) => {

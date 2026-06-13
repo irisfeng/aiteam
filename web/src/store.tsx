@@ -38,6 +38,7 @@ type Action =
   | { type: "agent:status"; status: AgentStatus }
   | { type: "task:upsert"; task: Task }
   | { type: "doc:upsert"; doc: Doc }
+  | { type: "doc:delete"; ids: string[] }
   | { type: "project:upsert"; project: Project }
   | { type: "providers:set"; providers: Provider[] }
   | { type: "approval:upsert"; approval: Approval }
@@ -137,6 +138,8 @@ function reducer(state: State, action: Action): State {
       return { ...state, tasks: upsertBy(state.tasks, action.task) };
     case "doc:upsert":
       return { ...state, documents: upsertBy(state.documents, action.doc) };
+    case "doc:delete":
+      return { ...state, documents: state.documents.filter((d) => !action.ids.includes(d.id)) };
     case "project:upsert":
       return { ...state, projects: upsertBy(state.projects, action.project) };
     case "providers:set":
@@ -189,6 +192,8 @@ interface Store extends State {
   updateProvider: (id: string, data: import("./api").ProviderInput) => Promise<void>;
   deleteProvider: (id: string) => Promise<void>;
   moveTask: (task: Task, status: Task["status"]) => Promise<void>;
+  closeProject: (projectId: string) => Promise<void>;
+  deleteDocument: (id: string) => Promise<void>;
   resolveApproval: (id: string, approve: boolean) => Promise<void>;
   agentById: (id: string | null) => Agent | undefined;
 }
@@ -244,6 +249,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
             break;
           case "doc:upsert":
             dispatch({ type: "doc:upsert", doc: payload });
+            break;
+          case "doc:delete":
+            dispatch({ type: "doc:delete", ids: payload.ids });
             break;
           case "project:upsert":
             dispatch({ type: "project:upsert", project: payload });
@@ -340,6 +348,15 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       moveTask: async (task, status) => {
         const next = await api.updateTask(task.id, { status });
         dispatch({ type: "task:upsert", task: next });
+      },
+      closeProject: async (projectId) => {
+        const { project, tasks } = await api.closeProject(projectId);
+        for (const t of tasks) dispatch({ type: "task:upsert", task: t });
+        dispatch({ type: "project:upsert", project });
+      },
+      deleteDocument: async (id) => {
+        const { deleted } = await api.deleteDocument(id);
+        dispatch({ type: "doc:delete", ids: deleted });
       },
       resolveApproval: async (id, approve) => {
         const approval = await api.resolveApproval(id, approve);

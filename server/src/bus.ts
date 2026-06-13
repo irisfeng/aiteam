@@ -40,6 +40,7 @@ export type BusEvent =
   | { type: "agent:status"; payload: { agent_id: string; channel_id: string; state: "thinking" | "tool" | "responding" | "idle"; detail?: string } }
   | { type: "task:upsert"; payload: unknown }
   | { type: "doc:upsert"; payload: unknown }
+  | { type: "doc:delete"; payload: { ids: string[] } }
   | { type: "project:upsert"; payload: unknown }
   | { type: "approval:upsert"; payload: unknown }
   | { type: "channel:new"; payload: unknown }

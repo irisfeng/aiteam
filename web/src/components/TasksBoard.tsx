@@ -118,6 +118,78 @@ function TaskCard({ task, onOpenDoc }: { task: Task; onOpenDoc: (doc: Doc) => vo
   );
 }
 
+/**
+ * 项目级折叠卡：把同一项目在某列里的子任务收成一张可展开的组卡，给看板封顶。
+ * 当项目全部任务都已交付（project-wide 都在 review）时，在「待评审」列露出
+ * 「✅ 确认关闭项目」——一次决策批量关单，守住 human-only 签核又不必逐卡点。
+ */
+function ProjectGroup({
+  projectId,
+  columnTasks,
+  column,
+  onOpenDoc,
+}: {
+  projectId: string;
+  columnTasks: Task[];
+  column: Task["status"];
+  onOpenDoc: (doc: Doc) => void;
+}) {
+  const ws = useWorkspace();
+  const project = ws.projects.find((p) => p.id === projectId);
+  const [open, setOpen] = useState(false);
+  const [closing, setClosing] = useState(false);
+  const allTasks = ws.tasks.filter((t) => t.project_id === projectId);
+  const delivered = allTasks.filter((t) => t.status === "review" || t.status === "done").length;
+  const allDelivered = allTasks.length > 0 && allTasks.every((t) => t.status === "review" || t.status === "done");
+  const canClose = column === "review" && allDelivered && project?.status !== "done";
+
+  async function close() {
+    if (closing) return;
+    if (!window.confirm(`确认关闭项目「${project?.title ?? "项目"}」？\n将把它的 ${allTasks.length} 个任务一并归入「完成」。`)) return;
+    setClosing(true);
+    try {
+      await ws.closeProject(projectId);
+    } finally {
+      setClosing(false);
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-line bg-panel/70 shadow-sm">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-1.5 px-2.5 py-2 text-left"
+        title={project?.goal}
+      >
+        <span className="text-[11px] text-ink-3">{open ? "▾" : "▸"}</span>
+        <span className="truncate text-[12.5px] font-semibold">🧩 {project?.title ?? "项目"}</span>
+        <span className="ml-auto shrink-0 rounded bg-sel px-1.5 py-px text-[10.5px] text-ink-3">
+          {column === "review" ? `${delivered}/${allTasks.length} 已交付` : `${columnTasks.length} 卡`}
+        </span>
+      </button>
+      {canClose && (
+        <div className="px-2.5 pb-2">
+          <button
+            onClick={close}
+            disabled={closing}
+            className="w-full rounded-md bg-accent px-2 py-1 text-[12px] font-medium text-white hover:opacity-90 disabled:opacity-50"
+            title="一次性把本项目全部已交付任务关单并归档"
+          >
+            {closing ? "关闭中…" : "✅ 确认关闭项目"}
+          </button>
+        </div>
+      )}
+      {open && (
+        <div className="flex flex-col gap-2 border-t border-line p-2">
+          {columnTasks.map((t) => (
+            <TaskCard key={t.id} task={t} onOpenDoc={onOpenDoc} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function TasksBoard() {
   const ws = useWorkspace();
   const [title, setTitle] = useState("");
@@ -168,6 +240,21 @@ export function TasksBoard() {
       <div className="grid flex-1 grid-cols-4 gap-3 overflow-y-auto p-4">
         {COLUMNS.map((col) => {
           const tasks = ws.tasks.filter((t) => t.status === col.key);
+          // 同一项目的子任务收进折叠组卡；无项目的单任务平铺。保留列内出现顺序。
+          const groups: string[] = [];
+          const grouped = new Map<string, Task[]>();
+          const loose: Task[] = [];
+          for (const t of tasks) {
+            if (t.project_id) {
+              if (!grouped.has(t.project_id)) {
+                grouped.set(t.project_id, []);
+                groups.push(t.project_id);
+              }
+              grouped.get(t.project_id)!.push(t);
+            } else {
+              loose.push(t);
+            }
+          }
           return (
             <div key={col.key} className="flex min-w-0 flex-col rounded-xl bg-sel/60 p-2">
               <div className="flex items-center gap-1.5 px-2 py-1.5">
@@ -175,7 +262,16 @@ export function TasksBoard() {
                 <span className="text-[12px] text-ink-3">{tasks.length}</span>
               </div>
               <div className="flex flex-col gap-2 overflow-y-auto p-1">
-                {tasks.map((t) => (
+                {groups.map((pid) => (
+                  <ProjectGroup
+                    key={pid}
+                    projectId={pid}
+                    columnTasks={grouped.get(pid)!}
+                    column={col.key}
+                    onOpenDoc={setOpenDoc}
+                  />
+                ))}
+                {loose.map((t) => (
                   <TaskCard key={t.id} task={t} onOpenDoc={setOpenDoc} />
                 ))}
                 {tasks.length === 0 && <div className="px-2 py-4 text-center text-[12px] text-ink-3">空</div>}

@@ -23,7 +23,9 @@ app.use(express.json({ limit: "1mb" }));
 // 整合后所有 AiTeam 路由统一挂在 /aiteam/* 前缀下（由反向代理路由到本进程）。
 // API 需要登录（standalone 模式下中间件放行为单用户）。
 app.use("/aiteam/api", requireUser, api);
-app.use("/aiteam/assets", express.static(assetsDir, { maxAge: "30d", immutable: true })); // 生成图资产
+const assetsStatic = express.static(assetsDir, { maxAge: "30d", immutable: true });
+app.use("/aiteam/assets", assetsStatic); // 生成图资产（新前缀）
+app.use("/assets", assetsStatic); // 兼容历史内容里的 /assets/* 链接（数据迁移后可移除）
 
 // 生产模式下托管前端构建产物（挂在 /aiteam/ 下，与 Vite base 一致）
 const webDist = join(__dirname, "..", "..", "web", "dist");
