@@ -67,7 +67,7 @@ export function TeamView({ onOpenProfile }: { onOpenProfile: (a: import("../type
                 title="点击查看档案（身份/模型/记忆）"
               >
                 <div className="flex items-center gap-2.5">
-                  <AgentAvatar agent={agent} size={36} />
+                  <AgentAvatar agent={agent} size={36} state={working ? "thinking" : "idle"} />
                   <div className="min-w-0">
                     <div className="flex items-center gap-1.5">
                       <span className="text-[14px] font-semibold">{agent.name}</span>

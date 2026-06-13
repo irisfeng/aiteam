@@ -102,5 +102,29 @@ body, aside, main, header, div, button, input, textarea, select, span, table, th
 }
 .msg-in { animation: fade-in 0.18s ease-out; }
 
+/* ===== 毛球精灵头像动效 ===== */
+/* 平时轻轻呼吸 + 错峰偶尔眨眼；忙碌时身体更活跃地晃动 */
+@keyframes fuzz-breathe {
+  0%, 100% { transform: scale(1) rotate(0deg); }
+  50% { transform: scale(1.05) rotate(0.6deg); }
+}
+@keyframes fuzz-blink {
+  0%, 90%, 100% { transform: scaleY(1); }
+  95% { transform: scaleY(0.12); }
+}
+@keyframes fuzz-wiggle {
+  0%, 100% { transform: scale(1.02) rotate(-3deg); }
+  50% { transform: scale(1.06) rotate(3deg); }
+}
+.fuzz-body { animation: fuzz-breathe 3.6s ease-in-out infinite; }
+.fuzz-eyes { animation: fuzz-blink 5.5s ease-in-out infinite; }
+.fuzz-wrap[data-active="1"] .fuzz-body { animation: fuzz-wiggle 0.9s ease-in-out infinite; }
+.fuzz-wrap[data-active="1"] .fuzz-eyes { animation-duration: 2.2s; }
+/* 悬停时精灵俏皮地弹一下 */
+.fuzz-wrap:hover .fuzz-body { animation-duration: 1.2s; }
+@media (prefers-reduced-motion: reduce) {
+  .fuzz-body, .fuzz-eyes { animation: none !important; }
+}
+
 /* 细滚动条 */
 * { scrollbar-width: thin; scrollbar-color: var(--t-line) transparent; }
