@@ -15,8 +15,19 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export interface AuthUser {
+  id: string;
+  email?: string;
+  display_name?: string;
+  name?: string;
+  role: "admin" | "member";
+}
+export type AuthInfo =
+  | { authed: true; user: AuthUser }
+  | { authed: false; allow_signup: boolean; needs_setup: boolean };
+
 export interface Bootstrap {
-  user: { id: string; name: string };
+  user: { id: string; name: string; role: "admin" | "member" };
   mock_mode: boolean;
   agents: Agent[];
   channels: Channel[];
@@ -57,6 +68,19 @@ export interface AgentTemplateInfo {
 }
 
 export const api = {
+  // ---- 鉴权（standalone 登录）----
+  authInfo: async (): Promise<AuthInfo> => {
+    const res = await fetch(`${API_BASE}/auth/me`);
+    const body = await res.json().catch(() => ({}));
+    return res.ok
+      ? { authed: true, user: body as AuthUser }
+      : { authed: false, allow_signup: !!(body as any).allow_signup, needs_setup: !!(body as any).needs_setup };
+  },
+  login: (email: string, password: string) =>
+    req<AuthUser>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
+  register: (email: string, password: string, display_name: string) =>
+    req<AuthUser>("/auth/register", { method: "POST", body: JSON.stringify({ email, password, display_name }) }),
+  logout: () => req<{ ok: boolean }>("/auth/logout", { method: "POST" }),
   listAgentTemplates: () => req<AgentTemplateInfo[]>("/agent-templates"),
   createAgentFromTemplate: (template_id: string) =>
     req<Agent>("/agents/from-template", { method: "POST", body: JSON.stringify({ template_id }) }),
