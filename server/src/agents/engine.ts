@@ -755,7 +755,22 @@ function buildTranscript(channelId: string, window = TRANSCRIPT_WINDOW): string 
     .join("\n\n");
 }
 
-function buildDynamicContext(agent: Agent, channel: Channel): string {
+/** 内置技能的触发关键词：出现在任务简报/用户消息中才注入该专项方法。
+ *  无映射的技能（通用「交付自查清单」+ 用户自定义技能）默认始终注入，不回归。 */
+const SKILL_KEYWORDS: Record<string, string[]> = {
+  深度调研法: ["调研", "检索", "搜索", "搜一下", "资料", "来源", "事实", "核实", "竞品", "市场", "行业", "最新", "对比", "数据"],
+  金字塔写作法: ["写", "撰写", "报告", "文案", "方案", "prd", "文章", "稿", "总结", "演示", "slides", "ppt", "汇报", "白皮书", "长文"],
+  结构化头脑风暴: ["创意", "头脑风暴", "脑暴", "构思", "设计", "选型", "策划", "点子", "发散", "方案"],
+};
+/** 该技能是否与当前工作焦点相关（决定是否注入提示词，避免给调研任务塞写作法等无关方法） */
+export function skillRelevant(skill: { name: string }, focus: string): boolean {
+  const kws = SKILL_KEYWORDS[skill.name];
+  if (!kws) return true; // 通用/自定义技能始终注入
+  const f = focus.toLowerCase();
+  return kws.some((k) => f.includes(k.toLowerCase()));
+}
+
+function buildDynamicContext(agent: Agent, channel: Channel, focus = ""): string {
   const teammates = channelAgents(channel)
     .filter((a) => a.id !== agent.id)
     .map((a) => `- @${a.name}（${a.role}）`)
@@ -773,11 +788,14 @@ function buildDynamicContext(agent: Agent, channel: Channel): string {
     .map((d) => `- 《${d.title}》（id: ${d.id}，作者: ${d.agent_id ? getAgent(d.agent_id)?.name ?? "?" : "用户"}）`)
     .join("\n");
   const memory = getMemory(agent.id);
-  // 技能（Osaurus）：横切的工作方法，启用后注入所有同事；总量封顶防上下文膨胀
+  // 技能（Osaurus）：横切的工作方法。按相关性注入——只给与当前任务/消息相关的专项方法，
+  // 通用与自定义技能始终在；无明显信号（focus 为空或全不匹配）时回退为全注入，不回归。总量封顶防膨胀。
+  const enabled = listSkills().filter((sk) => sk.enabled);
+  const relevant = enabled.filter((sk) => skillRelevant(sk, focus));
+  const pool = focus && relevant.length > 0 ? relevant : enabled;
   let skillsBlock = "";
   let skillBudget = 4000;
-  for (const sk of listSkills()) {
-    if (!sk.enabled) continue;
+  for (const sk of pool) {
     const piece = `### 技能：${sk.name}\n${sk.content}`;
     if (piece.length > skillBudget) break;
     skillBudget -= piece.length;
@@ -1262,7 +1280,8 @@ async function llmLoop(
   const { agent, channel } = ctx;
 
   // 能力门控：服务端 web 工具按通道可用性；提示缓存仅官方 Anthropic API 启用
-  let dynamicCtx = buildDynamicContext(agent, channel);
+  // 用本次工作焦点（任务简报 / 用户消息）做技能相关性筛选——只注入相关专项方法
+  let dynamicCtx = buildDynamicContext(agent, channel, userPrompt);
   if (!rt.webTools) dynamicCtx += `\n\n注意：当前模型通道不支持 web_search/web_fetch 联网调研，依据已有上下文与常识工作，不确定的事实要明确说明未经核实。`;
   const system: Anthropic.TextBlockParam[] = [
     rt.official
