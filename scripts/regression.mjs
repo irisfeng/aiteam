@@ -170,6 +170,19 @@ check(
     `表格=${tbl ? `${tbl.header.length}列${tbl.rows.length}行` : "无"}`);
 }
 
+// WD1 write_document kind 契约校验：坏格式被拒（返回行号/分页提示），合法格式放行
+{
+  const v = engine.validateDocContent;
+  const slidesOk = v("slides", "# 封面\n\n---\n\n# 第二页\n\n- 要点") === null;
+  const slidesBad = typeof v("slides", "这是一段没有分页符的散文，被当成 slides") === "string"; // 无 --- 应拒
+  const sheetOk = v("sheet", "模型,价格\nA,1\nB,2") === null;
+  const sheetBad = (v("sheet", "模型,价格,速度\nA,1") || "").includes("列"); // 列数不齐应拒并提列
+  const reportOk = v("report", "正文非空即可") === null;
+  const emptyBad = typeof v("report", "   ") === "string";
+  check("WD1", "write_document 契约校验：坏格式拒收+引导，合法放行",
+    slidesOk && slidesBad && sheetOk && sheetBad && reportOk && emptyBad);
+}
+
 // ---------------------------------------------------------------------------
 // Phase 2：拉起服务，走 HTTP API（聊天/引用/文档/技能/MCP/用量/导出/模板/频道）
 // ---------------------------------------------------------------------------

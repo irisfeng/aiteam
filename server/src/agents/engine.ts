@@ -36,6 +36,7 @@ import {
   updateTask,
 } from "../db.js";
 import { broadcast } from "../bus.js";
+import { parseSlides } from "../pptx.js";
 import { callMcpTool, isMcpTool, mcpToolDefs } from "./mcp.js";
 import { IMAGE_TOOL, generateImage, imageGenAvailable } from "./images.js";
 
@@ -57,6 +58,55 @@ const MAX_CONCURRENT_WORK = 8;
  */
 const stripLoneSurrogates = (s: string): string =>
   s.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
+
+/** 拆一行 CSV（容忍双引号包裹的逗号与 "" 转义） */
+function splitCsvLine(line: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let q = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (q) {
+      if (ch === '"') { if (line[i + 1] === '"') { cur += '"'; i++; } else q = false; }
+      else cur += ch;
+    } else if (ch === '"') q = true;
+    else if (ch === ",") { out.push(cur); cur = ""; }
+    else cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+
+/**
+ * write_document 落库前的 kind 契约校验：坏格式不入库，返回可执行的修订提示让模型自纠
+ * （从源头挡住 slides 无分页 / sheet 列数不齐这类要到渲染期才暴露的问题）。返回 null = 通过。
+ */
+export function validateDocContent(kind: "report" | "slides" | "sheet", content: string): string | null {
+  const c = content.trim();
+  if (!c) return "正文为空。";
+  if (kind === "slides") {
+    if (!/\n\s*---\s*\n/.test(content))
+      return "slides 需要用单独一行 --- 分页（首页标题页，之后每页一个要点群），当前没有检测到任何分页符。";
+    const pages = parseSlides(content);
+    if (pages.length < 1) return "slides 没有解析出任何有效页面。";
+    if (pages.every((p) => !p.title)) return "slides 每页应有标题（以 # 开头），当前未检测到任何页标题。";
+    return null;
+  }
+  if (kind === "sheet") {
+    if (c.startsWith("|")) return null; // Markdown 表格是另一种合法形式，放行
+    const lines = c.split("\n").filter((l) => l.trim() !== "");
+    if (lines.length < 2) return "sheet 需要表头 + 至少一行数据。";
+    const headerCols = splitCsvLine(lines[0]).length;
+    if (headerCols < 2) return "sheet 表头至少 2 列（标准 CSV，逗号分隔）。";
+    for (let i = 1; i < lines.length; i++) {
+      const n = splitCsvLine(lines[i]).length;
+      if (n !== headerCols)
+        return `sheet 第 ${i + 1} 行有 ${n} 列，与表头 ${headerCols} 列不一致（含逗号的字段请用双引号包裹）。`;
+    }
+    return null;
+  }
+  return null; // report 仅要求非空
+}
 
 const envKey = process.env.ANTHROPIC_API_KEY;
 const envClient = envKey ? new Anthropic({ apiKey: envKey }) : null;
@@ -999,12 +1049,18 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
     }
     case "write_document": {
       const kind = ["report", "slides", "sheet"].includes(input.kind) ? input.kind : "report";
+      const content = String(input.content ?? "");
+      // 契约校验：坏格式不落库，作为 tool_result 返回引导自纠（不计入交付物，不广播）
+      const formatErr = validateDocContent(kind, content);
+      if (formatErr) {
+        return `⚠️ 文档未保存——格式不符合 kind=${kind} 的要求：${formatErr}\n请修正后重新调用 write_document 提交完整内容（不是补丁）。`;
+      }
       const doc = createDocument({
         channel_id: channel.id,
         task_id: ctx.taskId,
         agent_id: agent.id,
         title: String(input.title ?? "未命名").slice(0, 200),
-        content: String(input.content ?? ""),
+        content,
         kind,
       });
       ctx.createdDocIds.push(doc.id);
