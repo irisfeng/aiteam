@@ -19,6 +19,15 @@ interface Connection {
 const connections = new Map<string, Connection>(); // serverId -> 连接（懒建立）
 const failed = new Map<string, number>(); // serverId -> 失败时间（5 分钟内不重试）
 
+/** MCP 连接/调用超时：防一个挂死的插件把整个 agent 运行（消息）永久卡在 streaming。 */
+const MCP_TIMEOUT_MS = Number(process.env.AITEAM_MCP_TIMEOUT_MS ?? 45000);
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`${label}超时（>${Math.round(ms / 1000)}s）`)), ms)),
+  ]);
+}
+
 function sanitizeName(s: string): string {
   return s.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 24) || "srv";
 }
@@ -55,7 +64,7 @@ async function ensureConnection(server: McpServer): Promise<Connection | null> {
   const failedAt = failed.get(server.id);
   if (failedAt && Date.now() - failedAt < 5 * 60_000) return null; // 熔断窗口内不重试
   try {
-    const conn = await connect(server);
+    const conn = await withTimeout(connect(server), MCP_TIMEOUT_MS, `连接 MCP「${server.name}」`);
     connections.set(server.id, conn);
     failed.delete(server.id);
     return conn;
@@ -118,7 +127,11 @@ export async function callMcpTool(name: string, input: unknown): Promise<string>
   const hit = callCache.get(cacheKey);
   if (hit && Date.now() - hit.ts < CALL_CACHE_TTL) return hit.text;
   try {
-    const result = await conn.client.callTool({ name: toolName, arguments: (input ?? {}) as Record<string, unknown> });
+    const result = await withTimeout(
+      conn.client.callTool({ name: toolName, arguments: (input ?? {}) as Record<string, unknown> }),
+      MCP_TIMEOUT_MS,
+      `插件「${server.name}:${toolName}」调用`
+    );
     const parts: string[] = [];
     for (const block of (result.content as any[]) ?? []) {
       if (block?.type === "text") parts.push(block.text);

@@ -966,6 +966,20 @@ export function createDocument(d: {
   });
   return insert();
 }
+/** 启动自愈：把上次遗留的 streaming 中断态 agent 消息收口为 error，
+ *  避免插件挂死/服务重启后界面永久卡在「正在输入」。返回收口条数。 */
+export function finalizeStaleStreaming(): number {
+  const rows = db
+    .prepare("SELECT id, content FROM messages WHERE author_type = 'agent' AND status = 'streaming'")
+    .all() as { id: string; content: string }[];
+  const stmt = db.prepare("UPDATE messages SET status = 'error', content = ? WHERE id = ?");
+  for (const r of rows) {
+    const note = "⚠️ 运行已中断（插件超时或服务重启），消息未完成。";
+    stmt.run(r.content ? `${r.content}\n\n${note}` : note, r.id);
+  }
+  return rows.length;
+}
+
 export function deleteDocument(id: string): void {
   db.prepare("DELETE FROM documents WHERE id = ?").run(id);
 }

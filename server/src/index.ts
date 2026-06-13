@@ -7,6 +7,7 @@ import { WebSocketServer } from "ws";
 import { api } from "./routes.js";
 import { attachBus } from "./bus.js";
 import { seedIfEmpty } from "./seed.js";
+import { finalizeStaleStreaming } from "./db.js";
 import { isMock, recoverInFlightTasks, startScheduler } from "./agents/engine.js";
 import { assetsDir } from "./agents/images.js";
 
@@ -14,6 +15,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 8787);
 
 seedIfEmpty();
+const healed = finalizeStaleStreaming(); // 收口上次遗留的 streaming 中断消息，避免界面永久卡住
+if (healed) console.log(`[aiteam] 收口 ${healed} 条中断的流式消息`);
 startScheduler();
 recoverInFlightTasks();
 
