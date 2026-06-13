@@ -137,6 +137,20 @@ check(
   check("QW3", "计费分列：缓存读/写加权计费 + 老行兼容", fresh && compat);
 }
 
+// DOC1 文档版本归并：同 (task_id,kind) 再写即出新版覆盖旧版，listDocuments 只显当前版，历史可查
+{
+  const T = db.createTask({ channel_id: ch.id, title: "回归-文档版本", assignee_agent_id: eng.id, created_by: "user" });
+  const v1 = db.createDocument({ channel_id: ch.id, task_id: T.id, agent_id: eng.id, title: "回归报告 v1", content: "一", kind: "report" });
+  const v2 = db.createDocument({ channel_id: ch.id, task_id: T.id, agent_id: eng.id, title: "回归报告 v2", content: "二", kind: "report" });
+  const current = db.listDocuments().filter((d) => d.task_id === T.id);
+  const v1row = db.getDocument(v1.id);
+  const versions = db.listDocumentVersions(T.id, "report");
+  const ok =
+    current.length === 1 && current[0].id === v2.id && current[0].version === 2 &&
+    v1row.superseded_by === v2.id && versions.length === 2;
+  check("DOC1", "文档版本归并：同任务同 kind 再写出新版、列表只显当前版、历史可查", ok);
+}
+
 // ---------------------------------------------------------------------------
 // Phase 2：拉起服务，走 HTTP API（聊天/引用/文档/技能/MCP/用量/导出/模板/频道）
 // ---------------------------------------------------------------------------

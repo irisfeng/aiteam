@@ -518,7 +518,13 @@ async function runVerification(
     others.find((a) => a.id === task.created_by) ??
     others[0];
 
-  const doc = docIds.length > 0 ? getDocument(docIds[docIds.length - 1]) : undefined;
+  // 锚定该任务的「当前版」交付物（listDocuments 已只返当前版）：DeepSeek 乱序/多写时也验对版本，
+  // 优先 report，否则取最新当前版；兜底用本轮 createdDocIds 末位。
+  const taskDocs = listDocuments().filter((d) => d.task_id === taskId);
+  const doc =
+    taskDocs.find((d) => d.kind === "report") ??
+    taskDocs[0] ??
+    (docIds.length > 0 ? getDocument(docIds[docIds.length - 1]) : undefined);
   if (!doc) return { result: "revise", reasons: "没有找到交付物文档：必须用 write_document 提交正式交付物。" };
 
   audit(channel.id, `🔎 ${verifier.name} 开始验收任务「${task.title}」的交付物`);
@@ -829,7 +835,7 @@ const TOOLS: Anthropic.ToolUnion[] = [
   {
     name: "write_document",
     description:
-      "把一份正式交付物写入工作区文档库。文档应当完整、可直接使用，而不是片段。按交付物性质选择 kind：report=报告/PRD/方案（Markdown）；slides=演示文稿（Marp 约定：每页之间用单独一行 --- 分隔，首页为标题页，每页一个要点群，可直接生成 PPT）；sheet=表格/报表（标准 CSV：首行表头，逗号分隔，含逗号的字段用双引号包裹，可直接导入 Excel）。",
+      "把一份正式交付物写入工作区文档库。文档应当完整、可直接使用，而不是片段。按交付物性质选择 kind：report=报告/PRD/方案（Markdown）；slides=演示文稿（Marp 约定：每页之间用单独一行 --- 分隔，首页为标题页，每页一个要点群，可直接生成 PPT）；sheet=表格/报表（标准 CSV：首行表头，逗号分隔，含逗号的字段用双引号包裹，可直接导入 Excel）。注意：返工时对同一任务、同一 kind 再次调用本工具，会作为该交付物的新版本覆盖旧版（旧版进历史、列表只显最新），所以请提交完整新版而非补丁；若确需在同一任务下保留多份并列文档，请用不同 kind 或开新任务。",
     input_schema: {
       type: "object" as const,
       properties: {
