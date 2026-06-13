@@ -112,6 +112,31 @@ check("P0", "种子：4 内置同事 + 4 内置技能", agents.length === 4 && d
   check("D5", "断点恢复：doing 任务重启后续跑至交付", ok);
 }
 
+// QW1 验收防放水：校验者未给结构化裁决时，兜底为 revise（fail-closed），绝不默认通过
+check(
+  "QW1",
+  "验收防放水：无结构化裁决兜底为 revise 而非 pass",
+  engine.NO_VERDICT_FALLBACK.result === "revise" && engine.NO_VERDICT_FALLBACK.reasons.length > 0
+);
+
+// QW2 产出规范上移：buildWorkBrief 第 5 点强制结论先行 + 来源标注 + 交付自查表（运行时普惠所有任务）
+{
+  const T = db.createTask({ channel_id: ch.id, title: "回归-自查", assignee_agent_id: eng.id, created_by: "user" });
+  const brief = engine.buildWorkBrief(db.getTask(T.id), ch);
+  const ok = brief.includes("自查表") && brief.includes("结论先行") && brief.includes("来源");
+  check("QW2", "产出规范常驻：工作简报强制结论先行+来源+自查表", ok);
+}
+
+// QW3 计费分列：缓存读/写单独累计且加权计费，老行（无 cache_* 字段）向后兼容
+{
+  const u = db.readUsage(JSON.stringify({ input_tokens: 100, output_tokens: 50, cache_read_tokens: 1000, cache_creation_tokens: 200 }));
+  // promptTotal=100+1000+200=1300；billable=100+50+200*1.25+1000*0.1=500（缓存读按 1/10 价）
+  const fresh = u.promptTotal === 1300 && u.billable === 500;
+  const old = db.readUsage(JSON.stringify({ input_tokens: 300, output_tokens: 60 }));
+  const compat = old.promptTotal === 300 && old.billable === 360; // 老行无缓存字段：promptTotal=纯输入，billable=输入+输出
+  check("QW3", "计费分列：缓存读/写加权计费 + 老行兼容", fresh && compat);
+}
+
 // ---------------------------------------------------------------------------
 // Phase 2：拉起服务，走 HTTP API（聊天/引用/文档/技能/MCP/用量/导出/模板/频道）
 // ---------------------------------------------------------------------------

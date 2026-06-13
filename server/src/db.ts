@@ -612,6 +612,33 @@ export function updateMessage(
 }
 
 // ---- 用量统计（Helio 用量页同构：每日消耗 + 最近活动账本，含模型归因） ----
+// 计费权重：缓存读 ≈ 全价 1/10，缓存写 ≈ 1.25 倍（贴近 Anthropic 计费）。预算护栏据此估真实成本。
+const CACHE_READ_WEIGHT = 0.1;
+const CACHE_CREATE_WEIGHT = 1.25;
+/**
+ * 统一解析 usage_json（兼容老行：老行 input_tokens 已含缓存、无 cache_* 字段）。
+ * - promptTotal：展示用的总输入 token（纯输入 + 缓存读 + 缓存写），保持与历史展示口径一致；
+ * - billable：加权计费 token，缓存读/写按权重折算，供预算护栏更贴近真实成本。
+ */
+export function readUsage(json: string | null): {
+  input: number; output: number; cacheRead: number; cacheCreation: number; promptTotal: number; billable: number;
+} {
+  let input = 0, output = 0, cacheRead = 0, cacheCreation = 0;
+  if (json) {
+    try {
+      const u = JSON.parse(json);
+      input = u.input_tokens ?? 0;
+      output = u.output_tokens ?? 0;
+      cacheRead = u.cache_read_tokens ?? 0;
+      cacheCreation = u.cache_creation_tokens ?? 0;
+    } catch { /* ignore */ }
+  }
+  const promptTotal = input + cacheRead + cacheCreation;
+  // 取整：token 计数本就是整数，且避免 0.1 等权重引入浮点尾差（如 1000*0.1=100.0000…1）
+  const billable = Math.round(input + output + cacheCreation * CACHE_CREATE_WEIGHT + cacheRead * CACHE_READ_WEIGHT);
+  return { input, output, cacheRead, cacheCreation, promptTotal, billable };
+}
+
 export function usageDaily(days = 14): { date: string; input: number; output: number }[] {
   const since = Date.now() - days * 86400_000;
   const rows = db
@@ -621,11 +648,9 @@ export function usageDaily(days = 14): { date: string; input: number; output: nu
   for (const r of rows) {
     const date = new Date(r.created_at).toLocaleDateString("sv-SE", { timeZone: "Asia/Shanghai" });
     const s = byDay.get(date) ?? { input: 0, output: 0 };
-    try {
-      const u = JSON.parse(r.usage_json);
-      s.input += u.input_tokens ?? 0;
-      s.output += u.output_tokens ?? 0;
-    } catch { /* ignore */ }
+    const u = readUsage(r.usage_json);
+    s.input += u.promptTotal;
+    s.output += u.output;
     byDay.set(date, s);
   }
   const out: { date: string; input: number; output: number }[] = [];
@@ -916,19 +941,18 @@ export function markRoutineRun(id: string, date: string) {
 }
 
 /** 今日各 Agent 的消息用量（tokens）与交付数，供团队视图使用 */
-export function agentDailyStats(sinceTs: number): Map<string, { input: number; output: number; delivered: number }> {
-  const stats = new Map<string, { input: number; output: number; delivered: number }>();
+export function agentDailyStats(sinceTs: number): Map<string, { input: number; output: number; billable: number; delivered: number }> {
+  const stats = new Map<string, { input: number; output: number; billable: number; delivered: number }>();
   const rows = db
     .prepare("SELECT author_id, usage_json FROM messages WHERE author_type = 'agent' AND created_at >= ?")
     .all(sinceTs) as { author_id: string; usage_json: string | null }[];
   for (const r of rows) {
     if (!r.author_id || !r.usage_json) continue;
-    const s = stats.get(r.author_id) ?? { input: 0, output: 0, delivered: 0 };
-    try {
-      const u = JSON.parse(r.usage_json);
-      s.input += u.input_tokens ?? 0;
-      s.output += u.output_tokens ?? 0;
-    } catch { /* ignore */ }
+    const s = stats.get(r.author_id) ?? { input: 0, output: 0, billable: 0, delivered: 0 };
+    const u = readUsage(r.usage_json);
+    s.input += u.promptTotal; // 展示口径：总输入 token
+    s.output += u.output;
+    s.billable += u.billable; // 预算口径：加权计费 token
     stats.set(r.author_id, s);
   }
   const delivered = db
@@ -937,7 +961,7 @@ export function agentDailyStats(sinceTs: number): Map<string, { input: number; o
     )
     .all(sinceTs) as { id: string; n: number }[];
   for (const d of delivered) {
-    const s = stats.get(d.id) ?? { input: 0, output: 0, delivered: 0 };
+    const s = stats.get(d.id) ?? { input: 0, output: 0, billable: 0, delivered: 0 };
     s.delivered = d.n;
     stats.set(d.id, s);
   }

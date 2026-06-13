@@ -13,6 +13,7 @@ import {
   getMessage,
   listMcpServers,
   listSkills,
+  readUsage,
   renameChannel,
   sanitizeMcpServer,
   setMcpServerEnabled,
@@ -223,19 +224,14 @@ api.get("/usage", (_req, res) => {
   res.json({
     daily: usageDaily(14),
     recent: usageRecent(40).map((r) => {
-      let input = 0, output = 0;
-      try {
-        const u = JSON.parse(r.usage_json);
-        input = u.input_tokens ?? 0;
-        output = u.output_tokens ?? 0;
-      } catch { /* ignore */ }
+      const u = readUsage(r.usage_json);
       return {
         ts: r.created_at,
         agent: agents[r.author_id] ?? r.author_id,
         model: r.model || "—",
         snippet: r.snippet,
-        input,
-        output,
+        input: u.promptTotal,
+        output: u.output,
       };
     }),
   });

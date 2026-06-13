@@ -267,7 +267,8 @@ function budgetExhausted(): boolean {
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
   let total = 0;
-  for (const s of agentDailyStats(startOfDay.getTime()).values()) total += s.input + s.output;
+  // 用加权计费 token（缓存读/写折算）估真实成本，不再把缓存读当全价 input 而提前熔断（见 QW3）。
+  for (const s of agentDailyStats(startOfDay.getTime()).values()) total += s.billable;
   return total >= budget;
 }
 
@@ -432,7 +433,7 @@ async function runTaskWork(agent: Agent, taskId: string) {
   }
 }
 
-function buildWorkBrief(task: Task, channel: Channel): string {
+export function buildWorkBrief(task: Task, channel: Channel): string {
   const depDocs = taskDependsOn(task)
     .map((id) => getTask(id))
     .filter((t): t is Task => Boolean(t))
@@ -464,7 +465,7 @@ function buildWorkBrief(task: Task, channel: Channel): string {
     `2. 如需要事实、数据或最新外部信息，先用 web_search / web_fetch 或可用插件调研，不要凭空编造；外部检索按次计费——先想清楚要查什么、合并关键词，单任务尽量不超过 3 次；能从已有文档（read_document）获得的不要重复检索。研究/写作类任务按"多视角列问题 → 搭大纲 → 成文"推进，重要事实注明来源；`,
     `3. 用 write_document 产出完整、可直接使用的交付物，按任务性质选格式 kind：报告/方案用 report，需要演示就交 slides（Marp 分页），数据/报表交 sheet（CSV）——必要时可以多份组合（如 report + slides）；正文要详尽，逐条覆盖验收标准；${imageGenAvailable() ? "需要视觉表达（封面/概念示意/PPT 配图）时可用 generate_image 生成 1-2 张点睛配图，把返回的 Markdown 图片行原样放进交付物正文（数据图表交 sheet 即可，不要用文生图画图表）；" : ""}`,
     `4. 交付前用 save_memory 记录至多 1 条本次任务沉淀的「核实过的事实」或「通用规则」（不要记流水账）；`,
-    `5. 在回复正文给出简短交付摘要：做了什么、关键结论、需要谁跟进什么；`,
+    `5. 交付物正文一律结论先行（开头给核心结论 / TL;DR）、要点 MECE，关键事实与数据注明来源和检索日期；并在回复正文附「交付自查表」：逐条列出验收标准 → 满足 / 不满足 → 证据位置（章节或文档内定位），最后一句说明需要谁跟进什么；`,
     `6. 任务状态由系统管理，不要调用 update_task 改本任务状态；关单（done）只能由人类完成；`,
     `7. 如发现衍生工作，可用 create_task 开新任务并指派给合适的同事。`,
   ]
@@ -493,6 +494,12 @@ function buildReworkBrief(task: Task, channel: Channel, feedback: string): strin
 // ---------------------------------------------------------------------------
 // 验收循环：干净上下文的校验者按 rubric 逐条核验（verifier ≠ self-critique）
 // ---------------------------------------------------------------------------
+
+/** 校验者未产出结构化裁决时的兜底裁决：fail-closed，绝不默认通过（见 docs/harness-analysis.html · QW1）。 */
+export const NO_VERDICT_FALLBACK: { result: "revise"; reasons: string } = {
+  result: "revise",
+  reasons: "校验者未产出结构化裁决，按未通过处理。请补全交付内容与逐条自查表后重新提交。",
+};
 
 async function runVerification(
   worker: Agent,
@@ -558,8 +565,25 @@ async function runVerification(
   // 验收是质量闭环的下限：官方通道可用时强制走最强模型
   await streamRun(ctx, prompt, 3, 0, { toolsOverride: verifierTools, preferStrong: true });
   if (!ctx.verdict) {
-    audit(channel.id, `ℹ️ ${verifier.name} 未提交结构化裁决，按通过处理`);
-    return { result: "pass", reasons: "" };
+    // 不结构化裁决不能默认通过——强约束重试一轮，明确要求只能用 submit_verdict 收尾
+    const retryPrompt = [
+      `你上一轮没有提交结构化裁决。现在必须且只能通过调用 submit_verdict 工具给出最终裁决，禁止用纯文本结尾。`,
+      `任务：${task.title}`,
+      task.acceptance_criteria
+        ? `验收标准（逐条核验）：\n${task.acceptance_criteria}`
+        : `（无明确验收标准，按完整性 / 可直接使用 / 无明显错误判断）`,
+      `交付物《${doc.title}》全文：`,
+      `<deliverable>`,
+      stripLoneSurrogates(doc.content.slice(0, 16000)),
+      `</deliverable>`,
+      `逐条核验后立即调用 submit_verdict（result: pass 或 revise，reasons 给理由 / 修订意见）。`,
+    ].join("\n");
+    await streamRun(ctx, retryPrompt, 3, 0, { toolsOverride: verifierTools, preferStrong: true });
+  }
+  if (!ctx.verdict) {
+    // 两轮仍无结构化裁决：fail-closed，退回返工兜住，绝不放水（质量下限关键修复）
+    audit(channel.id, `⚠️ ${verifier.name} 两轮均未提交结构化裁决，按未通过处理并退回修订`);
+    return NO_VERDICT_FALLBACK;
   }
   return ctx.verdict;
 }
@@ -1139,7 +1163,7 @@ async function streamRun(
   };
 
   try {
-    let usage = { input_tokens: 0, output_tokens: 0 };
+    let usage = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 };
     const rt = resolveRuntime(agent, opts);
     if (!rt.client) {
       await mockRun(ctx, emit);
@@ -1170,7 +1194,7 @@ async function llmLoop(
   emit: (delta: string) => void,
   extraSystem?: string,
   toolsOverride?: Anthropic.ToolUnion[]
-): Promise<{ input_tokens: number; output_tokens: number }> {
+): Promise<{ input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_creation_tokens: number }> {
   const client = rt.client;
   if (!client) throw new Error("no client");
   const { agent, channel } = ctx;
@@ -1214,7 +1238,7 @@ async function llmLoop(
           (b) => b.type === "text" || b.type === "tool_use" || b.type === "thinking" || b.type === "redacted_thinking"
         )) as Anthropic.MessageParam["content"];
 
-  const usage = { input_tokens: 0, output_tokens: 0 };
+  const usage = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 };
   let firstText = true;
   let emitted = false;
   let steerSince = Date.now(); // 运行中插话：此刻之后的用户消息会注入下一轮迭代
@@ -1276,10 +1300,10 @@ async function llmLoop(
       }
       throw err;
     }
-    usage.input_tokens +=
-      final.usage.input_tokens +
-      (final.usage.cache_read_input_tokens ?? 0) +
-      (final.usage.cache_creation_input_tokens ?? 0);
+    // 计费分列：缓存读/写单独累计，input_tokens 只记纯输入。预算护栏据此加权，不再把 1/10 价的缓存读当全价（见 QW3）。
+    usage.input_tokens += final.usage.input_tokens;
+    usage.cache_read_tokens += final.usage.cache_read_input_tokens ?? 0;
+    usage.cache_creation_tokens += final.usage.cache_creation_input_tokens ?? 0;
     usage.output_tokens += final.usage.output_tokens;
 
     if (final.stop_reason === "pause_turn") {
