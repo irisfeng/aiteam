@@ -6,11 +6,17 @@
  * 用法：npm run build && node scripts/regression.mjs
  */
 import { spawn, execSync } from "node:child_process";
-import { rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+// 隔离测试库：所有读写（含 Phase 2 spawn 的子进程，env 继承）落在临时目录，
+// 绝不触碰 server/data 生产工作区（那里有用户的密钥配置/项目/文档）。
+const testDataDir = mkdtempSync(join(tmpdir(), "aiteam-regress-"));
+process.env.AITEAM_DATA_DIR = testDataDir;
 const PORT = 8799;
 const BASE = `http://localhost:${PORT}/api`;
 
@@ -35,8 +41,6 @@ async function waitFor(fn, timeout = 20000, interval = 400) {
 // ---------------------------------------------------------------------------
 // Phase 1：进程内直驱引擎（DAG / 计划把关 / 停止 / 预算 / 断点恢复）
 // ---------------------------------------------------------------------------
-rmSync(join(root, "server/data"), { recursive: true, force: true });
-
 const db = await import(join(root, "server/dist/db.js"));
 const { seedIfEmpty } = await import(join(root, "server/dist/seed.js"));
 const engine = await import(join(root, "server/dist/agents/engine.js"));
@@ -251,6 +255,7 @@ try {
   }
 } finally {
   server.kill();
+  rmSync(testDataDir, { recursive: true, force: true });
 }
 
 console.log("\n——— 回归结果 ———");

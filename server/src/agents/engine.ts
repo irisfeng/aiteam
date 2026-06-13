@@ -49,6 +49,15 @@ const IMAGES_PER_RUN = Number(process.env.AITEAM_IMAGES_PER_RUN ?? 3);
 const MAX_WORK_ITERATIONS = 8;
 const MAX_CONCURRENT_WORK = 8;
 
+/**
+ * 剔除落单的 UTF-16 代理项（unpaired surrogate）。
+ * 文档/转写按 .slice(0,N) 截断时，截断点可能落在 emoji 等代理对中间，留下半个代理；
+ * JSON.stringify 会把它序列化成 \udXXX，DeepSeek 等严格端点会以
+ * 400「unexpected end of hex escape」拒收整段请求。回传给模型前统一清洗。
+ */
+const stripLoneSurrogates = (s: string): string =>
+  s.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
+
 const envKey = process.env.ANTHROPIC_API_KEY;
 const envClient = envKey ? new Anthropic({ apiKey: envKey }) : null;
 
@@ -410,9 +419,12 @@ async function runTaskWork(agent: Agent, taskId: string) {
     audit(channel.id, `↩️ 验收未通过，任务「${task.title}」退回 ${agent.name} 修订（第 ${revisions} 次）`);
   }
 
+  // 交付点（验收已结束）：正常情况任务仍为 doing。但 DeepSeek 等 agent 可能无视系统约束、
+  // 自调 update_task 把本任务状态改成 review；若此时只认 "doing"，系统就不会补发交付/解锁依赖，
+  // 整个项目会卡死在「最后一个前置任务已 review 但下游纹丝不动」。故 doing/review 都要走交付解锁。
   const after = getTask(task.id);
-  if (after && after.status === "doing") {
-    const review = setTaskStatus(task.id, "review");
+  if (after && (after.status === "doing" || after.status === "review")) {
+    const review = after.status === "review" ? after : setTaskStatus(task.id, "review");
     if (review) {
       audit(channel.id, `📦 ${agent.name} 已交付任务「${review.title}」，转入待评审`);
       onTaskDelivered(review);
@@ -457,6 +469,7 @@ function buildWorkBrief(task: Task, channel: Channel): string {
     `7. 如发现衍生工作，可用 create_task 开新任务并指派给合适的同事。`,
   ]
     .filter(Boolean)
+    .map((line) => stripLoneSurrogates(line as string))
     .join("\n");
 }
 
@@ -473,6 +486,7 @@ function buildReworkBrief(task: Task, channel: Channel, feedback: string): strin
     `要求：针对意见逐条修复，用 write_document 重新提交完整的新版本（不是补丁），并在回复中说明改了什么。`,
   ]
     .filter(Boolean)
+    .map((line) => stripLoneSurrogates(line as string))
     .join("\n");
 }
 
@@ -514,7 +528,7 @@ async function runVerification(
     ``,
     `交付物《${doc.title}》全文：`,
     `<deliverable>`,
-    doc.content.slice(0, 16000),
+    stripLoneSurrogates(doc.content.slice(0, 16000)),
     `</deliverable>`,
     ``,
     `请逐条给出核验结论（满足/不满足及理由），随后必须调用 submit_verdict 提交最终裁决：`,
@@ -640,7 +654,9 @@ function authorLabel(m: Message): string {
 }
 
 function clip(text: string, max: number): string {
-  return text.length > max ? `${text.slice(0, max)}…[已截断，全文 ${text.length} 字，对应交付物请用 read_document 查阅]` : text;
+  return text.length > max
+    ? `${stripLoneSurrogates(text.slice(0, max))}…[已截断，全文 ${text.length} 字，对应交付物请用 read_document 查阅]`
+    : text;
 }
 
 function buildTranscript(channelId: string, window = TRANSCRIPT_WINDOW): string {
@@ -970,7 +986,7 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
     case "read_document": {
       const doc = getDocument(String(input.doc_id));
       if (!doc) return `错误：找不到文档 ${input.doc_id}`;
-      return `《${doc.title}》\n\n${doc.content.slice(0, 20000)}`;
+      return stripLoneSurrogates(`《${doc.title}》\n\n${doc.content.slice(0, 20000)}`);
     }
     case "request_approval": {
       const approval = createApproval({
@@ -1188,9 +1204,15 @@ async function llmLoop(
     ];
   let tools: Anthropic.ToolUnion[] = buildTools();
   const isWebTool = (t: Anthropic.ToolUnion) => "type" in t && typeof t.type === "string" && t.type.startsWith("web_");
-  // 兼容端点不接受服务端内容块（搜索结果/server tool 等）回传——回传前剥离，只保留文本与客户端工具调用
+  // 兼容端点不接受服务端内容块（搜索结果/server tool 等）回传——回传前剥离，只保留文本与客户端工具调用。
+  // 但 thinking/redacted_thinking 必须原样回传：DeepSeek 等会自带 thinking 块，多轮工具循环里若被剥掉，
+  // 端点会以 400「content[].thinking must be passed back」拒绝整段对话。
   const echoContent = (content: Anthropic.Message["content"]) =>
-    (rt.official ? content : content.filter((b) => b.type === "text" || b.type === "tool_use")) as Anthropic.MessageParam["content"];
+    (rt.official
+      ? content
+      : content.filter(
+          (b) => b.type === "text" || b.type === "tool_use" || b.type === "thinking" || b.type === "redacted_thinking"
+        )) as Anthropic.MessageParam["content"];
 
   const usage = { input_tokens: 0, output_tokens: 0 };
   let firstText = true;

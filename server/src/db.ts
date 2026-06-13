@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 import { nanoid } from "nanoid";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const dataDir = join(__dirname, "..", "data");
+// AITEAM_DATA_DIR：测试/多实例可指向隔离目录；不设则用默认 server/data
+const dataDir = process.env.AITEAM_DATA_DIR || join(__dirname, "..", "data");
 mkdirSync(dataDir, { recursive: true });
 
 export const db = new Database(join(dataDir, "aiteam.db"));
@@ -769,6 +770,23 @@ export function updateProject(
     "UPDATE projects SET title = @title, goal = @goal, status = @status, summary_doc_id = @summary_doc_id, updated_at = @updated_at WHERE id = @id"
   ).run(next);
   return next;
+}
+/**
+ * 项目级批量关单（human-only 的关闭动作，一次决策关掉整个项目）：
+ * 把该项目所有"待评审/进行中/待办"的任务一次性置 done，并把项目本身置 done。
+ * 返回被改动的任务（供前端/SSE 增量更新）与项目。
+ */
+export function closeProject(projectId: string): { project: Project | undefined; tasks: Task[] } {
+  const project = getProject(projectId);
+  if (!project) return { project: undefined, tasks: [] };
+  const open = (db.prepare("SELECT * FROM tasks WHERE project_id = ? AND status != 'done'").all(projectId) as Task[]);
+  const updated: Task[] = [];
+  for (const t of open) {
+    const next = updateTask(t.id, { status: "done" });
+    if (next) updated.push(next);
+  }
+  const nextProject = updateProject(projectId, { status: "done" });
+  return { project: nextProject, tasks: updated };
 }
 
 // ---- approvals ----

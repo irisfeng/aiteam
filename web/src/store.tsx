@@ -189,6 +189,7 @@ interface Store extends State {
   updateProvider: (id: string, data: import("./api").ProviderInput) => Promise<void>;
   deleteProvider: (id: string) => Promise<void>;
   moveTask: (task: Task, status: Task["status"]) => Promise<void>;
+  closeProject: (projectId: string) => Promise<void>;
   resolveApproval: (id: string, approve: boolean) => Promise<void>;
   agentById: (id: string | null) => Agent | undefined;
 }
@@ -339,6 +340,11 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       moveTask: async (task, status) => {
         const next = await api.updateTask(task.id, { status });
         dispatch({ type: "task:upsert", task: next });
+      },
+      closeProject: async (projectId) => {
+        const { project, tasks } = await api.closeProject(projectId);
+        for (const t of tasks) dispatch({ type: "task:upsert", task: t });
+        dispatch({ type: "project:upsert", project });
       },
       resolveApproval: async (id, approve) => {
         const approval = await api.resolveApproval(id, approve);

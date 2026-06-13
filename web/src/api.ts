@@ -92,4 +92,6 @@ export const api = {
     req<Task>(`/tasks/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
   resolveApproval: (id: string, approve: boolean) =>
     req<Approval>(`/approvals/${id}/resolve`, { method: "POST", body: JSON.stringify({ approve }) }),
+  closeProject: (id: string) =>
+    req<{ project: Project; tasks: Task[] }>(`/projects/${id}/close`, { method: "POST" }),
 };

@@ -2,6 +2,7 @@ import { Router } from "express";
 import {
   clearChannelMessages,
   clearMemory,
+  closeProject,
   createAgent,
   createMcpServer,
   createSkill,
@@ -373,6 +374,15 @@ api.patch("/tasks/:id", (req, res) => {
 api.post("/tasks/:id/stop", (req, res) => {
   stopTask(req.params.id);
   res.json({ ok: true });
+});
+
+/** 项目级批量关单（human-only）：一次决策把整个项目的剩余任务与项目本身置 done */
+api.post("/projects/:id/close", (req, res) => {
+  const { project, tasks } = closeProject(req.params.id);
+  if (!project) return res.status(404).json({ error: "project not found" });
+  for (const t of tasks) broadcast({ type: "task:upsert", payload: t });
+  broadcast({ type: "project:upsert", payload: project });
+  res.json({ project, tasks });
 });
 
 api.get("/documents", (_req, res) => res.json(listDocuments()));
