@@ -26,9 +26,11 @@ interface SlidePage {
   notes: string;
 }
 
-/** /assets/xxx.png → 磁盘路径（仅本地生成图可嵌入 pptx；外链跳过） */
+/** assets/xxx.png → 磁盘路径（仅本地生成图可嵌入 pptx；外链跳过）。
+ *  生成工具回传的是 /assets/xxx.png，但 LLM 落进 Markdown 时常把它改写成
+ *  assets/xxx.png 或 ./assets/xxx.png（相对路径），这里一并容忍，否则配图嵌不进 pptx。 */
 function localImagePath(src: string): string | null {
-  const m = src.match(/^\/assets\/([\w.-]+)$/);
+  const m = src.match(/^\.?\/?assets\/([\w.-]+)$/);
   if (!m) return null;
   const file = join(assetsDir, m[1]);
   return existsSync(file) ? file : null;
@@ -58,13 +60,18 @@ export function parseSlides(content: string): SlidePage[] {
   for (let i = 0; i < raw.length; i++) {
     if (i === 0 && isFrontmatter(raw[i])) continue;
     const page: SlidePage = { title: "", bullets: [], paragraphs: [], images: [], notes: "" };
-    for (const line of raw[i].split("\n")) {
-      const t = line.trim();
-      const note = t.match(/^<!--\s*(?:note:?\s*)?([\s\S]*?)\s*-->$/i);
-      if (note) {
-        page.notes += (page.notes ? "\n" : "") + note[1];
-        continue;
+    // 先在整块上剥离 HTML 注释（含跨行块）：`<!-- note: … -->` 转讲者备注，
+    // 其余注释整块丢弃。按行解析做不到这点——多行注释的中间行不以 `-->` 收尾，
+    // 会漏成正文渲染进幻灯片（实测出现在标题页 <a:t> 文本里）。
+    const block = raw[i].replace(/<!--([\s\S]*?)-->/g, (_m, inner) => {
+      const note = String(inner).match(/^\s*note(?::|\s)\s*([\s\S]*?)\s*$/i);
+      if (note && note[1].trim()) {
+        page.notes += (page.notes ? "\n" : "") + note[1].trim();
       }
+      return "";
+    });
+    for (const line of block.split("\n")) {
+      const t = line.trim();
       const img = t.match(/^!\[[^\]]*\]\(([^)\s]+)\)$/);
       if (img) {
         const file = localImagePath(img[1]);
