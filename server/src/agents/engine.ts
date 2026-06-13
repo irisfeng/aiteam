@@ -1303,6 +1303,10 @@ async function llmLoop(
           } else {
             mcpCalls++;
             result = await callMcpTool(tu.name, tu.input);
+            // 持久化审计：插件调用此前只发瞬态 status，事后无法从时间线/账本判断用没用某插件。
+            // 仿配图那条落一行可核查的 system 消息——只记 server:tool 名，绝不写参数/密钥/返回内容。
+            const mcp = tu.name.match(/^mcp__(.+?)__(.+)$/);
+            audit(channel.id, `🔌 ${agent.name} 调用了插件 ${mcp ? `${mcp[1]}:${mcp[2]}` : tu.name}`);
           }
         } else if (tu.name === "generate_image") {
           if (imageCalls >= IMAGES_PER_RUN) {
