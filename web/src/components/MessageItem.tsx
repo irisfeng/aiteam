@@ -52,7 +52,11 @@ export const MessageItem = memo(function MessageItem({
 
   return (
     <div className="msg-in group flex gap-3 px-4 py-2 hover:bg-sel/50">
-      {isAgent ? <AgentAvatar agent={agent} /> : <UserAvatar name={name} />}
+      {isAgent ? (
+        <AgentAvatar agent={agent} state={message.status === "streaming" ? "responding" : undefined} />
+      ) : (
+        <UserAvatar name={name} />
+      )}
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline gap-1.5">
           <span className="text-[13.5px] font-semibold">{name}</span>

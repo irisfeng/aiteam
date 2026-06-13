@@ -102,5 +102,21 @@ body, aside, main, header, div, button, input, textarea, select, span, table, th
 }
 .msg-in { animation: fade-in 0.18s ease-out; }
 
+/* ===== 会眨眼的优雅小球头像（Claude Design 交接稿） ===== */
+/* 轻轻上下浮动 + 呼吸 + 错峰偶尔眨眼；眼睛跟随鼠标由 JS 驱动 */
+@keyframes orb-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-7%); } }
+@keyframes orb-breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.04); } }
+@keyframes orb-blink { 0%, 88%, 100% { transform: scaleY(1); } 92% { transform: scaleY(0.1); } 96% { transform: scaleY(1); } }
+.orb-float { animation: orb-float var(--fdur, 5.4s) ease-in-out var(--d, 0s) infinite; }
+.orb-body { animation: orb-breathe var(--fdur, 5.4s) ease-in-out var(--d, 0s) infinite; }
+.orb-eye-lid { animation: orb-blink var(--bdur, 5s) ease-in-out var(--d, 0s) infinite; }
+/* 忙碌时（思考/输出中）呼吸更快、更有活力 */
+.orb-wrap[data-active="1"] .orb-body { animation-duration: 1.6s; }
+.orb-wrap[data-active="1"] .orb-eye-lid { animation-duration: 2.4s; }
+.orb-wrap:hover .orb-body { animation-duration: 2s; }
+@media (prefers-reduced-motion: reduce) {
+  .orb-float, .orb-body, .orb-eye-lid { animation: none !important; }
+}
+
 /* 细滚动条 */
 * { scrollbar-width: thin; scrollbar-color: var(--t-line) transparent; }

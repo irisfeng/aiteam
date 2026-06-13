@@ -23,6 +23,11 @@ export function withOwner<T>(ownerId: string, fn: () => T): T {
   return als.run({ ownerId }, fn);
 }
 
+/** 进入 owner 上下文且无需回调（顶层脚本/测试用；HTTP 请求与运行循环仍用 withOwner 包裹）。 */
+export function enterOwner(ownerId: string): void {
+  als.enterWith({ ownerId });
+}
+
 /** 当前 owner；缺上下文返回 null（仅用于 broadcast 等需要 fail-safe 跳过的场景）。 */
 export function currentOwnerOrNull(): string | null {
   return als.getStore()?.ownerId ?? null;

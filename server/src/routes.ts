@@ -15,6 +15,7 @@ import {
   listSkills,
   readUsage,
   renameChannel,
+  setChannelAgents,
   sanitizeMcpServer,
   setMcpServerEnabled,
   updateSkill,
@@ -67,6 +68,7 @@ import {
   onPlanResolved,
   onTaskAssigned,
   onTaskDelivered,
+  stopChannel,
   stopTask,
   teamStatus,
   triggerAgent,
@@ -115,6 +117,18 @@ api.post("/channels/:id/messages", (req, res) => {
   broadcast({ type: "message:new", payload: msg });
   onMessage(msg);
   res.json(msg);
+});
+
+/** 频道级停止：中断该频道里正在跑的 AI 运行（含没有 taskId 的聊天回复）。 */
+api.post("/channels/:id/stop", (req, res) => {
+  const channel = getChannel(req.params.id);
+  if (!channel) return res.status(404).json({ error: "channel not found" });
+  const stopped = stopChannel(channel.id);
+  if (stopped) {
+    const sys = insertMessage({ channel_id: channel.id, author_type: "system", content: "⏹ 已按用户要求停止当前运行" });
+    broadcast({ type: "message:new", payload: sys });
+  }
+  res.json({ ok: true, stopped });
 });
 
 api.post("/channels", (req, res) => {
@@ -257,10 +271,18 @@ api.delete("/channels/:id/messages", (req, res) => {
 });
 
 api.patch("/channels/:id", (req, res) => {
-  const name = String(req.body?.name ?? "").trim().replace(/^#/, "");
-  if (!name) return res.status(400).json({ error: "name required" });
-  const channel = renameChannel(req.params.id, name);
+  let channel = getChannel(req.params.id);
   if (!channel) return res.status(404).json({ error: "channel not found" });
+  // 改名（可选）
+  if (req.body?.name !== undefined) {
+    const name = String(req.body.name).trim().replace(/^#/, "");
+    if (!name) return res.status(400).json({ error: "name required" });
+    channel = renameChannel(channel.id, name) ?? channel;
+  }
+  // 增减 AI 成员（可选，按场景定制）
+  if (Array.isArray(req.body?.agent_ids)) {
+    channel = setChannelAgents(channel.id, req.body.agent_ids.map(String)) ?? channel;
+  }
   broadcast({ type: "channel:update", payload: channel });
   res.json(channel);
 });

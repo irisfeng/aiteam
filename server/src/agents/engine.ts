@@ -39,6 +39,7 @@ import {
 } from "../db.js";
 import { broadcast } from "../bus.js";
 import { currentOwner, withOwner } from "../ownerScope.js";
+import { parseSlides } from "../pptx.js";
 import { callMcpTool, isMcpTool, mcpToolDefs } from "./mcp.js";
 import { IMAGE_TOOL, generateImage, imageGenAvailable } from "./images.js";
 
@@ -60,6 +61,55 @@ const MAX_CONCURRENT_WORK = 8;
  */
 const stripLoneSurrogates = (s: string): string =>
   s.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
+
+/** 拆一行 CSV（容忍双引号包裹的逗号与 "" 转义） */
+function splitCsvLine(line: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let q = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (q) {
+      if (ch === '"') { if (line[i + 1] === '"') { cur += '"'; i++; } else q = false; }
+      else cur += ch;
+    } else if (ch === '"') q = true;
+    else if (ch === ",") { out.push(cur); cur = ""; }
+    else cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+
+/**
+ * write_document 落库前的 kind 契约校验：坏格式不入库，返回可执行的修订提示让模型自纠
+ * （从源头挡住 slides 无分页 / sheet 列数不齐这类要到渲染期才暴露的问题）。返回 null = 通过。
+ */
+export function validateDocContent(kind: "report" | "slides" | "sheet", content: string): string | null {
+  const c = content.trim();
+  if (!c) return "正文为空。";
+  if (kind === "slides") {
+    if (!/\n\s*---\s*\n/.test(content))
+      return "slides 需要用单独一行 --- 分页（首页标题页，之后每页一个要点群），当前没有检测到任何分页符。";
+    const pages = parseSlides(content);
+    if (pages.length < 1) return "slides 没有解析出任何有效页面。";
+    if (pages.every((p) => !p.title)) return "slides 每页应有标题（以 # 开头），当前未检测到任何页标题。";
+    return null;
+  }
+  if (kind === "sheet") {
+    if (c.startsWith("|")) return null; // Markdown 表格是另一种合法形式，放行
+    const lines = c.split("\n").filter((l) => l.trim() !== "");
+    if (lines.length < 2) return "sheet 需要表头 + 至少一行数据。";
+    const headerCols = splitCsvLine(lines[0]).length;
+    if (headerCols < 2) return "sheet 表头至少 2 列（标准 CSV，逗号分隔）。";
+    for (let i = 1; i < lines.length; i++) {
+      const n = splitCsvLine(lines[i]).length;
+      if (n !== headerCols)
+        return `sheet 第 ${i + 1} 行有 ${n} 列，与表头 ${headerCols} 列不一致（含逗号的字段请用双引号包裹）。`;
+    }
+    return null;
+  }
+  return null; // report 仅要求非空
+}
 
 const envKey = process.env.ANTHROPIC_API_KEY;
 const envClient = envKey ? new Anthropic({ apiKey: envKey }) : null;
@@ -257,10 +307,36 @@ const agentQueues = new Map<string, Promise<void>>();
 const currentWork = new Map<string, string>(); // agentId -> 正在执行的 taskId
 const queuedCount = new Map<string, number>(); // agentId -> 排队中的任务数
 const cancelledTasks = new Set<string>(); // 用户按下停止开关的任务
+const cancelledChannels = new Set<string>(); // 用户在频道里按下停止（覆盖聊天回复 + 该频道的任务运行）
+const activeStreams = new Map<string, Set<{ abort(): void }>>(); // channelId -> 正在跑的流（可 abort 中断）
+
+/** 登记一个在跑的流，返回注销函数（运行结束时调用，顺带清理频道停止标志）。 */
+function registerStream(channelId: string, stream: { abort(): void }): () => void {
+  let set = activeStreams.get(channelId);
+  if (!set) { set = new Set(); activeStreams.set(channelId, set); }
+  set.add(stream);
+  return () => {
+    set!.delete(stream);
+    if (set!.size === 0) { activeStreams.delete(channelId); cancelledChannels.delete(channelId); }
+  };
+}
 
 /** 停止开关（kill switch）：运行中的任务在下一个迭代边界停下；排队中的任务直接不再开工。 */
 export function stopTask(taskId: string) {
   cancelledTasks.add(taskId);
+}
+
+/**
+ * 频道级停止：中断该频道里正在跑的全部 agent 运行（含没有 taskId 的聊天回复）——
+ * abort 在飞的流（能停正在吐字的那一轮），并置频道停止标志让多轮循环在边界也停。
+ * 返回是否有可停止的运行。
+ */
+export function stopChannel(channelId: string): boolean {
+  const set = activeStreams.get(channelId);
+  if (!set || set.size === 0) return false;
+  cancelledChannels.add(channelId);
+  for (const s of set) { try { s.abort(); } catch { /* ignore */ } }
+  return true;
 }
 
 /** 预算护栏（借鉴 Paperclip 的硬切断）：今日 token 总用量超限则不再自动开工。 */
@@ -713,7 +789,22 @@ function buildTranscript(channelId: string, window = TRANSCRIPT_WINDOW): string 
     .join("\n\n");
 }
 
-function buildDynamicContext(agent: Agent, channel: Channel): string {
+/** 内置技能的触发关键词：出现在任务简报/用户消息中才注入该专项方法。
+ *  无映射的技能（通用「交付自查清单」+ 用户自定义技能）默认始终注入，不回归。 */
+const SKILL_KEYWORDS: Record<string, string[]> = {
+  深度调研法: ["调研", "检索", "搜索", "搜一下", "资料", "来源", "事实", "核实", "竞品", "市场", "行业", "最新", "对比", "数据"],
+  金字塔写作法: ["写", "撰写", "报告", "文案", "方案", "prd", "文章", "稿", "总结", "演示", "slides", "ppt", "汇报", "白皮书", "长文"],
+  结构化头脑风暴: ["创意", "头脑风暴", "脑暴", "构思", "设计", "选型", "策划", "点子", "发散", "方案"],
+};
+/** 该技能是否与当前工作焦点相关（决定是否注入提示词，避免给调研任务塞写作法等无关方法） */
+export function skillRelevant(skill: { name: string }, focus: string): boolean {
+  const kws = SKILL_KEYWORDS[skill.name];
+  if (!kws) return true; // 通用/自定义技能始终注入
+  const f = focus.toLowerCase();
+  return kws.some((k) => f.includes(k.toLowerCase()));
+}
+
+function buildDynamicContext(agent: Agent, channel: Channel, focus = ""): string {
   const teammates = channelAgents(channel)
     .filter((a) => a.id !== agent.id)
     .map((a) => `- @${a.name}（${a.role}）`)
@@ -731,11 +822,14 @@ function buildDynamicContext(agent: Agent, channel: Channel): string {
     .map((d) => `- 《${d.title}》（id: ${d.id}，作者: ${d.agent_id ? getAgent(d.agent_id)?.name ?? "?" : "用户"}）`)
     .join("\n");
   const memory = getMemory(agent.id);
-  // 技能（Osaurus）：横切的工作方法，启用后注入所有同事；总量封顶防上下文膨胀
+  // 技能（Osaurus）：横切的工作方法。按相关性注入——只给与当前任务/消息相关的专项方法，
+  // 通用与自定义技能始终在；无明显信号（focus 为空或全不匹配）时回退为全注入，不回归。总量封顶防膨胀。
+  const enabled = listSkills().filter((sk) => sk.enabled);
+  const relevant = enabled.filter((sk) => skillRelevant(sk, focus));
+  const pool = focus && relevant.length > 0 ? relevant : enabled;
   let skillsBlock = "";
   let skillBudget = 4000;
-  for (const sk of listSkills()) {
-    if (!sk.enabled) continue;
+  for (const sk of pool) {
     const piece = `### 技能：${sk.name}\n${sk.content}`;
     if (piece.length > skillBudget) break;
     skillBudget -= piece.length;
@@ -1007,12 +1101,18 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
     }
     case "write_document": {
       const kind = ["report", "slides", "sheet"].includes(input.kind) ? input.kind : "report";
+      const content = String(input.content ?? "");
+      // 契约校验：坏格式不落库，作为 tool_result 返回引导自纠（不计入交付物，不广播）
+      const formatErr = validateDocContent(kind, content);
+      if (formatErr) {
+        return `⚠️ 文档未保存——格式不符合 kind=${kind} 的要求：${formatErr}\n请修正后重新调用 write_document 提交完整内容（不是补丁）。`;
+      }
       const doc = createDocument({
         channel_id: channel.id,
         task_id: ctx.taskId,
         agent_id: agent.id,
         title: String(input.title ?? "未命名").slice(0, 200),
-        content: String(input.content ?? ""),
+        content,
         kind,
       });
       ctx.createdDocIds.push(doc.id);
@@ -1217,7 +1317,8 @@ async function llmLoop(
   const { agent, channel } = ctx;
 
   // 能力门控：服务端 web 工具按通道可用性；提示缓存仅官方 Anthropic API 启用
-  let dynamicCtx = buildDynamicContext(agent, channel);
+  // 用本次工作焦点（任务简报 / 用户消息）做技能相关性筛选——只注入相关专项方法
+  let dynamicCtx = buildDynamicContext(agent, channel, userPrompt);
   if (!rt.webTools) dynamicCtx += `\n\n注意：当前模型通道不支持 web_search/web_fetch 联网调研，依据已有上下文与常识工作，不确定的事实要明确说明未经核实。`;
   const system: Anthropic.TextBlockParam[] = [
     rt.official
@@ -1264,8 +1365,8 @@ async function llmLoop(
   let imageCalls = 0; // 本次运行已生成的图片数（按张计费，设上限）
 
   for (let iteration = 0; iteration < maxIterations; iteration++) {
-    // 停止开关：在迭代边界停下（标志位由 runTaskWork 消费并落状态）
-    if (ctx.taskId && cancelledTasks.has(ctx.taskId)) {
+    // 停止开关：在迭代边界停下（任务停止 或 频道停止）
+    if ((ctx.taskId && cancelledTasks.has(ctx.taskId)) || cancelledChannels.has(channel.id)) {
       emit("\n\n⏹ 已按用户要求停止。");
       break;
     }
@@ -1277,6 +1378,7 @@ async function llmLoop(
       messages,
       tools,
     });
+    const unregister = registerStream(channel.id, stream);
 
     stream.on("text", (delta) => {
       if (firstText) {
@@ -1293,6 +1395,11 @@ async function llmLoop(
     } catch (err: any) {
       const errStatus = err?.status ?? err?.response?.status;
       const errMsg = String(err?.message ?? err);
+      // 频道/任务停止导致的 abort：最优先识别，不当成错误也不重试，直接收尾停下
+      if (cancelledChannels.has(channel.id) || (ctx.taskId && cancelledTasks.has(ctx.taskId)) || err?.name === "AbortError" || /abort/i.test(errMsg)) {
+        emit("\n\n⏹ 已停止。");
+        break;
+      }
       // 兼容端点联网工具适配阶梯：4xx 自动降一档重试（搜索+抓取 → 仅搜索 → 兼容版 → 停用）
       if (rt.providerId && !rt.official && tools.some(isWebTool) && errStatus >= 400 && errStatus < 500) {
         webStage = Math.min(webStage + 1, 3);
@@ -1316,6 +1423,8 @@ async function llmLoop(
         continue;
       }
       throw err;
+    } finally {
+      unregister(); // 本轮流结束，注销（顺带在频道无活跃流时清掉停止标志）
     }
     // 计费分列：缓存读/写单独累计，input_tokens 只记纯输入。预算护栏据此加权，不再把 1/10 价的缓存读当全价（见 QW3）。
     usage.input_tokens += final.usage.input_tokens;

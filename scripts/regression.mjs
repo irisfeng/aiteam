@@ -18,7 +18,8 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const testDataDir = mkdtempSync(join(tmpdir(), "aiteam-regress-"));
 process.env.AITEAM_DATA_DIR = testDataDir;
 const PORT = 8799;
-const BASE = `http://localhost:${PORT}/api`;
+// 整合后所有路由挂在 /aiteam 前缀下（standalone 默认单一固定用户，requireUser 放行）
+const BASE = `http://localhost:${PORT}/aiteam/api`;
 
 const results = [];
 let failures = 0;
@@ -42,10 +43,15 @@ async function waitFor(fn, timeout = 20000, interval = 400) {
 // Phase 1：进程内直驱引擎（DAG / 计划把关 / 停止 / 预算 / 断点恢复）
 // ---------------------------------------------------------------------------
 const db = await import(join(root, "server/dist/db.js"));
-const { seedIfEmpty } = await import(join(root, "server/dist/seed.js"));
+const { seedGlobalSkills, seedForOwner } = await import(join(root, "server/dist/seed.js"));
+const { enterOwner, ownerFromUserId } = await import(join(root, "server/dist/ownerScope.js"));
 const engine = await import(join(root, "server/dist/agents/engine.js"));
 
-seedIfEmpty();
+// 多用户架构：先播种全局技能，再进入 owner 上下文播种私有工作区，Phase 1 全程在该 owner 内跑。
+// 用 "user"（standalone 默认固定用户）→ 与 Phase 2 spawn 的服务同一 owner，共享同库工作区。
+seedGlobalSkills();
+enterOwner(ownerFromUserId("user"));
+seedForOwner();
 const agents = db.listAgents();
 const pm = agents[0];
 const eng = agents[1];
@@ -149,6 +155,50 @@ check(
     current.length === 1 && current[0].id === v2.id && current[0].version === 2 &&
     v1row.superseded_by === v2.id && versions.length === 2;
   check("DOC1", "文档版本归并：同任务同 kind 再写出新版、列表只显当前版、历史可查", ok);
+}
+
+// PPTX2 幻灯片解析：Markdown 表格→结构化表格 + 围栏代码块捕获（不再压成项目符号）
+{
+  const { parseSlides } = await import(join(root, "server/dist/pptx.js"));
+  const md = [
+    "---", "title: t", "---", "", "# 封面页", "", "---", "",
+    "# 模型对比", "", "| 模型 | 价格 | 速度 |", "|---|---|---|", "| A | 1 | 快 |", "| B | 2 | 慢 |",
+    "", "一句说明", "", "```", "const x = 1;", "console.log(x);", "```", "",
+  ].join("\n");
+  const pages = parseSlides(md);
+  const withTable = pages.find((p) => p.tables.length > 0);
+  const tbl = withTable?.tables[0];
+  const ok =
+    Boolean(tbl) && tbl.header.length === 3 && tbl.rows.length === 2 && tbl.rows[0][0] === "A" &&
+    pages.some((p) => p.code.length > 0 && p.code[0].includes("const x")) &&
+    !pages.some((p) => p.bullets.some((b) => b.includes("价格"))); // 表格不应再落进项目符号
+  check("PPTX2", "PPTX 解析：表格→结构化(3列2行) + 代码块捕获，不压成项目符号", ok,
+    `表格=${tbl ? `${tbl.header.length}列${tbl.rows.length}行` : "无"}`);
+}
+
+// WD1 write_document kind 契约校验：坏格式被拒（返回行号/分页提示），合法格式放行
+{
+  const v = engine.validateDocContent;
+  const slidesOk = v("slides", "# 封面\n\n---\n\n# 第二页\n\n- 要点") === null;
+  const slidesBad = typeof v("slides", "这是一段没有分页符的散文，被当成 slides") === "string"; // 无 --- 应拒
+  const sheetOk = v("sheet", "模型,价格\nA,1\nB,2") === null;
+  const sheetBad = (v("sheet", "模型,价格,速度\nA,1") || "").includes("列"); // 列数不齐应拒并提列
+  const reportOk = v("report", "正文非空即可") === null;
+  const emptyBad = typeof v("report", "   ") === "string";
+  check("WD1", "write_document 契约校验：坏格式拒收+引导，合法放行",
+    slidesOk && slidesBad && sheetOk && sheetBad && reportOk && emptyBad);
+}
+
+// SK1 技能相关性注入：专项技能只在任务/消息匹配关键词时注入，通用/自定义技能始终注入
+{
+  const rel = engine.skillRelevant;
+  const ok =
+    rel({ name: "深度调研法" }, "请调研一下最新的开源 ASR 模型") === true &&
+    rel({ name: "金字塔写作法" }, "请调研一下最新的开源 ASR 模型") === false && // 调研任务不该被塞写作法
+    rel({ name: "金字塔写作法" }, "撰写一份选型报告") === true &&
+    rel({ name: "交付自查清单" }, "随便什么任务") === true && // 通用技能始终注入
+    rel({ name: "用户自定义技能X" }, "随便什么任务") === true; // 无映射=自定义=始终注入
+  check("SK1", "技能相关性注入：专项按关键词、通用/自定义始终注入", ok);
 }
 
 // ---------------------------------------------------------------------------

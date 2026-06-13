@@ -705,6 +705,18 @@ export function renameChannel(id: string, name: string): Channel | undefined {
   db.prepare("UPDATE channels SET name = ? WHERE id = ?").run(name, id);
   return getChannel(id);
 }
+/** 重置频道的 AI 成员（增减同事按场景定制）；DM 频道成员固定不改。 */
+export function setChannelAgents(id: string, agentIds: string[]): Channel | undefined {
+  const c = getChannel(id);
+  if (!c || c.kind === "dm") return c;
+  const tx = db.transaction(() => {
+    db.prepare("DELETE FROM channel_agents WHERE channel_id = ?").run(id);
+    const ins = db.prepare("INSERT OR IGNORE INTO channel_agents (channel_id, agent_id) VALUES (?, ?)");
+    for (const aid of agentIds) ins.run(id, aid);
+  });
+  tx();
+  return getChannel(id);
+}
 export function clearChannelMessages(id: string) {
   db.prepare("DELETE FROM messages WHERE channel_id = ? AND owner_id = ?").run(id, currentOwner());
 }
@@ -840,7 +852,7 @@ export function updateProject(
 export function closeProject(projectId: string): { project: Project | undefined; tasks: Task[] } {
   const project = getProject(projectId);
   if (!project) return { project: undefined, tasks: [] };
-  const open = (db.prepare("SELECT * FROM tasks WHERE project_id = ? AND status != 'done'").all(projectId) as Task[]);
+  const open = (db.prepare("SELECT * FROM tasks WHERE owner_id = ? AND project_id = ? AND status != 'done'").all(currentOwner(), projectId) as Task[]);
   const updated: Task[] = [];
   for (const t of open) {
     const next = updateTask(t.id, { status: "done" });
@@ -910,12 +922,14 @@ export interface Doc {
 export function listDocuments(): Doc[] {
   return db.prepare("SELECT * FROM documents WHERE owner_id = ? AND superseded_by IS NULL ORDER BY created_at DESC").all(currentOwner()) as Doc[];
 }
-/** 某任务（可指定 kind）的全部历史版本，含已被取代的旧版，按版本号降序，供「查看历史版本」用。 */
+/** 某任务（可指定 kind）的全部历史版本，含已被取代的旧版，按版本号降序，供「查看历史版本」用。
+ *  按 owner 隔离（fail-closed，防跨租户翻版本历史）。 */
 export function listDocumentVersions(taskId: string, kind?: Doc["kind"]): Doc[] {
+  const owner = currentOwner();
   const sql = kind
-    ? "SELECT * FROM documents WHERE task_id = ? AND kind = ? ORDER BY version DESC"
-    : "SELECT * FROM documents WHERE task_id = ? ORDER BY kind, version DESC";
-  return db.prepare(sql).all(...(kind ? [taskId, kind] : [taskId])) as Doc[];
+    ? "SELECT * FROM documents WHERE owner_id = ? AND task_id = ? AND kind = ? ORDER BY version DESC"
+    : "SELECT * FROM documents WHERE owner_id = ? AND task_id = ? ORDER BY kind, version DESC";
+  return db.prepare(sql).all(...(kind ? [owner, taskId, kind] : [owner, taskId])) as Doc[];
 }
 /** 一次性回填：把存量同 (task_id,kind) 的多个「当前版」按时间链成版本（幂等，只处理多当前版的组）。 */
 export function backfillDocVersions(): number {
@@ -988,6 +1002,20 @@ export function createDocument(d: {
   });
   return insert();
 }
+/** 启动自愈：把上次遗留的 streaming 中断态 agent 消息收口为 error，
+ *  避免插件挂死/服务重启后界面永久卡在「正在输入」。返回收口条数。 */
+export function finalizeStaleStreaming(): number {
+  const rows = db
+    .prepare("SELECT id, content FROM messages WHERE author_type = 'agent' AND status = 'streaming'")
+    .all() as { id: string; content: string }[];
+  const stmt = db.prepare("UPDATE messages SET status = 'error', content = ? WHERE id = ?");
+  for (const r of rows) {
+    const note = "⚠️ 运行已中断（插件超时或服务重启），消息未完成。";
+    stmt.run(r.content ? `${r.content}\n\n${note}` : note, r.id);
+  }
+  return rows.length;
+}
+
 export function deleteDocument(id: string): void {
   db.prepare("DELETE FROM documents WHERE id = ? AND owner_id = ?").run(id, currentOwner());
 }
