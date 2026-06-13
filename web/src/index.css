@@ -102,28 +102,20 @@ body, aside, main, header, div, button, input, textarea, select, span, table, th
 }
 .msg-in { animation: fade-in 0.18s ease-out; }
 
-/* ===== 毛球精灵头像动效 ===== */
-/* 平时轻轻呼吸 + 错峰偶尔眨眼；忙碌时身体更活跃地晃动 */
-@keyframes fuzz-breathe {
-  0%, 100% { transform: scale(1) rotate(0deg); }
-  50% { transform: scale(1.05) rotate(0.6deg); }
-}
-@keyframes fuzz-blink {
-  0%, 90%, 100% { transform: scaleY(1); }
-  95% { transform: scaleY(0.12); }
-}
-@keyframes fuzz-wiggle {
-  0%, 100% { transform: scale(1.02) rotate(-3deg); }
-  50% { transform: scale(1.06) rotate(3deg); }
-}
-.fuzz-body { animation: fuzz-breathe 3.6s ease-in-out infinite; }
-.fuzz-eyes { animation: fuzz-blink 5.5s ease-in-out infinite; }
-.fuzz-wrap[data-active="1"] .fuzz-body { animation: fuzz-wiggle 0.9s ease-in-out infinite; }
-.fuzz-wrap[data-active="1"] .fuzz-eyes { animation-duration: 2.2s; }
-/* 悬停时精灵俏皮地弹一下 */
-.fuzz-wrap:hover .fuzz-body { animation-duration: 1.2s; }
+/* ===== 会眨眼的优雅小球头像（Claude Design 交接稿） ===== */
+/* 轻轻上下浮动 + 呼吸 + 错峰偶尔眨眼；眼睛跟随鼠标由 JS 驱动 */
+@keyframes orb-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-7%); } }
+@keyframes orb-breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.04); } }
+@keyframes orb-blink { 0%, 88%, 100% { transform: scaleY(1); } 92% { transform: scaleY(0.1); } 96% { transform: scaleY(1); } }
+.orb-float { animation: orb-float var(--fdur, 5.4s) ease-in-out var(--d, 0s) infinite; }
+.orb-body { animation: orb-breathe var(--fdur, 5.4s) ease-in-out var(--d, 0s) infinite; }
+.orb-eye-lid { animation: orb-blink var(--bdur, 5s) ease-in-out var(--d, 0s) infinite; }
+/* 忙碌时（思考/输出中）呼吸更快、更有活力 */
+.orb-wrap[data-active="1"] .orb-body { animation-duration: 1.6s; }
+.orb-wrap[data-active="1"] .orb-eye-lid { animation-duration: 2.4s; }
+.orb-wrap:hover .orb-body { animation-duration: 2s; }
 @media (prefers-reduced-motion: reduce) {
-  .fuzz-body, .fuzz-eyes { animation: none !important; }
+  .orb-float, .orb-body, .orb-eye-lid { animation: none !important; }
 }
 
 /* 细滚动条 */

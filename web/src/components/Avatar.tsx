@@ -1,19 +1,19 @@
-import { useId } from "react";
-import type { Agent } from "../types";
-import type { AgentStatus } from "../types";
+import { useEffect, useRef } from "react";
+import type { Agent, AgentStatus } from "../types";
 
-/** 成员专属色（Hive 设计：每位成员一个专属色相，同明度同彩度） */
+/** 成员专属色相（每位成员一个稳定色相，落在同一套低饱和莫兰迪体系里——色相数量不限） */
 export function memberHue(id: string): number {
   let h = 0;
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) % 360;
   return h;
 }
 
+/** 名字/标注用的成员色（与小球同色相，低饱和优雅） */
 export function memberColor(id: string, alpha = 1): string {
-  return `hsl(${memberHue(id)} 52% 52% / ${alpha})`;
+  return `oklch(0.6 0.09 ${memberHue(id)} / ${alpha})`;
 }
 
-/** 由 id 派生的确定性伪随机序列——同一精灵的外形稳定，不同精灵各有性格 */
+/** 由 id 派生的确定性伪随机——决定每颗小球的浮动/眨眼节奏，稳定且错峰 */
 function seeded(id: string): () => number {
   let s = 0;
   for (let i = 0; i < id.length; i++) s = (s * 31 + id.charCodeAt(i)) >>> 0;
@@ -24,59 +24,53 @@ function seeded(id: string): () => number {
   };
 }
 
-/** 平滑圆胖身体：少量控制点 + Catmull-Rom 转贝塞尔，轮廓柔和起伏（不再是尖刺星形） */
-function blobPath(rng: () => number, n: number, baseR: number, amp: number): string {
-  const cx = 50;
-  const cy = 50;
-  const pts: [number, number][] = [];
-  for (let i = 0; i < n; i++) {
-    const a = (i / n) * Math.PI * 2 - Math.PI / 2;
-    const r = baseR + (rng() - 0.5) * 2 * amp;
-    pts.push([cx + Math.cos(a) * r, cy + Math.sin(a) * r]);
-  }
-  let d = `M${pts[0][0].toFixed(1)},${pts[0][1].toFixed(1)}`;
-  for (let i = 0; i < n; i++) {
-    const p0 = pts[(i - 1 + n) % n];
-    const p1 = pts[i];
-    const p2 = pts[(i + 1) % n];
-    const p3 = pts[(i + 2) % n];
-    const c1x = p1[0] + (p2[0] - p0[0]) / 6;
-    const c1y = p1[1] + (p2[1] - p0[1]) / 6;
-    const c2x = p2[0] - (p3[0] - p1[0]) / 6;
-    const c2y = p2[1] - (p3[1] - p1[1]) / 6;
-    d += `C${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`;
-  }
-  return d + "Z";
+// ---- 眼睛跟随鼠标：单例监听，rAF 节流，所有已注册小球的眼睛一起轻轻转向光标 ----
+const orbEls = new Set<HTMLElement>();
+let bound = false;
+let raf = 0;
+let mx = -1;
+let my = -1;
+function applyLook() {
+  raf = 0;
+  if (mx < 0) return;
+  orbEls.forEach((orb) => {
+    const rect = orb.getBoundingClientRect();
+    if (!rect.width) return;
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const dx = mx - cx;
+    const dy = my - cy;
+    const dist = Math.hypot(dx, dy) || 1;
+    const ease = Math.min(1, dist / 190);
+    const tx = (dx / dist) * rect.width * 0.032 * ease;
+    const ty = (dy / dist) * rect.height * 0.026 * ease;
+    const t = `translate(${tx.toFixed(2)}px, ${ty.toFixed(2)}px)`;
+    orb.querySelectorAll<HTMLElement>("[data-eye]").forEach((eye) => (eye.style.transform = t));
+  });
 }
-
-/** 绒毛：一圈短而软、带轻微弧度（飘逸感）的发丝，合并成单条 path；配合圆头描边+模糊显得毛茸茸 */
-function furHairs(rng: () => number, count: number, rIn: number, rOut: number, spread: number): string {
-  const cx = 50;
-  const cy = 50;
-  let d = "";
-  for (let i = 0; i < count; i++) {
-    const a = (i / count) * Math.PI * 2 - Math.PI / 2 + (rng() - 0.5) * 0.12;
-    const len = rOut + (rng() - 0.5) * spread;
-    const x1 = cx + Math.cos(a) * rIn;
-    const y1 = cy + Math.sin(a) * rIn;
-    const x2 = cx + Math.cos(a) * len;
-    const y2 = cy + Math.sin(a) * len;
-    const flick = (rng() - 0.5) * 5; // 沿切向的轻微弯曲，让发梢飘起来
-    const tx = -Math.sin(a);
-    const ty = Math.cos(a);
-    const mx = (x1 + x2) / 2 + tx * flick;
-    const my = (y1 + y2) / 2 + ty * flick;
-    d += `M${x1.toFixed(1)},${y1.toFixed(1)}Q${mx.toFixed(1)},${my.toFixed(1)} ${x2.toFixed(1)},${y2.toFixed(1)}`;
+function onMove(e: PointerEvent | MouseEvent) {
+  mx = e.clientX;
+  my = e.clientY;
+  if (!raf) raf = requestAnimationFrame(applyLook);
+}
+function registerOrb(el: HTMLElement): () => void {
+  orbEls.add(el);
+  if (!bound) {
+    window.addEventListener("pointermove", onMove, { passive: true });
+    bound = true;
   }
-  return d;
+  return () => {
+    orbEls.delete(el);
+  };
 }
 
 const ACTIVE_STATES: AgentStatus["state"][] = ["thinking", "tool", "responding"];
 
 /**
- * 毛球精灵头像：SVG 绘制的毛茸茸身体 + 会眨眼的眼睛，按 id 确定性变化外形（毛发/眼神/嘴型）。
- * - 平时轻轻呼吸 + 偶尔眨眼；忙碌（state ∈ thinking/tool/responding）时更活跃地晃动。
- * - 颜色沿用 memberColor 的专属色相；尊重 prefers-reduced-motion（CSS 里关掉动画）。
+ * AI 队友头像：会呼吸、会眨眼、眼睛跟随鼠标的优雅光泽小球（Claude Design 交接稿）。
+ * - 莫兰迪低饱和 oklch 配色，每个 agent 一个专属色相（按 id 派生，数量不限）；
+ * - 玻璃高光 + 体积内阴影；浮动仅在大尺寸开启，列表里只呼吸/眨眼，避免抖动；
+ * - 忙碌（thinking/tool/responding）时呼吸更快；尊重 prefers-reduced-motion。
  */
 export function AgentAvatar({
   agent,
@@ -90,85 +84,72 @@ export function AgentAvatar({
   title?: string;
 }) {
   const id = agent?.id ?? "agent";
-  const uid = useId().replace(/:/g, "");
-  const hue = memberHue(id);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!ref.current) return;
+    return registerOrb(ref.current);
+  }, []);
+
+  const h = memberHue(id);
   const rng = seeded(id);
-
-  // 平滑圆胖身体 + 两层柔软绒毛（外层长而淡的光晕、内层短而密的绒面）
-  const body = blobPath(rng, 11, 33, 2.6);
-  const furBack = furHairs(rng, 60, 29, 44, 4); // 长绒：halo
-  const furFront = furHairs(rng, 46, 30, 39, 3); // 短绒：密度
-  const eyeType = Math.floor(rng() * 3); // 0 圆 / 1 困 / 2 萌大
-  const mouthType = Math.floor(rng() * 3); // 0 微笑 / 1 点 / 2 小 o
-  const lean = (rng() - 0.5) * 6; // 眼神/嘴的轻微偏移，增加个性
-
-  const eyeY = 54;
-  const eyeDX = 11;
-  const eyeRX = eyeType === 2 ? 8 : 7;
-  const eyeRY = eyeType === 1 ? 3.4 : eyeType === 2 ? 9 : 7.5;
-  const pupil = eyeType === 2 ? 4 : 3.4;
-
+  const fdur = (5 + rng() * 1.6).toFixed(2); // 浮动/呼吸周期
+  const bdur = (4.6 + rng() * 1.8).toFixed(2); // 眨眼周期
+  const delay = `-${(rng() * 3).toFixed(2)}s`; // 错峰，避免整屏同步
   const active = state ? ACTIVE_STATES.includes(state) : false;
-  const delay = `-${((hue / 360) * 4).toFixed(2)}s`; // 错峰，避免整屏同步呼吸
+  const float = size >= 56; // 大图才浮动，列表里只呼吸眨眼
 
-  const skin = `hsl(${hue} 55% 55%)`;
-  const skinLight = `hsl(${hue} 62% 73%)`;
-  const skinDeep = `hsl(${hue} 50% 47%)`;
-  const cheek = `hsl(${(hue + 12) % 360} 70% 66%)`;
-  const ink = `hsl(${hue} 45% 22%)`;
+  const s = size / 120; // 设计稿基于 120px，阴影/模糊按比例缩放
+  const px = (v: number) => `${(v * s).toFixed(2)}px`;
+  const eyeHi = { position: "absolute" as const, top: "14%", left: "24%", width: "36%", height: "30%", borderRadius: "50%", background: `oklch(0.98 0.012 ${h})` };
 
   return (
     <div
-      className="fuzz-wrap relative shrink-0"
-      style={{ width: size, height: size }}
-      title={title ?? agent?.name}
+      ref={ref}
+      data-orb
       data-active={active ? "1" : undefined}
+      className={`orb-wrap relative shrink-0 ${float ? "orb-float" : ""}`}
+      style={{ width: size, height: size, "--fdur": `${fdur}s`, "--bdur": `${bdur}s`, "--d": delay } as React.CSSProperties}
+      title={title ?? agent?.name}
     >
-      <svg viewBox="0 0 100 100" width={size} height={size} style={{ display: "block", overflow: "visible" }}>
-        <defs>
-          <radialGradient id={`fb-${uid}`} cx="38%" cy="30%" r="72%">
-            <stop offset="0%" stopColor={skinLight} />
-            <stop offset="62%" stopColor={skin} />
-            <stop offset="100%" stopColor={skinDeep} />
-          </radialGradient>
-          <filter id={`soft-${uid}`} x="-25%" y="-25%" width="150%" height="150%">
-            <feGaussianBlur stdDeviation="0.65" />
-          </filter>
-        </defs>
-        <g
-          className="fuzz-body"
-          style={{ animationDelay: delay, transformBox: "fill-box", transformOrigin: "center" } as React.CSSProperties}
+      {/* 球体：径向渐变 + 体积内阴影，会呼吸 */}
+      <div
+        className="orb-body absolute inset-0"
+        style={{
+          borderRadius: "50%",
+          background: `radial-gradient(circle at 34% 28%, oklch(0.92 0.04 ${h}), oklch(0.81 0.075 ${h}) 54%, oklch(0.70 0.097 ${h}) 100%)`,
+          boxShadow: `0 ${px(14)} ${px(30)} ${px(-12)} oklch(0.72 0.10 ${h} / 0.5), inset ${px(-7)} ${px(-9)} ${px(16)} ${px(-8)} oklch(0.63 0.10 ${h} / 0.6), inset ${px(6)} ${px(7)} ${px(14)} ${px(-6)} oklch(0.97 0.03 ${h} / 0.75)`,
+          ["--fdur" as string]: `${fdur}s`,
+          ["--d" as string]: delay,
+        } as React.CSSProperties}
+      />
+      {/* 玻璃高光 */}
+      <div
+        className="pointer-events-none absolute"
+        style={{
+          top: "13%", left: "22%", width: "34%", height: "27%", borderRadius: "50%",
+          background: `radial-gradient(ellipse at center, oklch(0.99 0.01 ${h} / 0.85), transparent 70%)`,
+          filter: `blur(${Math.max(0.4, s).toFixed(2)}px)`,
+        }}
+      />
+      {/* 双眼：外层跟随鼠标平移，内层眨眼 */}
+      {[
+        { side: "left" as const, v: "33%" },
+        { side: "right" as const, v: "33%" },
+      ].map((e) => (
+        <div
+          key={e.side}
+          data-eye
+          className="absolute"
+          style={{ top: "43%", [e.side]: e.v, width: "12%", height: "19%", willChange: "transform", transition: "transform 0.16s ease-out" }}
         >
-          {/* 柔软绒毛：两层短弧发丝，圆头描边 + 轻模糊，毛茸茸而非尖刺 */}
-          <g filter={`url(#soft-${uid})`} fill="none" strokeLinecap="round">
-            <path d={furBack} stroke={`hsl(${hue} 56% 64%)`} strokeWidth="2.6" opacity="0.55" />
-            <path d={furFront} stroke={skin} strokeWidth="2.3" opacity="0.7" />
-          </g>
-          {/* 身体（柔和起伏的圆胖剪影） */}
-          <path d={body} fill={`url(#fb-${uid})`} />
-          {/* 腮红 */}
-          <ellipse cx={50 - eyeDX - 4} cy={eyeY + 8} rx="5" ry="3.2" fill={cheek} opacity="0.5" />
-          <ellipse cx={50 + eyeDX + 4} cy={eyeY + 8} rx="5" ry="3.2" fill={cheek} opacity="0.5" />
-          {/* 眼睛（独立分组以便眨眼动画） */}
-          <g
-            className="fuzz-eyes"
-            style={{ animationDelay: delay, transformBox: "fill-box", transformOrigin: "center" } as React.CSSProperties}
+          <div
+            className="orb-eye-lid relative h-full w-full"
+            style={{ borderRadius: "50%", background: `oklch(0.33 0.045 ${h})`, transformOrigin: "center", ["--bdur" as string]: `${bdur}s`, ["--d" as string]: delay } as React.CSSProperties}
           >
-            <ellipse cx={50 - eyeDX} cy={eyeY} rx={eyeRX} ry={eyeRY} fill="#fffdf8" />
-            <ellipse cx={50 + eyeDX} cy={eyeY} rx={eyeRX} ry={eyeRY} fill="#fffdf8" />
-            <circle cx={50 - eyeDX + lean} cy={eyeY + (eyeType === 1 ? 0 : 1)} r={pupil} fill={ink} />
-            <circle cx={50 + eyeDX + lean} cy={eyeY + (eyeType === 1 ? 0 : 1)} r={pupil} fill={ink} />
-            <circle cx={50 - eyeDX + lean + 1.4} cy={eyeY - 1.4} r="1.2" fill="#fff" />
-            <circle cx={50 + eyeDX + lean + 1.4} cy={eyeY - 1.4} r="1.2" fill="#fff" />
-          </g>
-          {/* 嘴 */}
-          {mouthType === 0 && (
-            <path d={`M${50 - 4 + lean} 67 Q${50 + lean} 71 ${50 + 4 + lean} 67`} stroke={ink} strokeWidth="1.6" fill="none" strokeLinecap="round" />
-          )}
-          {mouthType === 1 && <circle cx={50 + lean} cy="68" r="1.5" fill={ink} />}
-          {mouthType === 2 && <ellipse cx={50 + lean} cy="68" rx="2.4" ry="3" fill={ink} opacity="0.85" />}
-        </g>
-      </svg>
+            <div style={eyeHi} />
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
