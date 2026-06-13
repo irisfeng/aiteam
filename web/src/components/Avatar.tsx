@@ -1,11 +1,13 @@
 import { useEffect, useRef } from "react";
 import type { Agent, AgentStatus } from "../types";
 
-/** 成员专属色相（每位成员一个稳定色相，落在同一套低饱和莫兰迪体系里——色相数量不限） */
+/** 成员专属色相（每位成员一个稳定色相，落在同一套低饱和莫兰迪体系里——色相数量不限）。
+ *  用 FNV-1a 散列 + 黄金角映射，让相近 id 也分到差异明显的色相，避免多人撞同一种粉/桃。 */
 export function memberHue(id: string): number {
-  let h = 0;
-  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) % 360;
-  return h;
+  let s = 2166136261;
+  for (let i = 0; i < id.length; i++) s = Math.imul(s ^ id.charCodeAt(i), 16777619);
+  const frac = ((s >>> 0) % 100000) / 100000;
+  return (frac * 137.508 * 6) % 360; // 黄金角散布，色相充分拉开
 }
 
 /** 名字/标注用的成员色（与小球同色相，低饱和优雅） */
@@ -150,6 +152,25 @@ export function AgentAvatar({
           </div>
         </div>
       ))}
+      {/* 角标：露出该同事的职能 emoji，让人一眼分辨是谁（小尺寸下省略，避免拥挤） */}
+      {agent?.emoji && size >= 26 && (
+        <div
+          className="pointer-events-none absolute flex items-center justify-center"
+          style={{
+            right: "-7%",
+            bottom: "-7%",
+            width: "48%",
+            height: "48%",
+            borderRadius: "50%",
+            background: "var(--c-panel, #fff)",
+            boxShadow: `0 ${px(2)} ${px(5)} ${px(-1)} oklch(0.5 0.05 ${h} / 0.45), 0 0 0 ${px(1.5)} oklch(0.99 0.005 ${h})`,
+            fontSize: `${(size * 0.27).toFixed(1)}px`,
+            lineHeight: 1,
+          }}
+        >
+          <span>{agent.emoji}</span>
+        </div>
+      )}
     </div>
   );
 }
