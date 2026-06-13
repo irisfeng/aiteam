@@ -39,6 +39,7 @@ import {
 } from "./db.js";
 import { broadcast } from "./bus.js";
 import type { AuthedRequest } from "./auth.js";
+import { fetchCoworkerMe } from "./coworker.js";
 import { seedForOwner } from "./seed.js";
 import { AGENT_TEMPLATES, getTemplate } from "./agents/templates.js";
 import { dropConnection, testMcpServer } from "./agents/mcp.js";
@@ -73,10 +74,13 @@ import {
 
 export const api = Router();
 
-api.get("/bootstrap", (req, res) => {
+api.get("/bootstrap", async (req, res) => {
   seedForOwner(); // 首次进入：为当前用户播种私有工作区（幂等）
+  const userId = (req as AuthedRequest).userId;
+  // 复用 Coworker 登录态时取展示名；best-effort，取不到回退到默认名
+  const me = await fetchCoworkerMe(userId, req.headers.cookie);
   res.json({
-    user: { id: (req as AuthedRequest).userId ?? "user", name: process.env.AITEAM_USER_NAME || "我" },
+    user: { id: userId ?? "user", name: me?.displayName || process.env.AITEAM_USER_NAME || "我" },
     mock_mode: isMock(),
     providers: listProviders().map(sanitizeProvider),
     agents: listAgents(),
