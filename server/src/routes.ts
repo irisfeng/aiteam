@@ -15,6 +15,7 @@ import {
   listSkills,
   readUsage,
   renameChannel,
+  setChannelAgents,
   sanitizeMcpServer,
   setMcpServerEnabled,
   updateSkill,
@@ -250,10 +251,18 @@ api.delete("/channels/:id/messages", (req, res) => {
 });
 
 api.patch("/channels/:id", (req, res) => {
-  const name = String(req.body?.name ?? "").trim().replace(/^#/, "");
-  if (!name) return res.status(400).json({ error: "name required" });
-  const channel = renameChannel(req.params.id, name);
+  let channel = getChannel(req.params.id);
   if (!channel) return res.status(404).json({ error: "channel not found" });
+  // 改名（可选）
+  if (req.body?.name !== undefined) {
+    const name = String(req.body.name).trim().replace(/^#/, "");
+    if (!name) return res.status(400).json({ error: "name required" });
+    channel = renameChannel(channel.id, name) ?? channel;
+  }
+  // 增减 AI 成员（可选，按场景定制）
+  if (Array.isArray(req.body?.agent_ids)) {
+    channel = setChannelAgents(channel.id, req.body.agent_ids.map(String)) ?? channel;
+  }
   broadcast({ type: "channel:update", payload: channel });
   res.json(channel);
 });

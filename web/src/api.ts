@@ -69,6 +69,8 @@ export const api = {
   openDm: (agent_id: string) => req<Channel>("/dms", { method: "POST", body: JSON.stringify({ agent_id }) }),
   renameChannel: (id: string, name: string) =>
     req<Channel>(`/channels/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }),
+  updateChannel: (id: string, patch: { name?: string; agent_ids?: string[] }) =>
+    req<Channel>(`/channels/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteChannel: (id: string) => req<{ ok: boolean }>(`/channels/${id}`, { method: "DELETE" }),
   clearMessages: (id: string) => req<{ ok: boolean }>(`/channels/${id}/messages`, { method: "DELETE" }),
   createAgent: (data: {

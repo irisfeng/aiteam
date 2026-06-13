@@ -176,6 +176,7 @@ interface Store extends State {
   openDm: (agentId: string) => Promise<void>;
   createChannel: (name: string, agentIds: string[]) => Promise<void>;
   renameChannel: (id: string, name: string) => Promise<void>;
+  updateChannel: (id: string, patch: { name?: string; agent_ids?: string[] }) => Promise<void>;
   deleteChannel: (id: string) => Promise<void>;
   clearMessages: (id: string) => Promise<void>;
   /** 从角色模板一键实例化（幂等），返回该 Agent */
@@ -313,6 +314,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       },
       renameChannel: async (id, name) => {
         const channel = await api.renameChannel(id, name);
+        dispatch({ type: "channel:update", channel });
+      },
+      updateChannel: async (id, patch) => {
+        const channel = await api.updateChannel(id, patch);
         dispatch({ type: "channel:update", channel });
       },
       deleteChannel: async (id) => {

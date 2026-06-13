@@ -102,11 +102,13 @@ export function Sidebar({
   onNewChannel,
   onNewAgent,
   onSettings,
+  onConfigChannel,
   onOpenProfile,
 }: {
   onNewChannel: () => void;
   onNewAgent: () => void;
   onSettings: () => void;
+  onConfigChannel: (c: import("../types").Channel) => void;
   onOpenProfile: (a: import("../types").Agent) => void;
 }) {
   const ws = useWorkspace();
@@ -161,14 +163,11 @@ export function Sidebar({
               {c.name}
             </button>
             <button
-              onClick={() => {
-                const name = window.prompt("重命名频道", c.name);
-                if (name?.trim()) void ws.renameChannel(c.id, name.trim());
-              }}
+              onClick={() => onConfigChannel(c)}
               className="rounded px-0.5 text-[11px] text-ink-3 opacity-0 hover:text-ink group-hover:opacity-100"
-              title="重命名频道"
+              title="频道设置：改名 / 增减 AI 成员 / 按场景重组"
             >
-              ✎
+              ⚙
             </button>
             <button
               onClick={() => {

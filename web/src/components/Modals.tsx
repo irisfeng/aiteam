@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useWorkspace } from "../store";
 import { api, type AgentTemplateInfo, type ImageProviderInfo } from "../api";
+import type { Channel } from "../types";
 import { McpTab, SkillsTab } from "./IntegrationsTabs";
 import { AgentAvatar } from "./Avatar";
 
@@ -196,6 +197,145 @@ export function NewChannelModal({ onClose, onCustomRole }: { onClose: () => void
         className="mt-3 w-full rounded-lg bg-accent py-2 text-[13.5px] font-medium text-white disabled:opacity-40"
       >
         创建频道
+      </button>
+    </Modal>
+  );
+}
+
+/** 频道设置：改名 + 增减 AI 成员（按场景快速重组），不止改名字。 */
+export function ChannelSettingsModal({ channel, onClose, onCustomRole }: { channel: Channel; onClose: () => void; onCustomRole: () => void }) {
+  const ws = useWorkspace();
+  const [name, setName] = useState(channel.name);
+  const [selected, setSelected] = useState<Set<string>>(new Set(channel.agent_ids ?? []));
+  const [scene, setScene] = useState<number | null>(null);
+  const [templates, setTemplates] = useState<AgentTemplateInfo[]>([]);
+  const [sceneHint, setSceneHint] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api.listAgentTemplates().then(setTemplates).catch(() => undefined);
+  }, [ws.agents.length]);
+
+  function sceneAgents(i: number) {
+    const keys = SCENES[i].roleKeys;
+    return ws.agents.filter((a) => keys.some((k) => a.name.includes(k) || a.role.includes(k)));
+  }
+  async function applyScene(i: number) {
+    setScene(i);
+    const added = await Promise.all(SCENES[i].templateIds.map((id) => ws.installTemplate(id).catch(() => null)));
+    const ids = new Set(sceneAgents(i).map((a) => a.id));
+    for (const a of added) if (a) ids.add(a.id);
+    setSelected(ids);
+    const want = SCENES[i].skills;
+    let enabledNames = want;
+    try {
+      const skills: { id: string; name: string; enabled: number }[] = await api.listSkills();
+      const toEnable = skills.filter((s) => want.includes(s.name) && !s.enabled);
+      await Promise.all(toEnable.map((s) => api.toggleSkill(s.id, true)));
+      enabledNames = want.filter((n) => skills.some((s) => s.name === n));
+    } catch { /* 技能接口不可用时仅提示 */ }
+    setSceneHint(
+      `已套用场景成员，并启用配套工作方法：${enabledNames.join("、")}` +
+        (SCENES[i].mcp ? `；建议在 ⚙ 设置 → MCP 接入「${SCENES[i].mcp}」` : "")
+    );
+  }
+  async function addTemplate(tpl: AgentTemplateInfo) {
+    const agent = await ws.installTemplate(tpl.id);
+    setSelected((prev) => new Set(prev).add(agent.id));
+    setTemplates((ts) => ts.map((t) => (t.id === tpl.id ? { ...t, installed: true } : t)));
+  }
+  async function save() {
+    if (!name.trim() || busy) return;
+    setBusy(true);
+    try {
+      await ws.updateChannel(channel.id, { name: name.trim(), agent_ids: [...selected] });
+      onClose();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title={`频道设置 · #${channel.name}`} onClose={onClose}>
+      <label className={labelCls}>频道名</label>
+      <input value={name} onChange={(e) => setName(e.target.value)} className={inputCls} />
+      <label className={labelCls}>按场景快速重组（可选，一键替换成员 + 启用配套方法）</label>
+      <div className="grid grid-cols-2 gap-2">
+        {SCENES.map((s, i) => {
+          const active = scene === i;
+          return (
+            <button
+              key={s.name}
+              onClick={() => void applyScene(i)}
+              className={`rounded-lg border p-2.5 text-left transition-colors ${active ? "border-accent bg-accent-soft" : "border-line hover:border-accent/40"}`}
+            >
+              <div className="flex items-center gap-1.5 text-[13px] font-medium">
+                <span>{s.icon}</span>
+                {s.name}
+                {active && <span className="ml-auto font-mono text-[10px] text-accent">已套用</span>}
+              </div>
+              <div className="mt-0.5 text-[11.5px] text-ink-3">{s.desc}</div>
+            </button>
+          );
+        })}
+      </div>
+      {sceneHint && (
+        <div className="mt-2 rounded-lg bg-accent-soft px-3 py-2 text-[11.5px] leading-relaxed text-ink-2">✨ {sceneHint}</div>
+      )}
+      <label className={labelCls}>频道成员（勾选 = 在本频道，可随时增减）</label>
+      <div className="flex flex-col gap-1">
+        {ws.agents.map((a) => (
+          <label key={a.id} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-[13.5px] hover:bg-sel">
+            <input
+              type="checkbox"
+              checked={selected.has(a.id)}
+              onChange={(e) => {
+                const next = new Set(selected);
+                e.target.checked ? next.add(a.id) : next.delete(a.id);
+                setSelected(next);
+                setScene(null);
+              }}
+            />
+            <AgentAvatar agent={a} size={20} />
+            <span className="font-medium">{a.name}</span>
+            <span className="truncate text-[12px] text-ink-3">{a.role}</span>
+          </label>
+        ))}
+      </div>
+      {templates.some((t) => !t.installed) && (
+        <>
+          <label className={labelCls}>扩展角色模板（加入团队并选入本频道）</label>
+          {[...new Set(templates.filter((t) => !t.installed).map((t) => t.category))].map((cat) => (
+            <div key={cat} className="mb-1.5 flex flex-wrap items-center gap-1.5">
+              <span className="w-8 shrink-0 font-mono text-[10px] text-ink-3">{cat}</span>
+              {templates
+                .filter((t) => !t.installed && t.category === cat)
+                .map((t) => (
+                  <button
+                    key={t.id}
+                    onClick={() => void addTemplate(t)}
+                    className="rounded-full border border-line px-2.5 py-1 text-[12.5px] text-ink-2 transition-colors hover:border-accent/50 hover:text-ink"
+                    title={t.desc}
+                  >
+                    {t.emoji} {t.name}
+                  </button>
+                ))}
+            </div>
+          ))}
+        </>
+      )}
+      <button
+        onClick={() => { onClose(); onCustomRole(); }}
+        className="mt-3 w-full rounded-lg border border-dashed border-line py-1.5 text-[12.5px] text-ink-3 hover:border-accent/40 hover:text-ink-2"
+      >
+        ✚ 创作自定义角色
+      </button>
+      <button
+        onClick={() => void save()}
+        disabled={!name.trim() || busy}
+        className="mt-3 w-full rounded-lg bg-accent py-2 text-[13.5px] font-medium text-white disabled:opacity-40"
+      >
+        保存
       </button>
     </Modal>
   );

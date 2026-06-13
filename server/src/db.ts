@@ -679,6 +679,18 @@ export function renameChannel(id: string, name: string): Channel | undefined {
   db.prepare("UPDATE channels SET name = ? WHERE id = ?").run(name, id);
   return getChannel(id);
 }
+/** 重置频道的 AI 成员（增减同事按场景定制）；DM 频道成员固定不改。 */
+export function setChannelAgents(id: string, agentIds: string[]): Channel | undefined {
+  const c = getChannel(id);
+  if (!c || c.kind === "dm") return c;
+  const tx = db.transaction(() => {
+    db.prepare("DELETE FROM channel_agents WHERE channel_id = ?").run(id);
+    const ins = db.prepare("INSERT OR IGNORE INTO channel_agents (channel_id, agent_id) VALUES (?, ?)");
+    for (const aid of agentIds) ins.run(id, aid);
+  });
+  tx();
+  return getChannel(id);
+}
 export function clearChannelMessages(id: string) {
   db.prepare("DELETE FROM messages WHERE channel_id = ?").run(id);
 }
