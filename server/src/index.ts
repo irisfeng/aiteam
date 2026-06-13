@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 import { api } from "./routes.js";
 import { requireUser } from "./auth.js";
+import { authRoutes } from "./auth-routes.js";
 import { attachBus } from "./bus.js";
 import { seedGlobalSkills } from "./seed.js";
 import { finalizeStaleStreaming } from "./db.js";
@@ -24,7 +25,8 @@ recoverInFlightTasks();
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 // 整合后所有 AiTeam 路由统一挂在 /aiteam/* 前缀下（由反向代理路由到本进程）。
-// API 需要登录（standalone 模式下中间件放行为单用户）。
+// 登录/注册路由公开（不经 requireUser，登出态也要能访问）；其余 API 一律需登录。
+app.use("/aiteam/api/auth", authRoutes);
 app.use("/aiteam/api", requireUser, api);
 const assetsStatic = express.static(assetsDir, { maxAge: "30d", immutable: true });
 app.use("/aiteam/assets", assetsStatic); // 生成图资产（新前缀）

@@ -11,6 +11,7 @@ import {
   deleteSkill,
   getMcpServer,
   getMessage,
+  getUserById,
   listMcpServers,
   listSkills,
   readUsage,
@@ -79,10 +80,11 @@ export const api = Router();
 api.get("/bootstrap", async (req, res) => {
   seedForOwner(); // 首次进入：为当前用户播种私有工作区（幂等）
   const userId = (req as AuthedRequest).userId;
-  // 复用 Coworker 登录态时取展示名；best-effort，取不到回退到默认名
-  const me = await fetchCoworkerMe(userId, req.headers.cookie);
+  // standalone：展示名/角色取本地 users 表；coworker：回源 Coworker 取展示名（best-effort）
+  const localUser = userId ? getUserById(userId) : undefined;
+  const name = localUser?.display_name || (await fetchCoworkerMe(userId, req.headers.cookie))?.displayName || process.env.AITEAM_USER_NAME || "我";
   res.json({
-    user: { id: userId ?? "user", name: me?.displayName || process.env.AITEAM_USER_NAME || "我" },
+    user: { id: userId ?? "user", name, role: localUser?.role ?? "admin" },
     mock_mode: isMock(),
     providers: listProviders().map(sanitizeProvider),
     agents: listAgents(),

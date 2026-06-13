@@ -1,0 +1,593 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AITeam Agent Harness · 核心原理与质量/性价比路线图</title>
+<style>
+  :root{
+    --bg:#f4f1ea; --panel:#ffffff; --panel-2:#faf8f3;
+    --ink:#26241f; --dim:#6f6b60; --faint:#9a958a; --line:#e6e1d6;
+    --accent:#c28a1e; --accent-soft:#f7ecd6;
+    --exec:#6b5bd6; --exec-soft:#efedfc;
+    --qual:#bd7a16; --qual-soft:#faecd5;
+    --cost:#1d9e75; --cost-soft:#e1f5ee;
+    --warn:#c0392b; --warn-soft:#fbeae7;
+    --obs:#2b6cb0; --obs-soft:#e6f1fb;
+    --radius:14px; --radius-sm:9px;
+    --mono:"SF Mono",ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.72;
+    font-size:15.5px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 22px 100px}
+  a{color:var(--accent);text-decoration:none}
+  code,.ref{font-family:var(--mono);font-size:.84em}
+  .ref{background:var(--panel-2);border:1px solid var(--line);border-radius:6px;padding:1px 6px;color:#7a5a12;white-space:nowrap}
+
+  /* header */
+  header.hero{padding:54px 0 30px;border-bottom:1px solid var(--line);margin-bottom:34px}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);font-weight:600}
+  h1{font-size:33px;line-height:1.18;margin:.34em 0 .2em;font-weight:700;letter-spacing:-.01em}
+  .lede{font-size:17px;color:var(--dim);max-width:760px;margin:0}
+  .meta{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:20px;font-size:13px;color:var(--faint)}
+  .meta b{color:var(--dim);font-weight:600}
+
+  /* toc */
+  nav.toc{display:flex;flex-wrap:wrap;gap:8px;margin:26px 0 0}
+  nav.toc a{font-size:13px;background:var(--panel);border:1px solid var(--line);border-radius:99px;padding:5px 13px;color:var(--dim)}
+  nav.toc a:hover{border-color:var(--accent);color:var(--accent)}
+
+  section{margin:46px 0}
+  .sec-h{display:flex;align-items:baseline;gap:12px;margin:0 0 6px}
+  .sec-h .n{font-family:var(--mono);font-size:13px;color:var(--accent);font-weight:600}
+  h2{font-size:25px;margin:0;font-weight:700;letter-spacing:-.01em}
+  h3{font-size:18px;margin:30px 0 8px;font-weight:650}
+  .sub{color:var(--dim);margin:.2em 0 0;max-width:820px}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:20px 22px;margin:16px 0;
+    box-shadow:0 1px 2px rgba(40,36,30,.03)}
+  .grid{display:grid;gap:16px}
+  @media(min-width:760px){.grid.cols2{grid-template-columns:1fr 1fr}}
+
+  /* subsystem cards */
+  .sys{border-left:4px solid var(--exec)}
+  .sys .tag{display:inline-block;font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.05em;
+    padding:2px 9px;border-radius:99px;margin-bottom:8px}
+  .sys h3{margin:0 0 4px;font-size:16.5px}
+  .sys .one{color:var(--dim);font-size:14px;margin:0 0 12px}
+  .sys ul{margin:8px 0 0;padding-left:18px}
+  .sys li{margin:5px 0;font-size:14px}
+  .refs{margin-top:12px;display:flex;flex-wrap:wrap;gap:6px}
+  .t-exec{background:var(--exec-soft);color:#3c3489;border-left-color:var(--exec)}
+  .t-qual{background:var(--qual-soft);color:#854f0b;border-left-color:var(--qual)}
+  .t-cost{background:var(--cost-soft);color:#0f6e56;border-left-color:var(--cost)}
+  .t-gray{background:#f1efe8;color:#5f5e5a;border-left-color:#888780}
+
+  /* callout */
+  .callout{background:var(--warn-soft);border:1px solid #f0cfc8;border-radius:var(--radius);padding:18px 22px;margin:18px 0}
+  .callout h3{margin:0 0 6px;color:#922}
+  .four{display:grid;gap:10px;margin-top:12px}
+  @media(min-width:680px){.four{grid-template-columns:1fr 1fr}}
+  .four div{background:#fff;border:1px solid #f0cfc8;border-radius:9px;padding:10px 13px;font-size:13.5px}
+  .four b{color:#922}
+
+  /* quick wins */
+  .qw{border:1.5px solid var(--accent);background:linear-gradient(0deg,var(--accent-soft),#fff 60%)}
+  .qw .badge-row{margin-bottom:8px}
+  .qw h3{margin:0 0 4px;display:flex;gap:8px;align-items:center}
+  .qw .num{background:var(--accent);color:#fff;width:24px;height:24px;border-radius:50%;display:inline-flex;
+    align-items:center;justify-content:center;font-size:13px;font-weight:700;flex:none}
+
+  /* matrix */
+  .matrix{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    padding:34px 34px 30px 54px;margin:18px 0}
+  .matrix .field{position:relative;height:360px;border-left:2px solid var(--line);border-bottom:2px solid var(--line)}
+  .axis-y{position:absolute;left:-44px;top:50%;transform:rotate(-90deg) translateX(50%);transform-origin:center;
+    font-size:12px;color:var(--faint);font-family:var(--mono);white-space:nowrap}
+  .axis-x{position:absolute;bottom:-26px;left:50%;transform:translateX(-50%);font-size:12px;color:var(--faint);font-family:var(--mono)}
+  .axis-y-top{position:absolute;left:-30px;top:-2px;font-size:11px;color:var(--faint)}
+  .axis-y-bot{position:absolute;left:-30px;bottom:-2px;font-size:11px;color:var(--faint)}
+  .quad{position:absolute;font-size:11px;color:var(--faint);font-family:var(--mono);opacity:.7}
+  .dot{position:absolute;transform:translate(-50%,50%);background:var(--panel);border:1.5px solid;border-radius:99px;
+    padding:3px 9px;font-size:12px;font-weight:600;cursor:default;box-shadow:0 1px 3px rgba(0,0,0,.06);white-space:nowrap}
+  .dot.q{border-color:var(--qual);color:#854f0b}
+  .dot.c{border-color:var(--cost);color:#0f6e56}
+  .dot.s{border-color:var(--obs);color:#0c447c}
+  .dot.qc{border-color:var(--exec);color:#3c3489}
+  .dot.star{background:var(--accent);border-color:var(--accent);color:#fff}
+  .hot{position:absolute;left:0;top:0;width:46%;height:42%;background:rgba(194,138,30,.07);border-radius:0 0 16px 0;pointer-events:none}
+
+  /* roadmap */
+  .filters{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 4px}
+  .filters button{font-family:var(--sans);font-size:13px;border:1px solid var(--line);background:var(--panel);
+    border-radius:99px;padding:6px 14px;cursor:pointer;color:var(--dim)}
+  .filters button[aria-pressed=true]{background:var(--ink);color:#fff;border-color:var(--ink)}
+  .rec{position:relative}
+  .rec .top{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:8px}
+  .rec h3{margin:0;font-size:16px;flex:1 1 280px}
+  .badge{font-family:var(--mono);font-size:11px;font-weight:600;padding:2px 8px;border-radius:6px;white-space:nowrap}
+  .b-hi{background:#fbeaea;color:#a32d2d}.b-md{background:#faeeda;color:#854f0b}.b-lo{background:#eef0ee;color:#5f5e5a}
+  .b-eff{background:#eef;color:#3c3489}
+  .b-dim{background:var(--panel-2);color:var(--dim);border:1px solid var(--line)}
+  .rec .row{margin:6px 0;font-size:14px}
+  .rec .row b{color:var(--dim);font-weight:600;font-size:12.5px;font-family:var(--mono);margin-right:6px}
+  .rec.q{border-left:4px solid var(--qual)} .rec.c{border-left:4px solid var(--cost)}
+  .rec.s{border-left:4px solid var(--obs)} .rec.qc{border-left:4px solid var(--exec)}
+
+  /* weakness appendix */
+  details.wk{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius-sm);margin:10px 0;padding:0 18px}
+  details.wk summary{cursor:pointer;padding:14px 0;font-weight:600;font-size:15px;list-style:none;display:flex;justify-content:space-between;align-items:center}
+  details.wk summary::-webkit-details-marker{display:none}
+  details.wk summary .c{font-size:12px;color:var(--faint);font-family:var(--mono)}
+  details.wk[open] summary{border-bottom:1px solid var(--line)}
+  details.wk ul{margin:12px 0;padding-left:20px}
+  details.wk li{font-size:13.5px;margin:7px 0;color:var(--dim)}
+  .foot{margin-top:60px;padding-top:22px;border-top:1px solid var(--line);font-size:13px;color:var(--faint)}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;font-size:12.5px;color:var(--dim);margin:10px 0 0}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .sw{width:11px;height:11px;border-radius:3px;display:inline-block}
+  svg{max-width:100%;height:auto;display:block;margin:8px auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <div class="eyebrow">AITeam · Engineering Deep-Dive</div>
+  <h1>Agent Harness 核心原理<br>与产出质量 / 性价比路线图</h1>
+  <p class="lede">一份对 AITeam「AI 同事工作台」智能内核的全面拆解：harness 如何用<b>一个统一的流式多轮工具循环</b>承载聊天/干活/验收/汇总，外面套模型分级路由、质量验收闸、DAG 编排与持久化，再用一整套兼容端点容错把 DeepSeek 这类第三方端点喂稳；以及如何进一步打磨产出质量、稳定输出、提升性价比。</p>
+  <div class="meta">
+    <span><b>来源</b> 8-agent 并行代码精读（7 子系统 + 1 质量/成本策略）</span>
+    <span><b>日期</b> 2026-06-13</span>
+    <span><b>仓库</b> irisfeng/aiteam @ claude/nice-curie-ffuo7l</span>
+    <span><b>核心文件</b> server/src/agents/engine.ts</span>
+  </div>
+  <nav class="toc">
+    <a href="#arch">架构总览</a>
+    <a href="#part1">Part 1 · 核心原理</a>
+    <a href="#fault">兼容端点容错</a>
+    <a href="#part2">Part 2 · 路线图</a>
+    <a href="#quickwins">三个 Quick Win</a>
+    <a href="#matrix">影响×成本矩阵</a>
+    <a href="#recs">详细建议</a>
+    <a href="#weak">脆弱点附录</a>
+  </nav>
+</header>
+
+<!-- ARCHITECTURE -->
+<section id="arch">
+  <div class="sec-h"><span class="n">00</span><h2>架构总览</h2></div>
+  <p class="sub">事件触发 → 模型分级路由 → 统一流式多轮工具循环 → 干净上下文验收/返工 → DAG 解锁与汇总；sqlite 持久层贯穿全程。</p>
+  <div class="card" style="padding:14px">
+  <svg viewBox="0 0 680 488" role="img" aria-label="AITeam agent harness 分层架构">
+    <defs><marker id="ar" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6" fill="none" stroke="#b4b2a9" stroke-width="1.4"/></marker></defs>
+    <style>
+      .bx{rx:9} .th{font:600 14px var(--sans,sans-serif)} .ts{font:400 12px var(--sans,sans-serif)}
+    </style>
+    <!-- triggers -->
+    <rect x="140" y="22" width="400" height="48" rx="9" fill="#f1efe8" stroke="#cfcabd"/>
+    <text x="340" y="44" text-anchor="middle" font-weight="600" font-size="14" fill="#444441">触发入口（事件驱动）</text>
+    <text x="340" y="62" text-anchor="middle" font-size="12" fill="#6f6b60">用户@消息 · 任务指派 · 项目立项 · 例行任务</text>
+    <line x1="340" y1="70" x2="340" y2="84" stroke="#b4b2a9" stroke-width="1.5" marker-end="url(#ar)"/>
+    <!-- routing -->
+    <rect x="140" y="86" width="400" height="54" rx="9" fill="#efedfc" stroke="#a99fec"/>
+    <text x="340" y="110" text-anchor="middle" font-weight="600" font-size="14" fill="#3c3489">模型分级路由 · resolveRuntime</text>
+    <text x="340" y="128" text-anchor="middle" font-size="12" fill="#534ab7">强通道兜验收/汇总 · 标准档 · 轻量档降本</text>
+    <line x1="340" y1="140" x2="340" y2="154" stroke="#b4b2a9" stroke-width="1.5" marker-end="url(#ar)"/>
+    <!-- loop -->
+    <rect x="140" y="156" width="400" height="74" rx="9" fill="#efedfc" stroke="#7f77dd"/>
+    <text x="340" y="180" text-anchor="middle" font-weight="600" font-size="14.5" fill="#26215c">流式多轮工具循环 · llmLoop</text>
+    <text x="340" y="200" text-anchor="middle" font-size="12" fill="#534ab7">聊天 · 干活 · 验收 · 汇总 共用一套循环</text>
+    <text x="340" y="218" text-anchor="middle" font-size="12" fill="#534ab7">工具：内置 / MCP / 文生图 · 兼容端点容错四件套</text>
+    <!-- side: tools -->
+    <rect x="44" y="158" width="84" height="70" rx="9" fill="#e1f5ee" stroke="#5dcaa5"/>
+    <text x="86" y="186" text-anchor="middle" font-size="12.5" fill="#0f6e56" font-weight="600">工具层</text>
+    <text x="86" y="203" text-anchor="middle" font-size="11" fill="#0f6e56">内置/MCP</text>
+    <text x="86" y="217" text-anchor="middle" font-size="11" fill="#0f6e56">文生图</text>
+    <line x1="128" y1="193" x2="139" y2="193" stroke="#b4b2a9" stroke-width="1.5" marker-end="url(#ar)"/>
+    <!-- side: faults -->
+    <rect x="552" y="158" width="84" height="70" rx="9" fill="#e1f5ee" stroke="#5dcaa5"/>
+    <text x="594" y="186" text-anchor="middle" font-size="12.5" fill="#0f6e56" font-weight="600">容错</text>
+    <text x="594" y="203" text-anchor="middle" font-size="11" fill="#0f6e56">降档·退避</text>
+    <text x="594" y="217" text-anchor="middle" font-size="11" fill="#0f6e56">thinking回传</text>
+    <line x1="552" y1="193" x2="541" y2="193" stroke="#b4b2a9" stroke-width="1.5" marker-end="url(#ar)"/>
+    <line x1="340" y1="230" x2="340" y2="244" stroke="#b4b2a9" stroke-width="1.5" marker-end="url(#ar)"/>
+    <!-- quality gate -->
+    <rect x="140" y="246" width="400" height="54" rx="9" fill="#faecd5" stroke="#ef9f27"/>
+    <text x="340" y="270" text-anchor="middle" font-weight="600" font-size="14" fill="#633806">质量闸 · 干净上下文验收</text>
+    <text x="340" y="288" text-anchor="middle" font-size="12" fill="#854f0b">强通道逐条裁决 → 返工 ≤ N → 交付</text>
+    <line x1="340" y1="300" x2="340" y2="314" stroke="#b4b2a9" stroke-width="1.5" marker-end="url(#ar)"/>
+    <!-- dag -->
+    <rect x="140" y="316" width="400" height="54" rx="9" fill="#faecd5" stroke="#ef9f27"/>
+    <text x="340" y="340" text-anchor="middle" font-weight="600" font-size="14" fill="#633806">项目 DAG 编排</text>
+    <text x="340" y="358" text-anchor="middle" font-size="12" fill="#854f0b">依赖解锁下游 → 全部交付后 Lead 自动汇总</text>
+    <!-- state foundation -->
+    <rect x="44" y="392" width="592" height="56" rx="9" fill="#f1efe8" stroke="#cfcabd"/>
+    <text x="340" y="416" text-anchor="middle" font-weight="600" font-size="14" fill="#444441">状态层 · sqlite (WAL) — 贯穿全程持久化</text>
+    <text x="340" y="434" text-anchor="middle" font-size="12" fill="#6f6b60">用量账本 · 记忆复利 · 断点恢复 · 每日预算护栏</text>
+    <!-- legend -->
+    <rect x="150" y="464" width="11" height="11" rx="3" fill="#7f77dd"/><text x="167" y="473" font-size="11.5" fill="#6f6b60">执行内核</text>
+    <rect x="262" y="464" width="11" height="11" rx="3" fill="#ef9f27"/><text x="279" y="473" font-size="11.5" fill="#6f6b60">质量与编排</text>
+    <rect x="392" y="464" width="11" height="11" rx="3" fill="#5dcaa5"/><text x="409" y="473" font-size="11.5" fill="#6f6b60">能力/容错</text>
+    <rect x="486" y="464" width="11" height="11" rx="3" fill="#cfcabd"/><text x="503" y="473" font-size="11.5" fill="#6f6b60">触发与持久化</text>
+  </svg>
+  </div>
+</section>
+
+<!-- PART 1 -->
+<section id="part1">
+  <div class="sec-h"><span class="n">01</span><h2>Part 1 · 核心原理</h2></div>
+  <p class="sub">六个子系统，每个含「一句话 + 机制 + 关键代码引用」。设计哲学：<b>一个循环干所有事</b>，差异全靠 RuntimeOpts 表达。</p>
+
+  <div class="grid cols2">
+
+    <div class="card sys t-exec">
+      <span class="tag t-exec">执行内核</span>
+      <h3>① 统一的流式多轮工具循环</h3>
+      <p class="one">聊天 / 干活 / 验收 / 汇总共用同一个 <code>streamRun → llmLoop</code>，差异只靠 <code>RuntimeOpts</code>（preferStrong / tier / toolsOverride）。</p>
+      <ul>
+        <li>每轮 <code>messages.stream</code> 流式出字，delta 经 <code>emit</code> 闭包累加 + WebSocket 全量广播（所谓 SSE 实为 WS fan-out）。</li>
+        <li><code>stop_reason==tool_use</code> 则执行工具→回推→续跑；否则收口。</li>
+        <li><b>运行中插话</b>：每轮把 <code>steerSince</code> 之后的用户新消息注入下一轮迭代。</li>
+      </ul>
+      <div class="refs"><span class="ref">engine.ts:1116 streamRun</span><span class="ref">engine.ts:1165 llmLoop</span><span class="ref">engine.ts:1330 插话注入</span><span class="ref">bus.ts:23 广播</span></div>
+    </div>
+
+    <div class="card sys t-exec">
+      <span class="tag t-exec">执行内核</span>
+      <h3>② 模型分级路由</h3>
+      <p class="one">把「质量下限」与「降本」直接编码进路由表：验收/汇总强制最强通道，重复性任务走轻量档。</p>
+      <ul>
+        <li>四级优先链：<code>preferStrong</code> → agent.provider → 官方 envClient → 兜底 provider。</li>
+        <li><code>preferStrong</code>（验收/汇总）→ 官方 <code>AITEAM_STRONG_MODEL</code> 或勾选的 <code>is_strong</code> provider。<b>= 你测的 H4 强通道。</b></li>
+        <li><code>fromProvider</code> 三门控：<code>official=!base_url</code>、<code>webTools</code>、light 档取 <code>light_model</code>。<b>= G5 轻量档。</b></li>
+      </ul>
+      <div class="refs"><span class="ref">engine.ts:118 resolveRuntime</span><span class="ref">engine.ts:120 fromProvider</span><span class="ref">engine.ts:128 preferStrong</span></div>
+    </div>
+
+    <div class="card sys t-qual">
+      <span class="tag t-qual">质量与编排</span>
+      <h3>③ 质量闸：干净上下文验收 + 返工</h3>
+      <p class="one">worker 干完，换一个干净上下文的校验者走强通道逐条对照验收标准给裁决，未过则返工，超上限转人工。</p>
+      <ul>
+        <li>校验者用 <code>submit_verdict</code> 给 pass/revise；revise 进 <code>buildReworkBrief</code> 返工。</li>
+        <li><b>= 你测 C1「真退回一次、揪出虚构 URL」。</b></li>
+        <li>⚠️ 结构性漏点：无裁决时 fail-open 判 pass（见 Part 2 ①）。</li>
+      </ul>
+      <div class="refs"><span class="ref">engine.ts runTaskWork</span><span class="ref">engine.ts:560 fail-open</span><span class="ref">engine.ts:467 buildWorkBrief</span></div>
+    </div>
+
+    <div class="card sys t-qual">
+      <span class="tag t-qual">质量与编排</span>
+      <h3>④ 项目 DAG 编排</h3>
+      <p class="one">Lead 把目标一次性拆成带 <code>depends_on</code> 的任务图，事件驱动调度，交付时拓扑解锁下游，全交付后自动汇总。</p>
+      <ul>
+        <li>调度 = 依赖满足 + 全局并发 <code>MAX_CONCURRENT_WORK=8</code> + per-agent 串行队列。</li>
+        <li>全部进 review/done → Lead 汇总（🎯→🏁）；<code>approve_plan</code> 插人工把关。</li>
+        <li><b>= 你测的 C2/C3 + 那张「对比表依赖三个调研」的 DAG。</b></li>
+      </ul>
+      <div class="refs"><span class="ref">engine.ts taskDependsOn</span><span class="ref">engine.ts:354 onTaskDelivered</span><span class="ref">engine.ts:590 checkProject</span></div>
+    </div>
+
+    <div class="card sys t-cost">
+      <span class="tag t-cost">能力层</span>
+      <h3>⑤ 工具系统与外部能力</h3>
+      <p class="one">内置闭环工具 + 懒连接 MCP 插件 + 文生图；外部检索/配图按次/张设硬上限防烧钱。</p>
+      <ul>
+        <li>内置：<code>write_document / read_document / create_task / update_task / request_approval / submit_verdict</code>。</li>
+        <li>MCP：前缀命名 <code>mcp__&lt;server&gt;__&lt;tool&gt;</code>、懒连接、失败熔断隔离。</li>
+        <li>封顶：<code>MCP_CALLS_PER_RUN=5</code> / <code>IMAGES_PER_RUN=3</code>，每次落审计行（🔌/🎨）。</li>
+      </ul>
+      <div class="refs"><span class="ref">engine.ts TOOLS/execTool</span><span class="ref">mcp.ts callMcpTool</span><span class="ref">images.ts generateImage</span></div>
+    </div>
+
+    <div class="card sys t-gray">
+      <span class="tag t-gray">持久化</span>
+      <h3>⑥ 状态、账本与成本护栏</h3>
+      <p class="one">better-sqlite3(WAL) 单文件：消息内嵌 <code>usage_json</code> 即账本，重启续跑，密钥永不下发前端。</p>
+      <ul>
+        <li>用量按 agent/日聚合做归因 + 每日 token 硬切断 <code>AITEAM_DAILY_TOKEN_BUDGET</code>。</li>
+        <li>断点恢复：重启扫 doing 任务续跑（= 你测的 D5）。</li>
+        <li>记忆复利 <code>appendMemory/getMemory</code>；<code>AITEAM_DATA_DIR</code> 隔离（本次新加）。</li>
+      </ul>
+      <div class="refs"><span class="ref">db.ts usageDaily</span><span class="ref">engine.ts:264 budgetExhausted</span><span class="ref">db.ts appendMemory</span></div>
+    </div>
+
+  </div>
+</section>
+
+<!-- FAULT TOLERANCE -->
+<section id="fault">
+  <div class="sec-h"><span class="n">02</span><h2>兼容端点容错四件套</h2></div>
+  <p class="sub">这套 harness 最有特色、也是本次实测修 bug 的重灾区——为了让 DeepSeek 这类第三方 Anthropic 兼容端点稳定干活而塞进循环的四个补丁。</p>
+  <div class="callout">
+    <h3>为什么需要它</h3>
+    <p style="margin:0;font-size:14px;color:#7a3a30">第三方端点与官方 API 行为有微妙差异：联网工具组合不被接受、thinking 块必须原样回传、网络更抖、对截断文本里的半个 emoji 更严格。任一处不兜底，整段对话就会 400/卡死。</p>
+    <div class="four">
+      <div><b>联网工具适配阶梯</b> — 4xx 自动降档：搜索+抓取→仅搜索→兼容版→停用。<span class="ref">engine.ts:1256</span> 你全程看到的 <code>ℹ️ 联网工具适配</code> 即此。</div>
+      <div><b>thinking 回传</b> — <code>echoContent</code> 兼容端点必须保留 thinking/redacted_thinking 块。<span class="ref">engine.ts:1210</span> <b>= 本次修的让 C2 卡死的 400「thinking must be passed back」。</b></div>
+      <div><b>瞬时退避重试</b> — 网络抖动/5xx/429 退避重试（上限 3 次）。<span class="ref">engine.ts:1270</span></div>
+      <div><b>孤立代理项清洗</b> — <code>stripLoneSurrogates</code> 剔除截断产生的半个 UTF-16 代理项，防 400 hex escape。<span class="ref">engine.ts:58</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- PART 2 -->
+<section id="part2">
+  <div class="sec-h"><span class="n">03</span><h2>Part 2 · 质量 &amp; 性价比路线图</h2></div>
+  <p class="sub">核心结论：<b>流程正确性扎实，但质量地板是软的</b>——几乎所有不确定路径都倒向「通过」，且产出质量规范大多是默认关闭的可选技能。下面按 影响×成本 排序。</p>
+</section>
+
+<!-- QUICK WINS -->
+<section id="quickwins">
+  <h3 style="font-size:20px">🥇 三个立即该做的 Quick Win</h3>
+  <p class="sub" style="margin-bottom:6px">低成本、直接堵住质量地板与降本盲点。</p>
+
+  <div class="card qw">
+    <div class="badge-row"><span class="badge b-hi">HIGH 影响</span> <span class="badge b-eff">LOW 成本</span> <span class="badge b-dim">质量</span></div>
+    <h3><span class="num">1</span> 验收防放水</h3>
+    <p class="row"><b>问题</b> 校验者没调 <code>submit_verdict</code> 时，代码直接 <code>return {result:"pass"}</code> 并打「按通过处理」——验收最该兜底的失败路径反而判通过。<span class="ref">engine.ts:560</span></p>
+    <p class="row"><b>改法</b> 无结构化裁决时先强制重试一轮（system 注入「必须且只能调用 submit_verdict」+ <code>tool_choice</code> 强制），仍失败则判 <b>revise</b> 而非 pass，让返工兜住。删掉「按通过处理」那行。</p>
+  </div>
+
+  <div class="card qw">
+    <div class="badge-row"><span class="badge b-hi">HIGH 影响</span> <span class="badge b-eff">LOW 成本</span> <span class="badge b-dim">质量</span></div>
+    <h3><span class="num">2</span> 产出规范从「可选技能」上移为「常驻约束」</h3>
+    <p class="row"><b>问题</b> 金字塔写作 / 来源标注 / 交付自查表是<b>默认关闭</b>的可选技能，多数用户不开。<code>SHARED_RULES</code> 只讲协作纪律。<span class="ref">seed.ts</span></p>
+    <p class="row"><b>改法</b> 把「结论先行 + 要点 MECE + 关键事实标来源/检索日期」写进 <code>SHARED_RULES</code>；<code>buildWorkBrief</code> 第 5 点改为强制交付摘要附自查表（验收标准逐条→满足与否→证据位置）。普惠所有任务。</p>
+  </div>
+
+  <div class="card qw">
+    <div class="badge-row"><span class="badge b-hi">HIGH 影响</span> <span class="badge b-eff">MED 成本</span> <span class="badge b-dim">降本</span></div>
+    <h3><span class="num">3</span> 成本计费分列</h3>
+    <p class="row"><b>问题</b> 把 <code>cache_read</code>（约 1/10 价）和 <code>cache_creation</code> 全当全价 <code>input</code> 计——预算护栏高估成本、提前熔断，且缓存收益不可见。<span class="ref">engine.ts:1279</span></p>
+    <p class="row"><b>改法</b> <code>usage</code> 拆成 <code>{input, output, cache_read, cache_creation}</code> 分列；预算用加权 token（cache_read×0.1 + creation×1.25 + input×1 + output×1）。</p>
+  </div>
+</section>
+
+<!-- MATRIX -->
+<section id="matrix">
+  <h3 style="font-size:20px">影响 × 成本 矩阵</h3>
+  <p class="sub">12 条建议的全局视图。左上角（高影响·低成本）= 先做。<span style="color:var(--accent)">★ = 三个 Quick Win。</span></p>
+  <div class="matrix">
+    <div class="hot"></div>
+    <div class="field">
+      <span class="axis-y-top">高影响</span>
+      <span class="axis-y-bot">中影响</span>
+      <span class="axis-y">← 影响 impact</span>
+      <span class="axis-x">成本 effort →（低 · 中）</span>
+      <span class="quad" style="left:8px;top:6px">先做</span>
+      <!-- HIGH impact row (top ~18%) -->
+      <span class="dot star" style="left:16%;top:14%">①验收防放水</span>
+      <span class="dot star" style="left:34%;top:26%">②规范上移</span>
+      <span class="dot star qc" style="left:64%;top:14%;background:#fff;color:#3c3489;border-color:#c28a1e">③计费分列★</span>
+      <span class="dot qc" style="left:60%;top:30%">契约校验</span>
+      <span class="dot q" style="left:76%;top:22%">校验者去人设</span>
+      <!-- MED impact row -->
+      <span class="dot q" style="left:18%;top:62%">返工带差距</span>
+      <span class="dot c" style="left:58%;top:54%">prompt 缓存扩面</span>
+      <span class="dot c" style="left:78%;top:62%">检索去重缓存</span>
+      <span class="dot s" style="left:55%;top:74%">裁决落表+面板</span>
+      <span class="dot s" style="left:80%;top:82%">端点预检+阶梯恢复</span>
+      <span class="dot q" style="left:60%;top:90%">PPT配图落地</span>
+      <span class="dot s" style="left:84%;top:94%">回归套件</span>
+    </div>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--accent)"></i>Quick Win</span>
+      <span><i class="sw" style="background:var(--qual)"></i>质量</span>
+      <span><i class="sw" style="background:var(--cost)"></i>降本</span>
+      <span><i class="sw" style="background:var(--obs)"></i>稳定/可观测</span>
+      <span><i class="sw" style="background:var(--exec)"></i>质量+降本</span>
+    </div>
+  </div>
+</section>
+
+<!-- DETAILED RECS -->
+<section id="recs">
+  <h3 style="font-size:20px">详细建议（按主题）</h3>
+  <div class="filters" id="filters">
+    <button data-f="all" aria-pressed="true">全部</button>
+    <button data-f="q" aria-pressed="false">质量</button>
+    <button data-f="c" aria-pressed="false">降本</button>
+    <button data-f="s" aria-pressed="false">稳定/可观测</button>
+    <button data-f="qc" aria-pressed="false">质量+降本</button>
+  </div>
+  <div id="reclist">
+
+    <div class="card rec qc" data-dim="qc">
+      <div class="top"><h3>write_document 落库前做 kind 契约校验</h3><span class="badge b-hi">HIGH</span><span class="badge b-eff">MED</span><span class="badge b-dim">质量+降本 · PPT/数据表</span></div>
+      <p class="row"><b>问题</b> <code>content</code> 不做校验，kind=slides 无 <code>---</code>、kind=sheet 非合法 CSV 都静默接收，错误要到渲染期才暴露。<span class="ref">engine.ts:970</span></p>
+      <p class="row"><b>改法</b> execTool 的 write_document 分支加轻量契约校验，失败作为 tool_result 返回（不落库、引导自纠）：slides 复用 <code>parseSlides</code> 跑一遍要求 ≥2 页且首页有标题；sheet 校验表头存在、各行列数一致；report 仅校验非空。错误给「第 3 行 5 列但表头 4 列」式可执行反馈。</p>
+    </div>
+
+    <div class="card rec q" data-dim="q">
+      <div class="top"><h3>校验者选取去人设化，缺位时降级自查</h3><span class="badge b-hi">HIGH</span><span class="badge b-eff">MED</span><span class="badge b-dim">质量 · 验收</span></div>
+      <p class="row"><b>问题</b> verifier = 名字含「评审」→ 创建者 → others[0]。多数工作区没有「评审」成员，最终落到任意同事做验收，判准漂移。<span class="ref">engine.ts:510</span></p>
+      <p class="row"><b>改法</b> 验收时临时覆盖 system 为固定「严格校验者」指令（与日常人设解耦，保证可重复）；无其他同事时让作者走自查 rubric 并强制 submit_verdict（至少挡空交付/缺标准项）；audit 记录实际校验者。</p>
+    </div>
+
+    <div class="card rec c" data-dim="c">
+      <div class="top"><h3>分离 cache_read / cache_creation / 纯 input</h3><span class="badge b-hi">HIGH</span><span class="badge b-eff">MED</span><span class="badge b-dim">降本 · 通用</span></div>
+      <p class="row"><b>问题</b> 缓存 token 全当全价 input 计：预算高估提前熔断，缓存收益不可见。<span class="ref">engine.ts:1279</span> <span class="ref">db.ts usageDaily</span></p>
+      <p class="row"><b>改法</b> usage 扩为 4 列分别累计写入 <code>usage_json</code>；agentDailyStats/usageDaily 同步分列；budgetExhausted 改用加权计费 token；团队/usage 面板展示缓存命中率。</p>
+    </div>
+
+    <div class="card rec c" data-dim="c">
+      <div class="top"><h3>扩大 prompt caching 命中面</h3><span class="badge b-md">MED</span><span class="badge b-eff">MED</span><span class="badge b-dim">降本 · 通用</span></div>
+      <p class="row"><b>问题</b> 只对 <code>system_prompt</code> 加了 cache_control，且仅官方通道；体量更大的 dynamicCtx 与依赖交付物全文从不缓存。<span class="ref">engine.ts:1181</span></p>
+      <p class="row"><b>改法</b> 把 dynamicCtx 拆「稳定段」（技能/长期记忆）与「易变段」（看板/文档列表），对稳定段加缓存断点；官方通道下给 messages 稳定前缀加断点，避免多轮重发全价 input。</p>
+    </div>
+
+    <div class="card rec c" data-dim="c">
+      <div class="top"><h3>检索/插件结果按 tool+args 去重缓存</h3><span class="badge b-md">MED</span><span class="badge b-eff">MED</span><span class="badge b-dim">降本/稳定 · 通用</span></div>
+      <p class="row"><b>问题</b> 只有 <code>MCP_CALLS_PER_RUN</code> 次数上限、无去重，同一查询在多轮里可重复发起并按次计费。<span class="ref">engine.ts:1300</span></p>
+      <p class="row"><b>改法</b> loop 内维护 <code>Map&lt;toolName+JSON(args), result&gt;</code>，命中回放且不增计数，tool_result 提示「已检索过，复用结果」；web_fetch 同 URL 去重尤其有效；可选进程级 TTL 缓存跨任务复用热点检索。</p>
+    </div>
+
+    <div class="card rec s" data-dim="s">
+      <div class="top"><h3>裁决与验收落表，建质量度量面板</h3><span class="badge b-md">MED</span><span class="badge b-eff">MED</span><span class="badge b-dim">可观测/回归 · 通用</span></div>
+      <p class="row"><b>问题</b> 验收结果只打 system 消息，<code>revision_count</code> 无聚合视图，无法回答「一次通过率/哪类返工最多/放水几次」。</p>
+      <p class="row"><b>改法</b> 新增 <code>verdicts</code> 表（task/verifier/result/reasons/attempt/model）；routes 加 <code>/quality</code> 汇总端点（一次通过率、平均返工、「裁决缺失被兜底」计数）；前端加质量卡片。让「防放水」效果可量化。</p>
+    </div>
+
+    <div class="card rec s" data-dim="s">
+      <div class="top"><h3>兼容端点：模型名预检 + 联网阶梯可恢复</h3><span class="badge b-md">MED</span><span class="badge b-eff">MED</span><span class="badge b-dim">稳定 · 通用</span></div>
+      <p class="row"><b>问题</b> provider 的 <code>default_model</code> 不存在时 404 空耗 3 次重试；<code>webToolsStage</code> 只升不降（一次抖动永久停用联网到重启）。<span class="ref">engine.ts:159</span> <span class="ref">engine.ts:86</span></p>
+      <p class="row"><b>改法</b> 保存/测试 provider 时探针校验模型真实存在、非官方端点忽略 claude-* 强制落 default_model；给 webToolsStage 加成功计数自动回升一档并把当前阶梯暴露到 UI；404 归类为不可重试错误立即报错。</p>
+    </div>
+
+    <div class="card rec q" data-dim="q">
+      <div class="top"><h3>sheet 可视化与 PPT 配图端到端兜底</h3><span class="badge b-md">MED</span><span class="badge b-eff">MED</span><span class="badge b-dim">质量 · PPT/数据表</span></div>
+      <p class="row"><b>问题</b> 网关只回 url 的图永远嵌不进 pptx（localImagePath 返回 null 静默跳过）——web 有图、PPT 无图；slides 表格被扁平成要点，结构丢失。<span class="ref">images.ts:74</span> <span class="ref">pptx.ts:32</span></p>
+      <p class="row"><b>改法</b> generateImage 拿到 url 主动 fetch 落盘再返回本地路径；含表格的 slides 页改用 pptx 原生 <code>addTable</code>；write_document 校验 slides 引用的 /assets 图存在性。</p>
+    </div>
+
+    <div class="card rec q" data-dim="q">
+      <div class="top"><h3>人设统一注入「结论先行+来源+自查表」硬约束</h3><span class="badge b-hi">HIGH</span><span class="badge b-eff">LOW</span><span class="badge b-dim">质量 · 方案/计划书/PPT</span></div>
+      <p class="row"><b>问题</b> 最影响质量的方法在可选技能里默认关闭；SHARED_RULES 只讲协作纪律。<span class="ref">seed.ts</span> <span class="ref">engine.ts:467</span></p>
+      <p class="row"><b>改法</b> 三条产出规范上移为常驻约束；report/slides 模板化首段（核心结论/TL;DR）；可选技能保留为更重的「深度版」。（= Quick Win ②）</p>
+    </div>
+
+    <div class="card rec q" data-dim="q">
+      <div class="top"><h3>返工上限后把「差距」结构化带给用户</h3><span class="badge b-md">MED</span><span class="badge b-eff">LOW</span><span class="badge b-dim">质量 · 方案/计划书</span></div>
+      <p class="row"><b>问题</b> 返工达上限（默认 <code>MAX_REVISIONS=1</code>）后只 audit「转人工」，最后一次 reasons 没沉淀，用户看到 review 态却不知卡在哪。<span class="ref">engine.ts:415</span></p>
+      <p class="row"><b>改法</b> 最后一次未通过 reasons 写入 task 的 <code>last_verdict</code> 字段、看板 review 卡展示「待人工：未满足 X/Y/Z」；MAX_REVISIONS 按 tier 分级、默认上调到 2。</p>
+    </div>
+
+    <div class="card rec s" data-dim="s">
+      <div class="top"><h3>扩充回归套件覆盖质量闭环</h3><span class="badge b-md">MED</span><span class="badge b-eff">MED</span><span class="badge b-dim">回归 · 通用</span></div>
+      <p class="row"><b>问题</b> 现有用例只验存在性，不验质量闭环；质量改动若无回归极易被改回放水。<span class="ref">scripts/regression.mjs</span></p>
+      <p class="row"><b>改法</b> 新增机制级用例（Mock 零 token）：verifier 不交裁决→断言 revise；非法 CSV/无分页 slides→断言被拒并返回行号；slidesToPptx 退化输入不崩；usage_json 断言 cache 分列存在。纳入 npm test 阻断回归。</p>
+    </div>
+
+    <div class="card rec q" data-dim="q">
+      <div class="top"><h3>裁决缺失改为返工或硬重试（Quick Win ①）</h3><span class="badge b-hi">HIGH</span><span class="badge b-eff">LOW</span><span class="badge b-dim">质量 · 全部产出</span></div>
+      <p class="row"><b>问题</b> 校验者没调 submit_verdict 时直接判 pass，是结构性放水通道。<span class="ref">engine.ts:560</span></p>
+      <p class="row"><b>改法</b> 无裁决时先强约束重试一轮（配 tool_choice 强制工具），仍失败按保守策略判 revise，删除「按通过处理」审计语句。</p>
+    </div>
+
+  </div>
+</section>
+
+<!-- WEAKNESS APPENDIX -->
+<section id="weak">
+  <div class="sec-h"><span class="n">04</span><h2>脆弱点附录</h2></div>
+  <p class="sub">7 路精读识别出的各子系统已知脆弱点 / 风险（折叠展开）。这是上面建议的依据，也是后续迭代的隐患清单。</p>
+
+  <details class="wk"><summary>① 主循环与模型路由 <span class="c">8 项</span></summary>
+    <ul>
+      <li><code>webToolsStage</code> 进程级全局且只升不降，一次 4xx 后永久停用联网到重启，并发下审计行可能刷屏。</li>
+      <li>瞬时退避在循环内串行阻塞 agent 队列（最坏 2+4+6=12s）；pause_turn 与降档都 <code>iteration--</code>，理论上可被持续 4xx 拖近死循环。</li>
+      <li><code>supportsAdaptiveThinking</code> 硬编码模型名正则，新模型/改名不挂 thinking，但 echoContent 仍准备回传——能力探测与回传策略不一致。</li>
+      <li>插话注入只扫 steerSince 时间窗内 10 条，窗口外丢失；所有用户新消息无差别拼一条，长任务里可能重复注入过时插话。</li>
+      <li>echoContent 的过滤是经验白名单而非协议级保证。</li>
+      <li>usage 把 cache token 计入 input 用于预算，护栏高估成本。</li>
+      <li>verifier 选择启发式脆弱（名字含「评审」）；isMock 直接跳过验收。</li>
+      <li>stripLoneSurrogates 只清洗部分回传路径，MCP/图片结果与插话原文未清洗。</li>
+    </ul>
+  </details>
+
+  <details class="wk"><summary>② 任务生命周期与验收 <span class="c">7 项</span></summary>
+    <ul>
+      <li><b>fail-open 是质量地板最大漏点</b>：无结构化裁决/isMock/result 非 revise 全倒向 pass，劣质交付静默放行。</li>
+      <li><code>MAX_REVISIONS</code> 默认 1；达上限转 review，但 checkProject 不区分「验收通过的 review」与「超返工未通过的 review」，质量信号在项目层丢失。</li>
+      <li>校验者选择靠名字字符串匹配，无评审角色时退化为任意同事，validator 可能不懂该领域。</li>
+      <li>runVerification 自身 streamRun 抛异常会让整个 runTaskWork reject、退回 todo，把「验收崩溃」和「干活崩溃」混为一谈，可能无谓重跑昂贵干活。</li>
+      <li>交付只取最后一份文档校验，report+slides+sheet 多份组合时其余不经核验。</li>
+      <li>revision_count 持久化了但重启恢复后 attempt 从 0 重来，返工历史不影响新上限。</li>
+      <li>验收 prompt 只塞最后一份交付物全文，核对前置/多份产出需自己摸 doc_id。</li>
+    </ul>
+  </details>
+
+  <details class="wk"><summary>③ 项目 DAG 编排与汇总 <span class="c">8 项</span></summary>
+    <ul>
+      <li>内存调度状态易失：runningTasks/agentQueues 进程内，崩溃后只恢复 doing；停在 todo 的「就绪未跑」任务无后续交付事件触发就永久滞留。</li>
+      <li><code>MAX_CONCURRENT_WORK=8</code> 写死、无等待队列，被并发挡掉的任务靠一次外部交付事件才重新开工，有饿死风险。</li>
+      <li>onTaskDelivered/checkProject 每次全表扫描找下游，无反向邻接索引，规模化退化。</li>
+      <li>checkProject 用 review 当「已交付」即触发汇总，会把未通过验收的劣质交付物纳入。</li>
+      <li>summary_doc_id 取 createdDocIds 最后一个，Lead 多写/顺序异常会指错；Lead 不写文档时显示「已汇总」却无报告。</li>
+      <li>approve_plan 退回路径弱：拒绝只唤起 Lead，项目停 planned，旧任务悬挂。</li>
+      <li>depsSatisfied 把「依赖任务不存在」当满足，数据损坏时下游被错误提前放行。</li>
+      <li>无项目级超时/僵死检测，任务卡 doing 永不交付则项目永久 running。</li>
+    </ul>
+  </details>
+
+  <details class="wk"><summary>④ 工具系统与外部能力 <span class="c">8 项</span></summary>
+    <ul>
+      <li>per-run 计数器是单次 llmLoop 内存变量，任务 revise 重跑会归零，实际花费可远超上限×次数，无任务/项目级累计预算。</li>
+      <li>MCP 连接进程内全局共享且无并发锁，8 并发首次访问同 server 触发 connect 竞态、重复建连泄漏。</li>
+      <li>callCache key 只含工具名+input、不含租户维度，多 channel 下结果可能串数据（隐私）。</li>
+      <li>stdio MCP 以用户配置的 command 启子进程、无白名单，等于任意命令执行面；auth_token 明文存 db。</li>
+      <li>失败熔断粒度粗：connect 抛错熔断整个 server 5 分钟，瞬时抖动也被熔断、无半开探测。</li>
+      <li>图片 b64 同步 writeFileSync 落盘阻塞事件循环；assetsDir 无清理/配额，无限增长。</li>
+      <li>缓存只判 input 相等不判时效，「最新新闻」类 10 分钟内回旧缓存悄悄降时效。</li>
+      <li>MCP inputSchema 原样透传未做大小校验，畸形/超大 schema 进每轮请求放大上下文。</li>
+    </ul>
+  </details>
+
+  <details class="wk"><summary>⑤ 状态持久化 / 用量 / 成本护栏 <span class="c">9 项</span></summary>
+    <ul>
+      <li>预算护栏只在 onTaskAssigned 一处检查且只拦自动开工，运行中任务/聊天/验收汇总不受限，无法真正硬切断。</li>
+      <li>时区不一致：budgetExhausted 用本地零点，账本归因用 Asia/Shanghai，非中国时区窗口错位。</li>
+      <li>断点恢复是「从头重跑」非检查点续跑，重启重复执行整轮、重复产出与计费，无幂等。</li>
+      <li>token 把 cache_read 计入 input，对计费偏高估，账本无单价/币种维度。</li>
+      <li>账本与 messages 强耦合，删消息会抹掉历史用量，无独立不可变账本表。</li>
+      <li>聚合全表扫描 + 应用层 JSON.parse，messages 缺复合索引，量大后 /usage 与每次开工变慢。</li>
+      <li>并发状态进程内内存，多实例部署（共享库）各算各的互不感知。</li>
+      <li>真实 client 抛错路径 usage_json 置 null，已消耗 token 丢失不入账。</li>
+      <li>appendMemory 的 FIFO 截断是 O(n²) 反复 join 全文。</li>
+    </ul>
+  </details>
+
+  <details class="wk"><summary>⑥ 产出渲染与格式契约 <span class="c">8 项</span></summary>
+    <ul>
+      <li>分页/frontmatter 解析前后端平行双实现（DocsView vs pptx.ts），共享约定不共享代码，任一端改正则即 drift。</li>
+      <li>几乎零写入校验：声明 slides 却无 <code>---</code>、声明 sheet 却给散文都原样落库，坏格式到渲染期才暴露。</li>
+      <li>parseSlides 内容分类有损：表格压成 ' · ' 要点、代码/引用/嵌套/加粗被 plain() 抹平，.pptx 与前端富渲染不一致。</li>
+      <li>数值列判定阈值硬编码 60% 且首列强制当标签，纯数字首列误判、含区间值列被踢出，'1.2万'/'¥1.2k' 解析为 0 静默失真。</li>
+      <li>pptx 版式固定坐标硬编码，内容多了文本框溢出被裁，无自动分页/缩字；首页副标题全角空格拼接易糊。</li>
+      <li>图片只取 page.images[0]，一页多图丢其余；外链图在 .pptx 无声消失（预览却显示）。</li>
+      <li>isFrontmatter 启发式：正文首页全是「姓名：张三」式冒号行会被误删整页。</li>
+      <li>CSV vs Markdown 表靠是否以 <code>|</code> 开头嗅探，脆弱；revise 重写堆叠多版本文档，验收只看最后一个。</li>
+    </ul>
+  </details>
+
+  <details class="wk"><summary>⑦ 提示词、人设与 Agent 设计 <span class="c">7 项</span></summary>
+    <ul>
+      <li>SHARED_RULES 在每个 agent 的 system_prompt 编译期内联，改守则需重建 agent 才生效，已存库的是快照、存在版本漂移。</li>
+      <li>「检索≤3次」「save_memory≤1」全是软约束无运行时强制；web_search 是服务端工具本地无法计数限制。</li>
+      <li>验收者选择极脆弱，改名/英文名时退化为「随便挑一个」当法官，且未排除验收者自身人设偏见。</li>
+      <li>技能注入按返回顺序 + 4000 字硬 break，无优先级/相关性筛选，靠后技能静默丢弃，调研任务也被塞金字塔写作法。</li>
+      <li>model_tier 交给 LLM 自评、无校准反馈环，填错档不被发现，light 陷入「做不好→返工→还是 light」浪费循环。</li>
+      <li>brief 前置交付物截断 4000 字、验收 16000、read_document 20000，长链上游信息静默截断无提示。</li>
+      <li>Mock 模式跳过验收，回归测的是「跳过」路径，验收逻辑本身难被自动化测到。</li>
+    </ul>
+  </details>
+</section>
+
+<div class="foot">
+  <p>本报告由 8 个并行子 agent 对 <code>server/src/agents/engine.ts</code> 等核心文件做代码级精读后综合而成；所有 <span class="ref">file:line</span> 引用指向当时的工作树。建议落地时以最新代码为准复核行号。</p>
+  <p>AITeam · AI 同事工作台 — Agent Harness 分析 · 2026-06-13</p>
+</div>
+
+</div>
+<script>
+(function(){
+  var fl=document.getElementById('filters'), list=document.getElementById('reclist');
+  if(!fl||!list) return;
+  fl.addEventListener('click',function(e){
+    var b=e.target.closest('button'); if(!b) return;
+    var f=b.getAttribute('data-f');
+    Array.prototype.forEach.call(fl.querySelectorAll('button'),function(x){x.setAttribute('aria-pressed', x===b?'true':'false');});
+    Array.prototype.forEach.call(list.querySelectorAll('.rec'),function(card){
+      card.style.display = (f==='all'||card.getAttribute('data-dim')===f) ? '' : 'none';
+    });
+  });
+})();
+</script>
+</body>
+</html>

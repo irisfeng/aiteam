@@ -175,6 +175,15 @@ addColumnIfMissing("documents", "version", "version INTEGER NOT NULL DEFAULT 1")
 addColumnIfMissing("documents", "superseded_by", "superseded_by TEXT");
 db.exec(`CREATE INDEX IF NOT EXISTS idx_documents_task_kind ON documents(task_id, kind, superseded_by)`);
 db.exec(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '')`);
+// 用户表（standalone 多用户登录）：全局表，不带 owner_id（owner = user:<id> 由此派生）
+db.exec(`CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY,
+  email TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  display_name TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL DEFAULT 'member',
+  created_at INTEGER NOT NULL
+)`);
 backfillDocVersions(); // 一次性把存量重复版本按 (task_id,kind) 链成版本（幂等，仅处理多当前版的组）
 
 export interface Agent {
@@ -1014,6 +1023,44 @@ export function finalizeStaleStreaming(): number {
     stmt.run(r.content ? `${r.content}\n\n${note}` : note, r.id);
   }
   return rows.length;
+}
+
+// ---- users（standalone 多用户登录）----
+export interface User {
+  id: string;
+  email: string;
+  password_hash: string;
+  display_name: string;
+  role: "admin" | "member";
+  created_at: number;
+}
+export function countUsers(): number {
+  return (db.prepare("SELECT COUNT(*) AS n FROM users").get() as { n: number }).n;
+}
+export function getUserByEmail(email: string): User | undefined {
+  return db.prepare("SELECT * FROM users WHERE email = ?").get(email.toLowerCase().trim()) as User | undefined;
+}
+export function getUserById(id: string): User | undefined {
+  return db.prepare("SELECT * FROM users WHERE id = ?").get(id) as User | undefined;
+}
+export function listUsers(): Omit<User, "password_hash">[] {
+  return db.prepare("SELECT id, email, display_name, role, created_at FROM users ORDER BY created_at ASC").all() as Omit<User, "password_hash">[];
+}
+export function createUser(u: { email: string; password_hash: string; display_name: string; role: "admin" | "member" }): User {
+  const user: User = {
+    id: nanoid(12),
+    email: u.email.toLowerCase().trim(),
+    password_hash: u.password_hash,
+    display_name: u.display_name,
+    role: u.role,
+    created_at: now(),
+  };
+  db.prepare("INSERT INTO users (id, email, password_hash, display_name, role, created_at) VALUES (@id, @email, @password_hash, @display_name, @role, @created_at)").run(user);
+  return user;
+}
+export function setUserRole(id: string, role: "admin" | "member"): User | undefined {
+  db.prepare("UPDATE users SET role = ? WHERE id = ?").run(role, id);
+  return getUserById(id);
 }
 
 export function deleteDocument(id: string): void {

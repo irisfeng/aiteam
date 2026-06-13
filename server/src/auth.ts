@@ -1,14 +1,14 @@
 import type { Request, Response, NextFunction } from "express";
 import { getToken } from "@auth/core/jwt";
 import { ownerFromUserId, withOwner } from "./ownerScope.js";
+import { SESSION_COOKIE, readCookie, verifySession } from "./session.js";
 
 /**
  * 鉴权模式：
- * - standalone：AiTeam 原始单机用法，不校验登录，固定单用户（保证原项目可独立运行）
+ * - standalone：AiTeam 自建登录（邮箱+密码 → JWT 会话 cookie）。未登录返回 401。
  * - coworker：整合进统一 Web App，复用 Coworker 的 NextAuth 登录态（本地解密会话 cookie）
  */
 const AUTH_MODE = process.env.AITEAM_AUTH_MODE ?? "standalone";
-const STANDALONE_USER = "user";
 
 // NextAuth v5 会话 cookie 名（HTTPS 用 __Secure- 前缀）。同时尝试两者以兼容反代下的 http/https 落差。
 const COOKIE_NAMES = ["__Secure-authjs.session-token", "authjs.session-token"];
@@ -23,7 +23,11 @@ export interface AuthedRequest extends Request {
  * 自动处理 HKDF salt、A256CBC-HS512、cookie 分块、未来 enc 切换）。失败返回 null。
  */
 export async function resolveUserId(req: Pick<Request, "headers">): Promise<string | null> {
-  if (AUTH_MODE !== "coworker") return STANDALONE_USER;
+  if (AUTH_MODE !== "coworker") {
+    // standalone：校验 AiTeam 自己签发的会话 cookie（登录后下发）。未登录 → null → 401。
+    const token = readCookie(req.headers.cookie, SESSION_COOKIE);
+    return token ? await verifySession(token) : null;
+  }
 
   const secret = process.env.AUTH_SECRET;
   if (!secret) {

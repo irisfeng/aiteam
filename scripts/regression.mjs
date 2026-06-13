@@ -45,12 +45,16 @@ async function waitFor(fn, timeout = 20000, interval = 400) {
 const db = await import(join(root, "server/dist/db.js"));
 const { seedGlobalSkills, seedForOwner } = await import(join(root, "server/dist/seed.js"));
 const { enterOwner, ownerFromUserId } = await import(join(root, "server/dist/ownerScope.js"));
+const { hashPassword } = await import(join(root, "server/dist/password.js"));
 const engine = await import(join(root, "server/dist/agents/engine.js"));
 
-// 多用户架构：先播种全局技能，再进入 owner 上下文播种私有工作区，Phase 1 全程在该 owner 内跑。
-// 用 "user"（standalone 默认固定用户）→ 与 Phase 2 spawn 的服务同一 owner，共享同库工作区。
+// 多用户登录架构：建一个测试账号，Phase 1 进入其 owner 上下文播种私有工作区；
+// Phase 2 用同一账号登录 → 同一 owner → 共享同库工作区。
+const TEST_EMAIL = "regress@test.local";
+const TEST_PW = "regress-pw-123";
 seedGlobalSkills();
-enterOwner(ownerFromUserId("user"));
+const testUser = db.createUser({ email: TEST_EMAIL, password_hash: hashPassword(TEST_PW), display_name: "回归用户", role: "admin" });
+enterOwner(ownerFromUserId(testUser.id));
 seedForOwner();
 const agents = db.listAgents();
 const pm = agents[0];
@@ -210,14 +214,31 @@ const server = spawn("node", [join(root, "server/dist/index.js")], {
 });
 const up = await waitFor(async () => {
   try {
-    return (await fetch(`${BASE}/bootstrap`)).ok;
+    const r = await fetch(`${BASE}/auth/me`); // 未登录返回 401（仍表示服务已起）
+    return r.status === 401 || r.ok;
   } catch {
     return false;
   }
 }, 15000);
-check("A1", "服务启动 / bootstrap 可达", up);
-const J = async (path, init) => {
-  const res = await fetch(`${BASE}${path}`, { headers: { "Content-Type": "application/json" }, ...init });
+check("A1", "服务启动可达", up);
+
+// 鉴权：未登录访问受保护 API 应 401；登录后下发会话 cookie
+let sessionCookie = "";
+const unauth = await fetch(`${BASE}/bootstrap`);
+const login = await fetch(`${BASE}/auth/login`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ email: TEST_EMAIL, password: TEST_PW }),
+});
+const lsc = login.headers.get("set-cookie");
+if (lsc) { const m = lsc.match(/aiteam_session=[^;]+/); if (m) sessionCookie = m[0]; }
+check("AUTH1", "鉴权：未登录 API 401 + 登录下发会话 cookie", unauth.status === 401 && login.ok && sessionCookie.length > 0);
+
+const J = async (path, init = {}) => {
+  const headers = { "Content-Type": "application/json", ...(init.headers ?? {}), ...(sessionCookie ? { Cookie: sessionCookie } : {}) };
+  const res = await fetch(`${BASE}${path}`, { ...init, headers });
+  const sc = res.headers.get("set-cookie");
+  if (sc) { const m = sc.match(/aiteam_session=[^;]+/); if (m) sessionCookie = m[0]; }
   return { ok: res.ok, body: await res.json().catch(() => ({})) };
 };
 
@@ -290,12 +311,13 @@ try {
 
   // Q1 真 .pptx 导出（slides → 可编辑 pptx，zip 头校验）
   {
+    const cookieHdr = { headers: { Cookie: sessionCookie } }; // 二进制/文本端点直接 fetch，需手动带会话 cookie
     const slides = (await J("/documents")).body.find((d) => d.kind === "slides");
-    const res = await fetch(`${BASE}/documents/${slides.id}/pptx`);
+    const res = await fetch(`${BASE}/documents/${slides.id}/pptx`, cookieHdr);
     const buf = Buffer.from(await res.arrayBuffer());
     const isZip = buf[0] === 0x50 && buf[1] === 0x4b; // "PK"
     const report = (await J("/documents")).body.find((d) => d.kind === "report");
-    const rejected = !(await fetch(`${BASE}/documents/${report.id}/pptx`)).ok;
+    const rejected = !(await fetch(`${BASE}/documents/${report.id}/pptx`, cookieHdr)).ok;
     check("Q1", "真 .pptx 导出：slides 出合法 zip 包，report 被拒", res.ok && isZip && rejected,
       `${buf.length} bytes`);
   }
@@ -323,7 +345,7 @@ try {
   {
     const usage = (await J("/usage")).body;
     check("U1", "用量：14 天序列 + 活动账本（模型归因）", usage.daily?.length === 14 && Array.isArray(usage.recent));
-    const exp = await fetch(`${BASE}/export.md`);
+    const exp = await fetch(`${BASE}/export.md`, { headers: { Cookie: sessionCookie } });
     check("U2", "工作区快照导出", exp.ok && (await exp.text()).includes("# AITeam 工作区快照"));
     const a1 = (await J("/agents/from-template", { method: "POST", body: JSON.stringify({ template_id: "analyst" }) })).body;
     const a2 = (await J("/agents/from-template", { method: "POST", body: JSON.stringify({ template_id: "analyst" }) })).body;
