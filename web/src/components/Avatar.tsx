@@ -24,20 +24,51 @@ function seeded(id: string): () => number {
   };
 }
 
-/** 毛球轮廓：交替的外尖点/内谷点构成毛茸茸的星形剪影 */
-function fuzzPath(rng: () => number, spikes: number, ro: number, ri: number): string {
+/** 平滑圆胖身体：少量控制点 + Catmull-Rom 转贝塞尔，轮廓柔和起伏（不再是尖刺星形） */
+function blobPath(rng: () => number, n: number, baseR: number, amp: number): string {
   const cx = 50;
   const cy = 50;
-  const pts: string[] = [];
-  for (let i = 0; i < spikes; i++) {
-    const a = (i / spikes) * Math.PI * 2 - Math.PI / 2;
-    const rOuter = ro + (rng() - 0.5) * 5; // 尖端长度抖动
-    pts.push(`${(cx + Math.cos(a) * rOuter).toFixed(1)},${(cy + Math.sin(a) * rOuter).toFixed(1)}`);
-    const am = ((i + 0.5) / spikes) * Math.PI * 2 - Math.PI / 2;
-    const rInner = ri + (rng() - 0.5) * 3;
-    pts.push(`${(cx + Math.cos(am) * rInner).toFixed(1)},${(cy + Math.sin(am) * rInner).toFixed(1)}`);
+  const pts: [number, number][] = [];
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2 - Math.PI / 2;
+    const r = baseR + (rng() - 0.5) * 2 * amp;
+    pts.push([cx + Math.cos(a) * r, cy + Math.sin(a) * r]);
   }
-  return `M${pts.join("L")}Z`;
+  let d = `M${pts[0][0].toFixed(1)},${pts[0][1].toFixed(1)}`;
+  for (let i = 0; i < n; i++) {
+    const p0 = pts[(i - 1 + n) % n];
+    const p1 = pts[i];
+    const p2 = pts[(i + 1) % n];
+    const p3 = pts[(i + 2) % n];
+    const c1x = p1[0] + (p2[0] - p0[0]) / 6;
+    const c1y = p1[1] + (p2[1] - p0[1]) / 6;
+    const c2x = p2[0] - (p3[0] - p1[0]) / 6;
+    const c2y = p2[1] - (p3[1] - p1[1]) / 6;
+    d += `C${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`;
+  }
+  return d + "Z";
+}
+
+/** 绒毛：一圈短而软、带轻微弧度（飘逸感）的发丝，合并成单条 path；配合圆头描边+模糊显得毛茸茸 */
+function furHairs(rng: () => number, count: number, rIn: number, rOut: number, spread: number): string {
+  const cx = 50;
+  const cy = 50;
+  let d = "";
+  for (let i = 0; i < count; i++) {
+    const a = (i / count) * Math.PI * 2 - Math.PI / 2 + (rng() - 0.5) * 0.12;
+    const len = rOut + (rng() - 0.5) * spread;
+    const x1 = cx + Math.cos(a) * rIn;
+    const y1 = cy + Math.sin(a) * rIn;
+    const x2 = cx + Math.cos(a) * len;
+    const y2 = cy + Math.sin(a) * len;
+    const flick = (rng() - 0.5) * 5; // 沿切向的轻微弯曲，让发梢飘起来
+    const tx = -Math.sin(a);
+    const ty = Math.cos(a);
+    const mx = (x1 + x2) / 2 + tx * flick;
+    const my = (y1 + y2) / 2 + ty * flick;
+    d += `M${x1.toFixed(1)},${y1.toFixed(1)}Q${mx.toFixed(1)},${my.toFixed(1)} ${x2.toFixed(1)},${y2.toFixed(1)}`;
+  }
+  return d;
 }
 
 const ACTIVE_STATES: AgentStatus["state"][] = ["thinking", "tool", "responding"];
@@ -63,8 +94,10 @@ export function AgentAvatar({
   const hue = memberHue(id);
   const rng = seeded(id);
 
-  const spikes = 22 + Math.floor(rng() * 7); // 22–28 簇毛
-  const path = fuzzPath(rng, spikes, 46, 33);
+  // 平滑圆胖身体 + 两层柔软绒毛（外层长而淡的光晕、内层短而密的绒面）
+  const body = blobPath(rng, 11, 33, 2.6);
+  const furBack = furHairs(rng, 60, 29, 44, 4); // 长绒：halo
+  const furFront = furHairs(rng, 46, 30, 39, 3); // 短绒：密度
   const eyeType = Math.floor(rng() * 3); // 0 圆 / 1 困 / 2 萌大
   const mouthType = Math.floor(rng() * 3); // 0 微笑 / 1 点 / 2 小 o
   const lean = (rng() - 0.5) * 6; // 眼神/嘴的轻微偏移，增加个性
@@ -98,15 +131,21 @@ export function AgentAvatar({
             <stop offset="62%" stopColor={skin} />
             <stop offset="100%" stopColor={skinDeep} />
           </radialGradient>
+          <filter id={`soft-${uid}`} x="-25%" y="-25%" width="150%" height="150%">
+            <feGaussianBlur stdDeviation="0.65" />
+          </filter>
         </defs>
         <g
           className="fuzz-body"
           style={{ animationDelay: delay, transformBox: "fill-box", transformOrigin: "center" } as React.CSSProperties}
         >
-          {/* 毛发剪影 */}
-          <path d={path} fill={skinDeep} />
-          {/* 身体 */}
-          <circle cx="50" cy="50" r="33" fill={`url(#fb-${uid})`} />
+          {/* 柔软绒毛：两层短弧发丝，圆头描边 + 轻模糊，毛茸茸而非尖刺 */}
+          <g filter={`url(#soft-${uid})`} fill="none" strokeLinecap="round">
+            <path d={furBack} stroke={`hsl(${hue} 56% 64%)`} strokeWidth="2.6" opacity="0.55" />
+            <path d={furFront} stroke={skin} strokeWidth="2.3" opacity="0.7" />
+          </g>
+          {/* 身体（柔和起伏的圆胖剪影） */}
+          <path d={body} fill={`url(#fb-${uid})`} />
           {/* 腮红 */}
           <ellipse cx={50 - eyeDX - 4} cy={eyeY + 8} rx="5" ry="3.2" fill={cheek} opacity="0.5" />
           <ellipse cx={50 + eyeDX + 4} cy={eyeY + 8} rx="5" ry="3.2" fill={cheek} opacity="0.5" />
