@@ -3,6 +3,7 @@ import * as echarts from "echarts";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useWorkspace } from "../store";
+import { api } from "../api";
 import type { Doc } from "../types";
 import { AgentAvatar } from "./Avatar";
 
@@ -348,15 +349,164 @@ export function DocViewerModal({ doc, onClose }: { doc: Doc; onClose: () => void
   );
 }
 
+/** Mock 演示残留：标题以 (Mock) / （Mock） 开头 */
+function isMockDoc(d: Doc): boolean {
+  return /^\s*[（(]\s*mock/i.test(d.title);
+}
+
+/** 单篇文档卡：显示当前版 + 版本号；version>1 时挂「历史版本」抽屉，点开按需拉取旧版。 */
+function DocCard({ doc, onOpen }: { doc: Doc; onOpen: (d: Doc) => void }) {
+  const ws = useWorkspace();
+  const author = ws.agentById(doc.agent_id);
+  const task = ws.tasks.find((t) => t.id === doc.task_id);
+  const meta = docKindMeta(doc.kind);
+  const [open, setOpen] = useState(false);
+  const [olders, setOlders] = useState<Doc[] | null>(null);
+  return (
+    <div className="rounded-xl border border-line bg-panel shadow-sm">
+      <button
+        onClick={() => onOpen(doc)}
+        className="flex w-full items-center gap-3 p-3.5 text-left hover:bg-sel/40"
+      >
+        <span className="text-lg" title={meta.label}>{meta.icon}</span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            <span className="truncate text-[14px] font-medium">{doc.title}</span>
+            {doc.version > 1 && (
+              <span className="shrink-0 rounded bg-accent-soft px-1 text-[10.5px] text-ink-2" title={`第 ${doc.version} 版`}>v{doc.version}</span>
+            )}
+          </div>
+          <div className="mt-0.5 flex items-center gap-2 text-[12px] text-ink-3">
+            <span className="rounded bg-panel px-1 text-[11px]">{meta.label}</span>
+            {author && (
+              <span className="flex items-center gap-1"><AgentAvatar agent={author} size={14} /> {author.name}</span>
+            )}
+            {task && <span className="truncate">任务「{task.title}」</span>}
+            <span>{fmt(doc.created_at)}</span>
+            <span>{doc.content.length.toLocaleString()} 字</span>
+          </div>
+        </div>
+      </button>
+      {doc.version > 1 && (
+        <div className="border-t border-line px-3.5 py-1.5">
+          <button
+            onClick={async () => {
+              setOpen((o) => !o);
+              if (olders === null) {
+                const all = await api.docVersions(doc.id);
+                setOlders(all.filter((v) => v.id !== doc.id));
+              }
+            }}
+            className="text-[11.5px] text-ink-3 hover:text-ink"
+          >
+            {open ? "▾" : "▸"} 历史版本 {doc.version - 1}
+          </button>
+          {open && olders && (
+            <div className="mt-1 flex flex-col gap-1 pb-1">
+              {olders.map((v) => (
+                <button
+                  key={v.id}
+                  onClick={() => onOpen(v)}
+                  className="flex items-center gap-2 rounded px-1.5 py-1 text-left text-[12px] text-ink-3 hover:bg-sel"
+                >
+                  <span className="rounded bg-sel px-1 text-[10.5px]">v{v.version}</span>
+                  <span className="truncate">{v.title}</span>
+                  <span className="ml-auto shrink-0">{fmt(v.created_at)}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 项目折叠组：同一项目的交付物收成一张可展开卡，已汇总(done)项目默认折叠成归档文件夹。 */
+function DocProjectGroup({ project, docs, onOpen }: { project: { id: string; title: string; goal: string; status: string }; docs: Doc[]; onOpen: (d: Doc) => void }) {
+  const [open, setOpen] = useState(project.status !== "done");
+  return (
+    <div className="rounded-xl border border-line bg-panel/60">
+      <button onClick={() => setOpen((v) => !v)} className="flex w-full items-center gap-1.5 px-3 py-2.5 text-left" title={project.goal}>
+        <span className="text-[11px] text-ink-3">{open ? "▾" : "▸"}</span>
+        <span className="truncate text-[13px] font-semibold">🧩 {project.title}</span>
+        <span className="ml-auto shrink-0 rounded bg-sel px-1.5 py-px text-[10.5px] text-ink-3">
+          {docs.length} 份交付物{project.status === "done" ? " · 已归档" : ""}
+        </span>
+      </button>
+      {open && <div className="flex flex-col gap-2 border-t border-line p-2">{docs.map((d) => <DocCard key={d.id} doc={d} onOpen={onOpen} />)}</div>}
+    </div>
+  );
+}
+
+const DOC_KINDS: { k: "all" | Doc["kind"]; label: string }[] = [
+  { k: "all", label: "全部" },
+  { k: "report", label: "📄 报告" },
+  { k: "slides", label: "🖥 演示" },
+  { k: "sheet", label: "📊 数据表" },
+];
+
 export function DocsView() {
   const ws = useWorkspace();
   const [openDoc, setOpenDoc] = useState<Doc | null>(null);
+  const [kind, setKind] = useState<"all" | Doc["kind"]>("all");
+  const [q, setQ] = useState("");
+  const [showMock, setShowMock] = useState(false);
+
+  const mockDocs = ws.documents.filter(isMockDoc);
+  let visible = showMock ? ws.documents : ws.documents.filter((d) => !isMockDoc(d));
+  if (kind !== "all") visible = visible.filter((d) => d.kind === kind);
+  const query = q.trim().toLowerCase();
+  if (query) {
+    visible = visible.filter((d) => {
+      const author = ws.agentById(d.agent_id);
+      const task = ws.tasks.find((t) => t.id === d.task_id);
+      return [d.title, author?.name, task?.title].filter(Boolean).join(" ").toLowerCase().includes(query);
+    });
+  }
+
+  // 按项目分组：文档经 task_id → task.project_id 派生归属；无项目的散文档平铺
+  const projIds: string[] = [];
+  const grouped = new Map<string, Doc[]>();
+  const loose: Doc[] = [];
+  for (const d of visible) {
+    const task = ws.tasks.find((t) => t.id === d.task_id);
+    const pid = task?.project_id ?? null;
+    if (pid && ws.projects.some((p) => p.id === pid)) {
+      if (!grouped.has(pid)) { grouped.set(pid, []); projIds.push(pid); }
+      grouped.get(pid)!.push(d);
+    } else loose.push(d);
+  }
+
+  async function cleanMock() {
+    if (!window.confirm(`清理 ${mockDocs.length} 篇 Mock 演示残留文档？此操作不可撤销。`)) return;
+    for (const d of mockDocs) await ws.deleteDocument(d.id);
+    setShowMock(false);
+  }
 
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col">
-      <header className="flex items-center gap-3 border-b border-line px-5 py-3">
+      <header className="flex flex-wrap items-center gap-2 border-b border-line px-5 py-3">
         <h1 className="text-[15px] font-semibold">文档</h1>
-        <span className="text-[12px] text-ink-3">AI 同事交付的报告、演示文稿与数据表都沉淀在这里</span>
+        <span className="hidden text-[12px] text-ink-3 lg:inline">AI 同事交付的报告、演示文稿与数据表都沉淀在这里</span>
+        <div className="ml-auto flex flex-wrap items-center gap-1.5">
+          {DOC_KINDS.map(({ k, label }) => (
+            <button
+              key={k}
+              onClick={() => setKind(k)}
+              aria-pressed={kind === k}
+              className={`rounded-full border px-2.5 py-1 text-[12px] ${kind === k ? "border-ink bg-ink text-white" : "border-line text-ink-2 hover:bg-sel"}`}
+            >
+              {label}
+            </button>
+          ))}
+          <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="搜索标题/作者/任务"
+            className="w-44 rounded-full border border-line bg-sel px-3 py-1 text-[12px] outline-none focus:border-accent/50"
+          />
+        </div>
       </header>
       <div className="flex-1 overflow-y-auto p-5">
         {ws.documents.length === 0 && (
@@ -365,34 +515,21 @@ export function DocsView() {
           </div>
         )}
         <div className="mx-auto flex max-w-2xl flex-col gap-2">
-          {ws.documents.map((d) => {
-            const author = ws.agentById(d.agent_id);
-            const task = ws.tasks.find((t) => t.id === d.task_id);
-            const meta = docKindMeta(d.kind);
-            return (
-              <button
-                key={d.id}
-                onClick={() => setOpenDoc(d)}
-                className="flex items-center gap-3 rounded-xl border border-line bg-panel p-3.5 text-left shadow-sm hover:border-accent/40"
-              >
-                <span className="text-lg" title={meta.label}>{meta.icon}</span>
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-[14px] font-medium">{d.title}</div>
-                  <div className="mt-0.5 flex items-center gap-2 text-[12px] text-ink-3">
-                    <span className="rounded bg-panel px-1 text-[11px]">{meta.label}</span>
-                    {author && (
-                      <span className="flex items-center gap-1">
-                        <AgentAvatar agent={author} size={14} /> {author.name}
-                      </span>
-                    )}
-                    {task && <span className="truncate">任务「{task.title}」</span>}
-                    <span>{fmt(d.created_at)}</span>
-                    <span>{d.content.length.toLocaleString()} 字</span>
-                  </div>
-                </div>
-              </button>
-            );
+          {mockDocs.length > 0 && !showMock && (
+            <div className="flex items-center gap-2 rounded-xl border border-accent/40 bg-accent-soft px-3.5 py-2.5 text-[12.5px] text-ink-2">
+              <span>🧹 检测到 {mockDocs.length} 篇 Mock 演示残留</span>
+              <button onClick={() => setShowMock(true)} className="rounded border border-line bg-panel px-2 py-0.5 hover:bg-sel">查看</button>
+              <button onClick={cleanMock} className="ml-auto rounded bg-accent px-2 py-0.5 font-medium text-white hover:opacity-90">一键清理</button>
+            </div>
+          )}
+          {projIds.map((pid) => {
+            const project = ws.projects.find((p) => p.id === pid)!;
+            return <DocProjectGroup key={pid} project={project} docs={grouped.get(pid)!} onOpen={setOpenDoc} />;
           })}
+          {loose.map((d) => <DocCard key={d.id} doc={d} onOpen={setOpenDoc} />)}
+          {visible.length === 0 && ws.documents.length > 0 && (
+            <div className="py-8 text-center text-[12px] text-ink-3">没有匹配的文档。</div>
+          )}
         </div>
       </div>
       {openDoc && <DocViewerModal doc={openDoc} onClose={() => setOpenDoc(null)} />}

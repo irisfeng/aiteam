@@ -22,10 +22,12 @@ import {
   usageRecent,
   createChannel,
   createTask,
+  deleteDocument,
   findDm,
   getAgent,
   getChannel,
   getMemory,
+  listDocumentVersions,
   insertMessage,
   listAgents,
   listApprovals,
@@ -382,6 +384,23 @@ api.post("/projects/:id/close", (req, res) => {
 });
 
 api.get("/documents", (_req, res) => res.json(listDocuments()));
+
+/** 某文档的全部历史版本（含已被取代的旧版），供前端「查看历史版本」抽屉。 */
+api.get("/documents/:id/versions", (req, res) => {
+  const doc = getDocument(req.params.id);
+  if (!doc) return res.status(404).json({ error: "document not found" });
+  res.json(doc.task_id ? listDocumentVersions(doc.task_id, doc.kind) : [doc]);
+});
+
+/** 删除文档（清理 Mock 残留等）：连带其历史版本一并删除。 */
+api.delete("/documents/:id", (req, res) => {
+  const doc = getDocument(req.params.id);
+  if (!doc) return res.status(404).json({ error: "document not found" });
+  const versions = doc.task_id ? listDocumentVersions(doc.task_id, doc.kind) : [doc];
+  for (const v of versions) deleteDocument(v.id);
+  broadcast({ type: "doc:delete", payload: { ids: versions.map((v) => v.id) } });
+  res.json({ ok: true, deleted: versions.map((v) => v.id) });
+});
 
 /** slides 文档导出为真 .pptx（可编辑文本 + Hive 主题 + 讲者备注 + 嵌入生成图） */
 api.get("/documents/:id/pptx", (req, res) => {

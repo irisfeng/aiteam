@@ -954,6 +954,9 @@ export function createDocument(d: {
   });
   return insert();
 }
+export function deleteDocument(id: string): void {
+  db.prepare("DELETE FROM documents WHERE id = ?").run(id);
+}
 export function updateDocument(id: string, fields: { title?: string; content?: string }): Doc | undefined {
   const cur = getDocument(id);
   if (!cur) return undefined;

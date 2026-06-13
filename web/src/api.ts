@@ -94,4 +94,7 @@ export const api = {
     req<Approval>(`/approvals/${id}/resolve`, { method: "POST", body: JSON.stringify({ approve }) }),
   closeProject: (id: string) =>
     req<{ project: Project; tasks: Task[] }>(`/projects/${id}/close`, { method: "POST" }),
+  docVersions: (id: string) => req<Doc[]>(`/documents/${id}/versions`),
+  deleteDocument: (id: string) =>
+    req<{ ok: boolean; deleted: string[] }>(`/documents/${id}`, { method: "DELETE" }),
 };
