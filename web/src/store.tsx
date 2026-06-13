@@ -215,7 +215,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     let retry = 0;
     const connect = () => {
       const proto = location.protocol === "https:" ? "wss" : "ws";
-      ws = new WebSocket(`${proto}://${location.host}/ws`);
+      // 统一入口下 WS 也挂在 /aiteam/ 前缀（BASE_URL = "/aiteam/"），同源 upgrade 自动带上会话 cookie
+      ws = new WebSocket(`${proto}://${location.host}${import.meta.env.BASE_URL}ws`);
       ws.onopen = () => (retry = 0);
       ws.onmessage = (ev) => {
         const { type, payload } = JSON.parse(ev.data);

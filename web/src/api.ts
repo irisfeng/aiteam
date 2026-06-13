@@ -1,7 +1,10 @@
 import type { Agent, Approval, Channel, Doc, Message, Project, Provider, Task } from "./types";
 
+// 统一入口下 AiTeam 挂在 /aiteam/，BASE_URL 即 "/aiteam/"
+const API_BASE = `${import.meta.env.BASE_URL}api`;
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`/api${path}`, {
+  const res = await fetch(`${API_BASE}${path}`, {
     headers: { "Content-Type": "application/json" },
     ...init,
   });

@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 import { api } from "./routes.js";
+import { requireUser } from "./auth.js";
 import { attachBus } from "./bus.js";
 import { seedIfEmpty } from "./seed.js";
 import { isMock, recoverInFlightTasks, startScheduler } from "./agents/engine.js";
@@ -19,18 +20,20 @@ recoverInFlightTasks();
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
-app.use("/api", api);
-app.use("/assets", express.static(assetsDir, { maxAge: "30d", immutable: true })); // 生成图资产
+// 整合后所有 AiTeam 路由统一挂在 /aiteam/* 前缀下（由反向代理路由到本进程）。
+// API 需要登录（standalone 模式下中间件放行为单用户）。
+app.use("/aiteam/api", requireUser, api);
+app.use("/aiteam/assets", express.static(assetsDir, { maxAge: "30d", immutable: true })); // 生成图资产
 
-// 生产模式下托管前端构建产物
+// 生产模式下托管前端构建产物（挂在 /aiteam/ 下，与 Vite base 一致）
 const webDist = join(__dirname, "..", "..", "web", "dist");
 if (existsSync(webDist)) {
-  app.use(express.static(webDist));
-  app.get(/^\/(?!api|ws).*/, (_req, res) => res.sendFile(join(webDist, "index.html")));
+  app.use("/aiteam", express.static(webDist));
+  app.get(/^\/aiteam\/(?!api|ws|assets).*/, (_req, res) => res.sendFile(join(webDist, "index.html")));
 }
 
 const server = createServer(app);
-const wss = new WebSocketServer({ server, path: "/ws" });
+const wss = new WebSocketServer({ server, path: "/aiteam/ws" });
 attachBus(wss);
 
 server.listen(PORT, () => {

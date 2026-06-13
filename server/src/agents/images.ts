@@ -79,6 +79,6 @@ export async function generateImage(input: any): Promise<string> {
   return [
     `图片已生成并保存（${size}）。把下面这行 Markdown 原样放进交付物正文中需要配图的位置：`,
     ``,
-    `![${prompt.slice(0, 40)}](/assets/${file})`,
+    `![${prompt.slice(0, 40)}](/aiteam/assets/${file})`,
   ].join("\n");
 }

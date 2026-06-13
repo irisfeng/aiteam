@@ -26,9 +26,9 @@ interface SlidePage {
   notes: string;
 }
 
-/** /assets/xxx.png → 磁盘路径（仅本地生成图可嵌入 pptx；外链跳过） */
+/** /aiteam/assets/xxx.png → 磁盘路径（仅本地生成图可嵌入 pptx；外链跳过） */
 function localImagePath(src: string): string | null {
-  const m = src.match(/^\/assets\/([\w.-]+)$/);
+  const m = src.match(/^\/aiteam\/assets\/([\w.-]+)$/);
   if (!m) return null;
   const file = join(assetsDir, m[1]);
   return existsSync(file) ? file : null;
