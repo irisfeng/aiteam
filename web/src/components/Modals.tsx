@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { useWorkspace } from "../store";
 import { api, type AgentTemplateInfo, type ImageProviderInfo } from "../api";
 import { McpTab, SkillsTab } from "./IntegrationsTabs";
+import { AgentAvatar } from "./Avatar";
 
 function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
   return (
@@ -27,12 +28,16 @@ const inputCls =
 const labelCls = "mb-1 mt-3 block text-[12.5px] font-medium text-ink-2 first:mt-0";
 
 /** 场景组队模板（Hive 设计：3-4 张场景卡一键组队，零输入成本）。
- *  roleKeys 匹配已有成员；templateIds 指向角色模板库——选卡时自动实例化。 */
-const SCENES: { icon: string; name: string; desc: string; channel: string; roleKeys: string[]; templateIds: string[] }[] = [
-  { icon: "🔬", name: "调研与报告", desc: "联网调研 → 分析报告 + 数据表", channel: "research", roleKeys: ["产品", "工程", "分析"], templateIds: ["analyst"] },
-  { icon: "🚀", name: "产品立项", desc: "拆解分工 → 并行交付 → 汇总", channel: "project", roleKeys: ["产品", "工程", "评审"], templateIds: [] },
-  { icon: "✍️", name: "内容与增长", desc: "选题 → 成文 → 校对 → SEO", channel: "content", roleKeys: ["SEO", "增长", "内容", "文案", "校对"], templateIds: ["writer", "proofreader"] },
-  { icon: "🧰", name: "解决方案", desc: "需求澄清 → 选型对比 → 实施方案", channel: "solution", roleKeys: ["方案", "产品", "工程"], templateIds: ["solution"] },
+ *  roleKeys 匹配已有成员；templateIds 指向角色模板库——选卡时自动实例化；
+ *  skills 选卡时自动启用配套工作方法（全员生效）；mcp 给出推荐插件提示。 */
+const SCENES: {
+  icon: string; name: string; desc: string; channel: string;
+  roleKeys: string[]; templateIds: string[]; skills: string[]; mcp: string;
+}[] = [
+  { icon: "🔬", name: "调研与报告", desc: "联网调研 → 分析报告 + 数据表", channel: "research", roleKeys: ["产品", "工程", "分析"], templateIds: ["analyst"], skills: ["深度调研法", "交付自查清单"], mcp: "Tavily 联网搜索" },
+  { icon: "🚀", name: "产品立项", desc: "拆解分工 → 并行交付 → 汇总", channel: "project", roleKeys: ["产品", "工程", "评审"], templateIds: [], skills: ["金字塔写作法", "交付自查清单"], mcp: "" },
+  { icon: "✍️", name: "内容与增长", desc: "选题 → 成文 → 校对 → SEO", channel: "content", roleKeys: ["SEO", "增长", "内容", "文案", "校对"], templateIds: ["writer", "proofreader"], skills: ["金字塔写作法", "交付自查清单"], mcp: "Tavily 联网搜索" },
+  { icon: "🧰", name: "解决方案", desc: "需求澄清 → 选型对比 → 实施方案", channel: "solution", roleKeys: ["方案", "产品", "工程"], templateIds: ["solution"], skills: ["结构化头脑风暴", "交付自查清单"], mcp: "Tavily 联网搜索 / 文件系统" },
 ];
 
 export function NewChannelModal({ onClose, onCustomRole }: { onClose: () => void; onCustomRole: () => void }) {
@@ -41,6 +46,7 @@ export function NewChannelModal({ onClose, onCustomRole }: { onClose: () => void
   const [scene, setScene] = useState<number | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set(ws.agents.map((a) => a.id)));
   const [templates, setTemplates] = useState<AgentTemplateInfo[]>([]);
+  const [sceneHint, setSceneHint] = useState("");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -60,6 +66,21 @@ export function NewChannelModal({ onClose, onCustomRole }: { onClose: () => void
     for (const a of added) if (a) ids.add(a.id);
     setSelected(ids);
     if (!name.trim() || SCENES.some((s) => s.channel === name.trim())) setName(SCENES[i].channel);
+    // 启用该场景配套的工作方法（技能全员生效），并提示推荐 MCP——把"组队/方法/工具"一次配齐
+    const want = SCENES[i].skills;
+    let enabledNames = want;
+    try {
+      const skills: { id: string; name: string; enabled: number }[] = await api.listSkills();
+      const toEnable = skills.filter((s) => want.includes(s.name) && !s.enabled);
+      await Promise.all(toEnable.map((s) => api.toggleSkill(s.id, true)));
+      enabledNames = want.filter((n) => skills.some((s) => s.name === n));
+    } catch {
+      /* 技能接口不可用时仅给提示 */
+    }
+    setSceneHint(
+      `已启用配套工作方法：${enabledNames.join("、")}` +
+        (SCENES[i].mcp ? `；建议在 ⚙ 设置 → MCP 接入「${SCENES[i].mcp}」补足联网/文件能力` : "")
+    );
   }
 
   async function addTemplate(tpl: AgentTemplateInfo) {
@@ -100,11 +121,22 @@ export function NewChannelModal({ onClose, onCustomRole }: { onClose: () => void
                 {active && <span className="ml-auto font-mono text-[10px] text-accent">已选</span>}
               </div>
               <div className="mt-0.5 text-[11.5px] text-ink-3">{s.desc}</div>
-              <div className="mt-1 text-[12px]">{members.map((a) => a.emoji).join(" ") || "—"}</div>
+              <div className="mt-1.5 flex items-center gap-1">
+                {members.length > 0 ? (
+                  members.slice(0, 5).map((a) => <AgentAvatar key={a.id} agent={a} size={18} />)
+                ) : (
+                  <span className="text-[12px] text-ink-3">—</span>
+                )}
+              </div>
             </button>
           );
         })}
       </div>
+      {sceneHint && (
+        <div className="mt-2 rounded-lg bg-accent-soft px-3 py-2 text-[11.5px] leading-relaxed text-ink-2">
+          ✨ {sceneHint}
+        </div>
+      )}
       <label className={labelCls}>频道名</label>
       <input value={name} onChange={(e) => setName(e.target.value)} placeholder="例如 asr_stt_finetuning" className={inputCls} />
       <label className={labelCls}>邀请 AI 同事（手动调整后场景选中态解除）</label>

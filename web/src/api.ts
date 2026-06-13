@@ -86,6 +86,9 @@ export const api = {
   getImageProvider: () => req<ImageProviderInfo>("/image-provider"),
   saveImageProvider: (data: { base_url?: string; api_key?: string; model?: string }) =>
     req<ImageProviderInfo>("/image-provider", { method: "PUT", body: JSON.stringify(data) }),
+  listSkills: () => req<{ id: string; name: string; desc: string; enabled: number; builtin: number }[]>("/skills"),
+  toggleSkill: (id: string, enabled: boolean) =>
+    req(`/skills/${id}`, { method: "PATCH", body: JSON.stringify({ enabled }) }),
   createTask: (data: { title: string; description?: string; channel_id?: string | null; assignee_agent_id?: string | null }) =>
     req<Task>("/tasks", { method: "POST", body: JSON.stringify(data) }),
   updateTask: (id: string, data: Partial<Pick<Task, "title" | "description" | "status" | "assignee_agent_id">>) =>
