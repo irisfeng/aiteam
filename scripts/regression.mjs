@@ -151,6 +151,25 @@ check(
   check("DOC1", "文档版本归并：同任务同 kind 再写出新版、列表只显当前版、历史可查", ok);
 }
 
+// PPTX2 幻灯片解析：Markdown 表格→结构化表格 + 围栏代码块捕获（不再压成项目符号）
+{
+  const { parseSlides } = await import(join(root, "server/dist/pptx.js"));
+  const md = [
+    "---", "title: t", "---", "", "# 封面页", "", "---", "",
+    "# 模型对比", "", "| 模型 | 价格 | 速度 |", "|---|---|---|", "| A | 1 | 快 |", "| B | 2 | 慢 |",
+    "", "一句说明", "", "```", "const x = 1;", "console.log(x);", "```", "",
+  ].join("\n");
+  const pages = parseSlides(md);
+  const withTable = pages.find((p) => p.tables.length > 0);
+  const tbl = withTable?.tables[0];
+  const ok =
+    Boolean(tbl) && tbl.header.length === 3 && tbl.rows.length === 2 && tbl.rows[0][0] === "A" &&
+    pages.some((p) => p.code.length > 0 && p.code[0].includes("const x")) &&
+    !pages.some((p) => p.bullets.some((b) => b.includes("价格"))); // 表格不应再落进项目符号
+  check("PPTX2", "PPTX 解析：表格→结构化(3列2行) + 代码块捕获，不压成项目符号", ok,
+    `表格=${tbl ? `${tbl.header.length}列${tbl.rows.length}行` : "无"}`);
+}
+
 // ---------------------------------------------------------------------------
 // Phase 2：拉起服务，走 HTTP API（聊天/引用/文档/技能/MCP/用量/导出/模板/频道）
 // ---------------------------------------------------------------------------
