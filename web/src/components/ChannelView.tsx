@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useWorkspace } from "../store";
+import { api } from "../api";
 import type { Doc, Message, Task } from "../types";
 import { MessageItem } from "./MessageItem";
 import { Composer } from "./Composer";
@@ -175,13 +176,22 @@ export function ChannelView({ channelId }: { channelId: string }) {
             <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-accent [animation-delay:120ms]" />
             <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-accent [animation-delay:240ms]" />
           </span>
-          {statuses
-            .map((s) => {
-              const name = ws.agentById(s.agent_id)?.name ?? "AI";
-              const verb = s.state === "thinking" ? "正在思考…" : s.state === "tool" ? s.detail ?? "正在使用工具…" : "正在输入…";
-              return `${name} ${verb}`;
-            })
-            .join("　")}
+          <span className="min-w-0 truncate">
+            {statuses
+              .map((s) => {
+                const name = ws.agentById(s.agent_id)?.name ?? "AI";
+                const verb = s.state === "thinking" ? "正在思考…" : s.state === "tool" ? s.detail ?? "正在使用工具…" : "正在输入…";
+                return `${name} ${verb}`;
+              })
+              .join("　")}
+          </span>
+          <button
+            onClick={() => void api.stopChannel(channelId)}
+            className="ml-auto shrink-0 rounded-md border border-line px-2 py-0.5 text-[11.5px] text-ink-3 transition-colors hover:border-red-300 hover:text-red-500"
+            title="停止本频道正在跑的 AI 运行（含聊天回复）"
+          >
+            ⏹ 停止
+          </button>
         </div>
       )}
 

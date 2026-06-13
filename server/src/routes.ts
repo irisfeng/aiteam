@@ -65,6 +65,7 @@ import {
   onPlanResolved,
   onTaskAssigned,
   onTaskDelivered,
+  stopChannel,
   stopTask,
   teamStatus,
   triggerAgent,
@@ -109,6 +110,18 @@ api.post("/channels/:id/messages", (req, res) => {
   broadcast({ type: "message:new", payload: msg });
   onMessage(msg);
   res.json(msg);
+});
+
+/** 频道级停止：中断该频道里正在跑的 AI 运行（含没有 taskId 的聊天回复）。 */
+api.post("/channels/:id/stop", (req, res) => {
+  const channel = getChannel(req.params.id);
+  if (!channel) return res.status(404).json({ error: "channel not found" });
+  const stopped = stopChannel(channel.id);
+  if (stopped) {
+    const sys = insertMessage({ channel_id: channel.id, author_type: "system", content: "⏹ 已按用户要求停止当前运行" });
+    broadcast({ type: "message:new", payload: sys });
+  }
+  res.json({ ok: true, stopped });
 });
 
 api.post("/channels", (req, res) => {

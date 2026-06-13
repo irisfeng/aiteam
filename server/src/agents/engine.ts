@@ -304,10 +304,36 @@ const agentQueues = new Map<string, Promise<void>>();
 const currentWork = new Map<string, string>(); // agentId -> 正在执行的 taskId
 const queuedCount = new Map<string, number>(); // agentId -> 排队中的任务数
 const cancelledTasks = new Set<string>(); // 用户按下停止开关的任务
+const cancelledChannels = new Set<string>(); // 用户在频道里按下停止（覆盖聊天回复 + 该频道的任务运行）
+const activeStreams = new Map<string, Set<{ abort(): void }>>(); // channelId -> 正在跑的流（可 abort 中断）
+
+/** 登记一个在跑的流，返回注销函数（运行结束时调用，顺带清理频道停止标志）。 */
+function registerStream(channelId: string, stream: { abort(): void }): () => void {
+  let set = activeStreams.get(channelId);
+  if (!set) { set = new Set(); activeStreams.set(channelId, set); }
+  set.add(stream);
+  return () => {
+    set!.delete(stream);
+    if (set!.size === 0) { activeStreams.delete(channelId); cancelledChannels.delete(channelId); }
+  };
+}
 
 /** 停止开关（kill switch）：运行中的任务在下一个迭代边界停下；排队中的任务直接不再开工。 */
 export function stopTask(taskId: string) {
   cancelledTasks.add(taskId);
+}
+
+/**
+ * 频道级停止：中断该频道里正在跑的全部 agent 运行（含没有 taskId 的聊天回复）——
+ * abort 在飞的流（能停正在吐字的那一轮），并置频道停止标志让多轮循环在边界也停。
+ * 返回是否有可停止的运行。
+ */
+export function stopChannel(channelId: string): boolean {
+  const set = activeStreams.get(channelId);
+  if (!set || set.size === 0) return false;
+  cancelledChannels.add(channelId);
+  for (const s of set) { try { s.abort(); } catch { /* ignore */ } }
+  return true;
 }
 
 /** 预算护栏（借鉴 Paperclip 的硬切断）：今日 token 总用量超限则不再自动开工。 */
@@ -1328,8 +1354,8 @@ async function llmLoop(
   let imageCalls = 0; // 本次运行已生成的图片数（按张计费，设上限）
 
   for (let iteration = 0; iteration < maxIterations; iteration++) {
-    // 停止开关：在迭代边界停下（标志位由 runTaskWork 消费并落状态）
-    if (ctx.taskId && cancelledTasks.has(ctx.taskId)) {
+    // 停止开关：在迭代边界停下（任务停止 或 频道停止）
+    if ((ctx.taskId && cancelledTasks.has(ctx.taskId)) || cancelledChannels.has(channel.id)) {
       emit("\n\n⏹ 已按用户要求停止。");
       break;
     }
@@ -1341,6 +1367,7 @@ async function llmLoop(
       messages,
       tools,
     });
+    const unregister = registerStream(channel.id, stream);
 
     stream.on("text", (delta) => {
       if (firstText) {
@@ -1357,6 +1384,11 @@ async function llmLoop(
     } catch (err: any) {
       const errStatus = err?.status ?? err?.response?.status;
       const errMsg = String(err?.message ?? err);
+      // 频道/任务停止导致的 abort：最优先识别，不当成错误也不重试，直接收尾停下
+      if (cancelledChannels.has(channel.id) || (ctx.taskId && cancelledTasks.has(ctx.taskId)) || err?.name === "AbortError" || /abort/i.test(errMsg)) {
+        emit("\n\n⏹ 已停止。");
+        break;
+      }
       // 兼容端点联网工具适配阶梯：4xx 自动降一档重试（搜索+抓取 → 仅搜索 → 兼容版 → 停用）
       if (rt.providerId && !rt.official && tools.some(isWebTool) && errStatus >= 400 && errStatus < 500) {
         webStage = Math.min(webStage + 1, 3);
@@ -1380,6 +1412,8 @@ async function llmLoop(
         continue;
       }
       throw err;
+    } finally {
+      unregister(); // 本轮流结束，注销（顺带在频道无活跃流时清掉停止标志）
     }
     // 计费分列：缓存读/写单独累计，input_tokens 只记纯输入。预算护栏据此加权，不再把 1/10 价的缓存读当全价（见 QW3）。
     usage.input_tokens += final.usage.input_tokens;

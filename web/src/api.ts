@@ -72,6 +72,7 @@ export const api = {
   updateChannel: (id: string, patch: { name?: string; agent_ids?: string[] }) =>
     req<Channel>(`/channels/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteChannel: (id: string) => req<{ ok: boolean }>(`/channels/${id}`, { method: "DELETE" }),
+  stopChannel: (id: string) => req<{ ok: boolean; stopped: boolean }>(`/channels/${id}/stop`, { method: "POST" }),
   clearMessages: (id: string) => req<{ ok: boolean }>(`/channels/${id}/messages`, { method: "DELETE" }),
   createAgent: (data: {
     name: string;
