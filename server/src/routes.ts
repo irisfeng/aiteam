@@ -34,6 +34,8 @@ import {
   updateTask,
 } from "./db.js";
 import { broadcast } from "./bus.js";
+import type { AuthedRequest } from "./auth.js";
+import { seedForOwner } from "./seed.js";
 import { AGENT_TEMPLATES, getTemplate } from "./agents/templates.js";
 import { dropConnection, testMcpServer } from "./agents/mcp.js";
 import {
@@ -67,9 +69,10 @@ import {
 
 export const api = Router();
 
-api.get("/bootstrap", (_req, res) => {
+api.get("/bootstrap", (req, res) => {
+  seedForOwner(); // 首次进入：为当前用户播种私有工作区（幂等）
   res.json({
-    user: { id: "user", name: process.env.AITEAM_USER_NAME || "我" },
+    user: { id: (req as AuthedRequest).userId ?? "user", name: process.env.AITEAM_USER_NAME || "我" },
     mock_mode: isMock(),
     providers: listProviders().map(sanitizeProvider),
     agents: listAgents(),
@@ -100,7 +103,7 @@ api.post("/channels/:id/messages", (req, res) => {
     const target = getMessage(String(req.body.reply_to));
     if (target && target.channel_id === channel.id) replyTo = target.id;
   }
-  const msg = insertMessage({ channel_id: channel.id, author_type: "user", author_id: "user", content, reply_to: replyTo });
+  const msg = insertMessage({ channel_id: channel.id, author_type: "user", author_id: (req as AuthedRequest).userId ?? "user", content, reply_to: replyTo });
   broadcast({ type: "message:new", payload: msg });
   onMessage(msg);
   res.json(msg);

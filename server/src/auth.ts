@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from "express";
 import { getToken } from "@auth/core/jwt";
+import { ownerFromUserId, withOwner } from "./ownerScope.js";
 
 /**
  * 鉴权模式：
@@ -50,5 +51,7 @@ export async function requireUser(req: AuthedRequest, res: Response, next: NextF
     return;
   }
   req.userId = userId;
-  next();
+  // 用 owner 上下文包住整个请求处理：路由内的 db 查询自动按 owner 隔离，
+  // 由请求同步触发的 Agent 运行（onMessage 等）也继承该上下文。
+  withOwner(ownerFromUserId(userId), () => next());
 }

@@ -7,14 +7,14 @@ import { WebSocketServer } from "ws";
 import { api } from "./routes.js";
 import { requireUser } from "./auth.js";
 import { attachBus } from "./bus.js";
-import { seedIfEmpty } from "./seed.js";
+import { seedGlobalSkills } from "./seed.js";
 import { isMock, recoverInFlightTasks, startScheduler } from "./agents/engine.js";
 import { assetsDir } from "./agents/images.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 8787);
 
-seedIfEmpty();
+seedGlobalSkills();
 startScheduler();
 recoverInFlightTasks();
 
