@@ -40,7 +40,7 @@ import {
   updateTask,
 } from "./db.js";
 import { broadcast } from "./bus.js";
-import type { AuthedRequest } from "./auth.js";
+import { requireAdmin, type AuthedRequest } from "./auth.js";
 import { fetchCoworkerMe } from "./coworker.js";
 import { seedForOwner } from "./seed.js";
 import { AGENT_TEMPLATES, getTemplate } from "./agents/templates.js";
@@ -182,7 +182,7 @@ api.post("/agents", (req, res) => {
 
 api.get("/mcp-servers", (_req, res) => res.json(listMcpServers().map(sanitizeMcpServer)));
 
-api.post("/mcp-servers", (req, res) => {
+api.post("/mcp-servers", requireAdmin, (req, res) => {
   const { name, kind, url, auth_token, command, args } = req.body ?? {};
   if (!name) return res.status(400).json({ error: "name required" });
   if (kind === "stdio" && !command) return res.status(400).json({ error: "command required for stdio" });
@@ -198,7 +198,7 @@ api.post("/mcp-servers", (req, res) => {
   res.json(sanitizeMcpServer(server));
 });
 
-api.post("/mcp-servers/:id/toggle", (req, res) => {
+api.post("/mcp-servers/:id/toggle", requireAdmin, (req, res) => {
   const server = setMcpServerEnabled(req.params.id, Boolean(req.body?.enabled));
   if (!server) return res.status(404).json({ error: "not found" });
   if (!server.enabled) dropConnection(server.id);
@@ -213,7 +213,7 @@ api.post("/mcp-servers/:id/test", (req, res) => {
     .catch((err) => res.status(502).json({ error: String(err?.message ?? err) }));
 });
 
-api.delete("/mcp-servers/:id", (req, res) => {
+api.delete("/mcp-servers/:id", requireAdmin, (req, res) => {
   dropConnection(req.params.id);
   deleteMcpServer(req.params.id);
   res.json({ ok: true });
@@ -221,13 +221,13 @@ api.delete("/mcp-servers/:id", (req, res) => {
 
 api.get("/skills", (_req, res) => res.json(listSkills()));
 
-api.post("/skills", (req, res) => {
+api.post("/skills", requireAdmin, (req, res) => {
   const { name, desc, content } = req.body ?? {};
   if (!name || !content) return res.status(400).json({ error: "name and content required" });
   res.json(createSkill({ name: String(name).trim(), desc: String(desc ?? "").trim(), content: String(content) }));
 });
 
-api.patch("/skills/:id", (req, res) => {
+api.patch("/skills/:id", requireAdmin, (req, res) => {
   const { enabled, name, desc, content } = req.body ?? {};
   const skill = updateSkill(req.params.id, {
     ...(enabled !== undefined ? { enabled: Boolean(enabled) } : {}),
@@ -239,7 +239,7 @@ api.patch("/skills/:id", (req, res) => {
   res.json(skill);
 });
 
-api.delete("/skills/:id", (req, res) => {
+api.delete("/skills/:id", requireAdmin, (req, res) => {
   deleteSkill(req.params.id); // builtin 不可删（SQL 层保护）
   res.json({ ok: true });
 });
@@ -326,7 +326,7 @@ api.post("/agents/from-template", (req, res) => {
   res.json(agent);
 });
 
-api.post("/providers", (req, res) => {
+api.post("/providers", requireAdmin, (req, res) => {
   const { name, base_url, api_key, default_model, light_model, max_tokens, web_tools, is_strong } = req.body ?? {};
   if (!name || !api_key) return res.status(400).json({ error: "name and api_key required" });
   const provider = createProvider({
@@ -342,7 +342,7 @@ api.post("/providers", (req, res) => {
   res.json(sanitizeProvider(provider));
 });
 
-api.patch("/providers/:id", (req, res) => {
+api.patch("/providers/:id", requireAdmin, (req, res) => {
   const { name, base_url, api_key, default_model, light_model, max_tokens, web_tools, is_strong } = req.body ?? {};
   const provider = updateProvider(req.params.id, {
     ...(name !== undefined ? { name: String(name).trim() } : {}),
@@ -358,7 +358,7 @@ api.patch("/providers/:id", (req, res) => {
   res.json(sanitizeProvider(provider));
 });
 
-api.delete("/providers/:id", (req, res) => {
+api.delete("/providers/:id", requireAdmin, (req, res) => {
   deleteProvider(req.params.id);
   res.json({ ok: true });
 });
@@ -452,7 +452,7 @@ api.get("/documents/:id/pptx", (req, res) => {
 api.get("/image-provider", (_req, res) =>
   res.json({ ...sanitizeImageProvider(getImageProvider()), default_base_url: DEFAULT_IMAGE_BASE_URL })
 );
-api.put("/image-provider", (req, res) => {
+api.put("/image-provider", requireAdmin, (req, res) => {
   const { base_url, api_key, model } = req.body ?? {};
   const next = setImageProvider({
     ...(base_url !== undefined ? { base_url: String(base_url) } : {}),

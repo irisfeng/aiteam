@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction } from "express";
 import { getToken } from "@auth/core/jwt";
 import { ownerFromUserId, withOwner } from "./ownerScope.js";
 import { SESSION_COOKIE, readCookie, verifySession } from "./session.js";
+import { getUserById } from "./db.js";
 
 /**
  * 鉴权模式：
@@ -58,4 +59,16 @@ export async function requireUser(req: AuthedRequest, res: Response, next: NextF
   // 用 owner 上下文包住整个请求处理：路由内的 db 查询自动按 owner 隔离，
   // 由请求同步触发的 Agent 运行（onMessage 等）也继承该上下文。
   withOwner(ownerFromUserId(userId), () => next());
+}
+
+/** 管理员门控（用在 requireUser 之后）：standalone 下校验本地用户 role；coworker 暂不做角色门控。 */
+export function requireAdmin(req: AuthedRequest, res: Response, next: NextFunction): void {
+  if (AUTH_MODE !== "coworker") {
+    const u = req.userId ? getUserById(req.userId) : undefined;
+    if (!u || u.role !== "admin") {
+      res.status(403).json({ error: "需要管理员权限（仅管理员可改组织级配置）" });
+      return;
+    }
+  }
+  next();
 }

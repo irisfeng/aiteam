@@ -243,6 +243,24 @@ const J = async (path, init = {}) => {
 };
 
 try {
+  // AUTH2 角色门控 + 多用户隔离：注册第二个用户(member)，应被挡在 admin 配置外、且看不到管理员的频道
+  {
+    const reg = await fetch(`${BASE}/auth/register`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "member@test.local", password: "member-pw-123", display_name: "成员" }),
+    });
+    let memberCookie = "";
+    const rsc = reg.headers.get("set-cookie");
+    if (rsc) { const m = rsc.match(/aiteam_session=[^;]+/); if (m) memberCookie = m[0]; }
+    const regBody = await reg.json().catch(() => ({}));
+    const mHdr = { headers: { "Content-Type": "application/json", Cookie: memberCookie } };
+    const forbidden = (await fetch(`${BASE}/image-provider`, { method: "PUT", ...mHdr, body: JSON.stringify({ model: "x" }) })).status === 403;
+    const memberBoot = await (await fetch(`${BASE}/bootstrap`, { headers: { Cookie: memberCookie } })).json();
+    const isolated = Array.isArray(memberBoot.channels) && !memberBoot.channels.some((c) => c.id === ch.id);
+    check("AUTH2", "角色门控：member 注册为 member + 被挡在 admin 配置外(403) + 看不到他人频道",
+      regBody.role === "member" && forbidden && isolated);
+  }
+
   // B1 聊天管线（mock 应答）
   {
     const sent = await J(`/channels/${ch.id}/messages`, { method: "POST", body: JSON.stringify({ content: "@产品经理 回归冒烟" }) });
