@@ -1,7 +1,8 @@
 import { Router } from "express";
 import { countUsers, createUser, getUserByEmail, getUserById } from "./db.js";
 import { hashPassword, verifyPassword } from "./password.js";
-import { SESSION_COOKIE, readCookie, signSession, verifySession } from "./session.js";
+import { SESSION_COOKIE, signSession } from "./session.js";
+import { resolveUserId } from "./auth.js";
 
 /** 登录/注册/登出/me —— 这些路由不经 requireUser（登出态也要能访问）。 */
 export const authRoutes = Router();
@@ -44,12 +45,13 @@ authRoutes.post("/logout", (_req, res) => {
 });
 
 authRoutes.get("/me", async (req, res) => {
-  const token = readCookie(req.headers.cookie, SESSION_COOKIE);
-  const userId = token ? await verifySession(token) : null;
-  const user = userId ? getUserById(userId) : undefined;
-  if (!user) {
+  // 两种鉴权模式通吃：standalone 校验 aiteam_session，coworker 解 NextAuth 会话
+  const userId = await resolveUserId(req);
+  if (!userId) {
     // 未登录：把"是否开放注册 / 是否还没有任何用户(首个注册者将成 admin)"告诉前端，决定显示登录还是注册
     return res.status(401).json({ error: "unauthorized", allow_signup: ALLOW_SIGNUP, needs_setup: countUsers() === 0 });
   }
-  res.json(publicUser(user));
+  const user = getUserById(userId);
+  // standalone：本地用户带 role；coworker：无本地记录，回 admin（coworker 不做角色门控，requireAdmin 该模式放行）
+  res.json(user ? publicUser(user) : { id: userId, role: "admin" });
 });

@@ -169,6 +169,32 @@ addColumnIfMissing("messages", "reply_to", "reply_to TEXT");
 addColumnIfMissing("providers", "light_model", "light_model TEXT NOT NULL DEFAULT ''");
 addColumnIfMissing("tasks", "model_tier", "model_tier TEXT NOT NULL DEFAULT 'standard'");
 addColumnIfMissing("providers", "is_strong", "is_strong INTEGER NOT NULL DEFAULT 0");
+// 旧库迁移：早期 agents 是全局 UNIQUE(name)；多用户化后应为 UNIQUE(owner_id,name)。
+// CREATE TABLE IF NOT EXISTS 不会替换已存在表的约束 → 重建表，否则新用户 seed 撞全局唯一名导致 bootstrap 崩。
+(function migrateAgentsUnique() {
+  const idx = db.prepare("PRAGMA index_list(agents)").all() as { name: string; unique: number }[];
+  let hasNameOnly = false;
+  let hasOwnerName = false;
+  for (const i of idx) {
+    if (!i.unique) continue;
+    const cols = (db.prepare(`PRAGMA index_info("${i.name}")`).all() as { name: string }[]).map((c) => c.name);
+    if (cols.length === 1 && cols[0] === "name") hasNameOnly = true;
+    if (cols.length === 2 && cols.includes("owner_id") && cols.includes("name")) hasOwnerName = true;
+  }
+  if (!hasNameOnly || hasOwnerName) return; // 新库或已迁移
+  db.transaction(() => {
+    db.exec(`CREATE TABLE agents_new (
+      id TEXT PRIMARY KEY, owner_id TEXT NOT NULL DEFAULT '', name TEXT NOT NULL,
+      emoji TEXT NOT NULL DEFAULT '🤖', role TEXT NOT NULL DEFAULT '',
+      system_prompt TEXT NOT NULL, model TEXT NOT NULL DEFAULT 'claude-opus-4-8',
+      provider_id TEXT, created_at INTEGER NOT NULL, UNIQUE(owner_id, name)
+    )`);
+    db.exec(`INSERT INTO agents_new (id, owner_id, name, emoji, role, system_prompt, model, provider_id, created_at)
+             SELECT id, owner_id, name, emoji, role, system_prompt, model, provider_id, created_at FROM agents`);
+    db.exec(`DROP TABLE agents`);
+    db.exec(`ALTER TABLE agents_new RENAME TO agents`);
+  })();
+})();
 // 文档版本归并：version=第几版（1 起）；superseded_by=被哪条新版取代（NULL=当前版）。
 // 返工再写同 (task_id,kind) 不再并列堆叠——旧版自动标 superseded，列表默认只显当前版。
 addColumnIfMissing("documents", "version", "version INTEGER NOT NULL DEFAULT 1");

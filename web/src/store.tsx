@@ -237,8 +237,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // WebSocket（断线自动重连）
+  // WebSocket（断线自动重连）。依赖 authed + user.id：未登录不连；
+  // 同一标签页换用户（A 登出→B 登录）时关旧连重连，避免 socket 仍绑在旧 owner 导致实时事件串台。
   useEffect(() => {
+    if (!state.authed) return;
     let ws: WebSocket | null = null;
     let closed = false;
     let retry = 0;
@@ -308,7 +310,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       closed = true;
       ws?.close();
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.authed, state.user.id]);
 
   const openChannel = useCallback((id: string) => {
     dispatch({ type: "view", view: { kind: "channel", id } });
