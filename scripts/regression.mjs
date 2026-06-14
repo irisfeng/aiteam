@@ -6,7 +6,7 @@
  * 用法：npm run build && node scripts/regression.mjs
  */
 import { spawn, execSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -274,6 +274,50 @@ check(
   check("DOC-HTML", "html 交付物：合法放行 + 外链script/内联事件(含 /onload 绕过)/js:URI 全拒（防存储型 XSS）", ok);
 }
 
+// SK5 L3 模板资源：技能用 tpl: 引用内置模板，read_skill 附带模板正文返回
+{
+  const sk = db.listSkills().find((s) => s.name === "演示设计与防溢出法");
+  db.updateSkill(sk.id, { enabled: true });
+  const out = engine.readSkillBody(sk.id);
+  db.updateSkill(sk.id, { enabled: false });
+  check("SK5", "L3 模板：read_skill 把 tpl: 引用的内置模板正文附带返回",
+    out.includes("可复用模板") && out.includes("横向翻页网页 PPT") && out.includes("<!doctype html>"),
+    `len=${out.length}`);
+}
+
+// TPL1 内置模板自洽：每个 SKILL_TEMPLATES 都是合法 html 交付物（agent 照抄即可过 validateDocContent）
+{
+  const { SKILL_TEMPLATES } = await import(join(root, "server/dist/registry.js"));
+  const allValid = SKILL_TEMPLATES.length > 0 && SKILL_TEMPLATES.every((t) => engine.validateDocContent("html", t.content) === null);
+  check("TPL1", "内置模板自洽：全部 SKILL_TEMPLATES 通过 html 交付物校验", allValid, `模板数=${SKILL_TEMPLATES.length}`);
+}
+
+// ENV1 stdio MCP 环境变量：值入库（仅服务端），sanitize 只回 key 名、绝不下发值（博查 BOCHA_API_KEY 用例）
+{
+  const s = db.createMcpServer({ name: "envtest", kind: "stdio", command: "true", args: [], env: { BOCHA_API_KEY: "sk-secret-xyz" } });
+  const raw = db.getMcpServer(s.id);
+  const san = db.sanitizeMcpServer(raw);
+  db.deleteMcpServer(s.id);
+  const ok =
+    Array.isArray(san.env_keys) && san.env_keys.includes("BOCHA_API_KEY") &&        // 暴露 key 名
+    san.env_json === undefined && !JSON.stringify(san).includes("sk-secret-xyz") && // 不泄露值
+    JSON.parse(raw.env_json).BOCHA_API_KEY === "sk-secret-xyz";                      // 值确实入库
+  check("ENV1", "stdio MCP 环境变量：值入库 + sanitize 只回 key 名不下发值", ok);
+}
+
+// DEDUP1 跨插件检索去重签名：不同搜索插件的 query/search_query 同句 → 同签名（会被去重）；非检索类(uri/urls) → null
+{
+  const { searchQuerySignature: sig } = await import(join(root, "server/dist/agents/mcp.js"));
+  const a = sig({ query: "最新 AI 模型" });                 // bocha/tavily
+  const b = sig({ search_query: "最新  AI 模型 " });         // 智谱(空格/大小写归一)
+  const ok =
+    a !== null && a === b &&                                  // 同句跨插件 → 同签名
+    sig({ uri: "file:///x.pdf" }) === null &&                 // markitdown 非检索 → 不去重
+    sig({ urls: ["http://a"] }) === null &&                   // tavily_extract → 不去重
+    sig({}) === null;
+  check("DEDUP1", "跨插件检索去重：同句不同插件同签名、非检索类不参与", ok, `a=${a}`);
+}
+
 // ---------------------------------------------------------------------------
 // Phase 2：拉起服务，走 HTTP API（聊天/引用/文档/技能/MCP/用量/导出/模板/频道）
 // ---------------------------------------------------------------------------
@@ -408,6 +452,26 @@ try {
       const echo = await callMcpTool("mcp__everything__echo", { message: "回归" });
       await J(`/mcp-servers/${s.id}`, { method: "DELETE" });
       check("G1", "MCP 真连接：注册→列工具→真实调用回包", test.ok && test.body.tools > 0 && echo.includes("回归"),
+        `tools=${test.body.tools}`);
+    }
+  }
+
+  // MD1 markitdown 能力端到端（P1·B；未安装 markitdown-mcp 则跳过）。冷启动较慢，故超时给足。
+  {
+    let hasBin = false;
+    try { execSync("command -v markitdown-mcp", { stdio: "ignore" }); hasBin = true; } catch { /* not installed */ }
+    if (!hasBin) {
+      check("MD1", "markitdown 文档解析端到端", "SKIP", "未安装 markitdown-mcp（uv tool install markitdown-mcp）");
+    } else {
+      const { callMcpTool } = await import(join(root, "server/dist/agents/mcp.js"));
+      const s = (await J("/mcp-servers", { method: "POST", body: JSON.stringify({ name: "markitdown", kind: "stdio", command: "markitdown-mcp", args: "", safety: "local" }) })).body;
+      const test = await J(`/mcp-servers/${s.id}/test`, { method: "POST" });
+      const sample = join(testDataDir, "md1-sample.html");
+      writeFileSync(sample, "<html><body><h1>季度报告</h1><p>营收 <b>1200万</b></p></body></html>");
+      const out = await callMcpTool("mcp__markitdown__convert_to_markdown", { uri: "file://" + sample });
+      await J(`/mcp-servers/${s.id}`, { method: "DELETE" });
+      check("MD1", "markitdown 端到端：注册→列工具→convert_to_markdown 转出 Markdown",
+        test.ok && test.body.tools > 0 && out.includes("# 季度报告") && out.includes("**1200万**"),
         `tools=${test.body.tools}`);
     }
   }

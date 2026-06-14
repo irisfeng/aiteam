@@ -211,6 +211,7 @@ addColumnIfMissing("skills", "resources_json", "resources_json TEXT NOT NULL DEF
 addColumnIfMissing("skills", "version", "version INTEGER NOT NULL DEFAULT 1");        // 内置技能版本化（解决"空库才播种"）
 // MCP 安全分级（registry 预设带入）：exec/network 受引擎层审批门约束（见 engine.callMcpTool 前置门）
 addColumnIfMissing("mcp_servers", "safety", "safety TEXT NOT NULL DEFAULT 'local'");  // local | network | exec
+addColumnIfMissing("mcp_servers", "env_json", "env_json TEXT NOT NULL DEFAULT '{}'"); // stdio 子进程环境变量（如 BOCHA_API_KEY），值含密钥→sanitize 只暴露 key 名
 db.exec(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '')`);
 // 用户表（standalone 多用户登录）：全局表，不带 owner_id（owner = user:<id> 由此派生）
 db.exec(`CREATE TABLE IF NOT EXISTS users (
@@ -286,8 +287,10 @@ export interface McpServer {
   auth_token: string;
   command: string;
   args_json: string;
+  /** stdio 子进程环境变量 JSON（如 {"BOCHA_API_KEY":"..."}）；含密钥，sanitize 只回 key 名不回值 */
+  env_json: string;
   enabled: number;
-  /** local=本地无副作用 | network=外发数据 | exec=本地执行（后两者受引擎审批门约束） */
+  /** local=本地无副作用 | network=外发数据(读为主，不拦截) | exec=本地执行/写盘（受引擎审批门约束） */
   safety: "local" | "network" | "exec";
   created_at: number;
 }
@@ -615,6 +618,7 @@ export function createMcpServer(s: {
   command?: string;
   args?: string[];
   safety?: McpServer["safety"];
+  env?: Record<string, string>;
 }): McpServer {
   const server: McpServer = {
     id: nanoid(10),
@@ -624,12 +628,13 @@ export function createMcpServer(s: {
     auth_token: s.auth_token ?? "",
     command: s.command ?? "",
     args_json: JSON.stringify(s.args ?? []),
+    env_json: JSON.stringify(s.env ?? {}),
     safety: s.safety ?? "local",
     enabled: 1,
     created_at: now(),
   };
   db.prepare(
-    "INSERT INTO mcp_servers (id, name, kind, url, auth_token, command, args_json, safety, enabled, created_at) VALUES (@id, @name, @kind, @url, @auth_token, @command, @args_json, @safety, @enabled, @created_at)"
+    "INSERT INTO mcp_servers (id, name, kind, url, auth_token, command, args_json, env_json, safety, enabled, created_at) VALUES (@id, @name, @kind, @url, @auth_token, @command, @args_json, @env_json, @safety, @enabled, @created_at)"
   ).run(server);
   return server;
 }
@@ -640,7 +645,16 @@ export function setMcpServerEnabled(id: string, enabled: boolean): McpServer | u
 export function deleteMcpServer(id: string) {
   db.prepare("DELETE FROM mcp_servers WHERE id = ?").run(id);
 }
-/** 脱敏：auth_token 永不下发前端 */
+/** 从 env_json 取变量名列表（不含值）——供前端展示"已设哪些 env key"而不泄露密钥值。 */
+function envKeyNames(envJson: string): string[] {
+  try {
+    const parsed = JSON.parse(envJson || "{}");
+    return parsed && typeof parsed === "object" ? Object.keys(parsed) : [];
+  } catch {
+    return [];
+  }
+}
+/** 脱敏：auth_token 与 env 值永不下发前端（env 只回 key 名） */
 export function sanitizeMcpServer(s: McpServer) {
   return {
     id: s.id,
@@ -650,6 +664,7 @@ export function sanitizeMcpServer(s: McpServer) {
     command: s.command,
     args_json: s.args_json,
     safety: s.safety, // 风险分级前端可见（registry/手填带入）；非敏感，不脱敏
+    env_keys: envKeyNames(s.env_json), // 只回 env 变量名（如 ["BOCHA_API_KEY"]），值含密钥绝不下发
     enabled: s.enabled,
     has_token: Boolean(s.auth_token),
   };

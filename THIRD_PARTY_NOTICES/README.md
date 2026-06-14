@@ -12,7 +12,8 @@ AITeam 的部分**内置方法包技能**（`server/src/seed.ts` 的 `BUILTIN_SK
 
 | 来源仓库 | 许可 | 蒸馏进的内置技能 |
 |---|---|---|
-| [obra/superpowers](https://github.com/obra/superpowers) | MIT | 可验证规格法 / 假设-证伪调试法 / PR 审查法 / 设计前置头脑风暴法 / 实现计划法 |
+| [obra/superpowers](https://github.com/obra/superpowers) | MIT | 可验证规格法 / 假设-证伪调试法 / PR 审查法 / 设计前置头脑风暴法 / 实现计划法 / 开发分支收尾法 |
+| [github/spec-kit](https://github.com/github/spec-kit) | MIT | 规格驱动开发法 |
 | [mattpocock/skills](https://github.com/mattpocock/skills) | MIT (© Matt Pocock) | 并入 可验证规格法 / 假设-证伪调试法 |
 | [JimLiu/baoyu-skills](https://github.com/JimLiu/baoyu-skills) | MIT | 文档结构化排版法 / 翻译三档法 / SVG 图表生成法 / 信息图·封面·配图生成法 |
 | [zarazhangrui/frontend-slides](https://github.com/zarazhangrui/frontend-slides) | MIT (© 2025 Zara Zhang) | 演示设计与防溢出法 / 反 AI-slop 设计审美守则 |
@@ -20,7 +21,8 @@ AITeam 的部分**内置方法包技能**（`server/src/seed.ts` 的 `BUILTIN_SK
 | [op7418/guizang-ppt-skill](https://github.com/op7418/guizang-ppt-skill) | MIT（以上游仓库 LICENSE 为准） | 演示设计与防溢出法（网页 deck 范式） |
 | [hugohe3/ppt-master](https://github.com/hugohe3/ppt-master) | MIT (© 2025-2026 Hugo He) | 「可编辑 PPTX 能力」capability 指向（不内置代码，走 MCP） |
 | Vercel react-best-practices / [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills) | MIT / CC | 前端工程自查法 |
-| gstack/Hermes bundled skills (document-generate / diagram / review) | Apache-2.0（仅采用 CC0 的 SKILL.md 方法要点，正文不直接内置） | Diataxis 文档生成法 / SVG 图表生成法 / PR 审查法 |
+| gstack/Hermes bundled skills (document-generate / diagram / review / cso / design-consultation) | Apache-2.0（仅采用 CC0 的 SKILL.md 方法要点，正文不直接内置） | Diataxis 文档生成法 / SVG 图表生成法 / PR 审查法 / 安全审计法 / 设计系统咨询法 |
+| [zarazhangrui/frontend-slides](https://github.com/zarazhangrui/frontend-slides)（多预览流程） | MIT | 设计风格探索法 / 横向翻页网页 PPT 模板（SKILL_TEMPLATES，原创实现） |
 
 ## 许可全文
 

@@ -42,8 +42,9 @@ import {
 import { broadcast } from "../bus.js";
 import { currentOwner, withOwner } from "../ownerScope.js";
 import { parseSlides } from "../pptx.js";
-import { callMcpTool, isMcpTool, mcpToolDefs, mcpToolPrefixReady, mcpSafetyGate } from "./mcp.js";
+import { callMcpTool, isMcpTool, mcpToolDefs, mcpToolPrefixReady, mcpSafetyGate, searchQuerySignature } from "./mcp.js";
 import { IMAGE_TOOL, generateImage, imageGenAvailable } from "./images.js";
+import { getSkillTemplate } from "../registry.js";
 
 const MAX_CHAIN_DEPTH = Number(process.env.AGENT_CHAIN_DEPTH ?? 2);
 const MAX_REVISIONS = Number(process.env.TASK_MAX_REVISIONS ?? 1);
@@ -869,7 +870,24 @@ export function buildSkillIndex(focus: string, skills?: Skill[]): string {
 export function readSkillBody(id: string): string {
   const sk = getSkill(id);
   if (!sk || !sk.enabled) return "";
-  return sk.body || sk.content || sk.desc;
+  let out = sk.body || sk.content || sk.desc;
+  // L3：resources_json 里的 `tpl:<id>` 引用 → 把内置模板正文附带返回（按需，不进常驻索引）
+  let refs: string[] = [];
+  try {
+    const parsed = JSON.parse(sk.resources_json || "[]");
+    if (Array.isArray(parsed)) refs = parsed.map(String);
+  } catch { /* 坏 JSON 忽略 */ }
+  for (const r of refs) {
+    if (!r.startsWith("tpl:")) continue;
+    const tpl = getSkillTemplate(r.slice(4));
+    if (tpl) {
+      // 围栏长度取「比模板内任意连续反引号都多 1」，防模板正文含 ``` 时把代码块提前闭合
+      const longest = (tpl.content.match(/`+/g) ?? []).reduce((m, s) => Math.max(m, s.length), 0);
+      const fence = "`".repeat(Math.max(3, longest + 1));
+      out += `\n\n## 可复用模板：${tpl.name}\n${tpl.desc}\n${fence}${tpl.lang}\n${tpl.content}\n${fence}`;
+    }
+  }
+  return out;
 }
 
 function buildDynamicContext(agent: Agent, channel: Channel, focus = ""): string {
@@ -1193,10 +1211,10 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
       return stripLoneSurrogates(`《${doc.title}》\n\n${doc.content.slice(0, 20000)}`);
     }
     case "read_skill": {
-      // 渐进式披露 L2：按需拉技能正文。只读、零计费（走 execTool 同步分支，不计 MCP_CALLS_PER_RUN）。
+      // 渐进式披露 L2/L3：按需拉技能正文 + 附带的可复用模板。只读、零计费（同步分支，不计 MCP_CALLS_PER_RUN）。
       const sk = getSkill(String(input.skill_id));
       if (!sk || !sk.enabled) return `未找到该技能或未启用（id: ${input.skill_id}）。`;
-      return stripLoneSurrogates(`【技能：${sk.name}】\n${sk.body || sk.content || sk.desc}`);
+      return stripLoneSurrogates(`【技能：${sk.name}】\n${readSkillBody(sk.id)}`);
     }
     case "request_approval": {
       const approval = createApproval({
@@ -1435,6 +1453,10 @@ async function llmLoop(
   let transientRetries = 0; // 瞬时网络错误（terminated/重置/5xx）重试计数
   let mcpCalls = 0; // 本次运行已消耗的外部插件调用数
   let imageCalls = 0; // 本次运行已生成的图片数（按张计费，设上限）
+  // 跨插件检索去重（本次运行内）：同一查询若已被某搜索插件成功检索过，再用别的搜索插件查同一查询
+  // 直接回上次结果、不再花钱。仅记成功结果——失败不入，保证可换插件兜底（如智谱套餐失效→博查重试同查询）。
+  const searchMemo = new Map<string, string>();
+  const SEARCH_DEDUP = process.env.AITEAM_SEARCH_DEDUP !== "0";
 
   for (let iteration = 0; iteration < maxIterations; iteration++) {
     // 停止开关：在迭代边界停下（任务停止 或 频道停止）
@@ -1525,15 +1547,28 @@ async function llmLoop(
             // 高危插件（exec/network）：引擎层硬拦截（非提示词），强制改走 request_approval 审批门。
             result = `⛔ 插件「${gated.name}」属高危（${gated.safety === "exec" ? "本地执行" : "外发数据"}），不能直接调用。请改用 request_approval 提交本次动作的完整内容与目的，经用户批准后再执行。`;
             audit(channel.id, `⛔ ${agent.name} 试图直接调用高危插件「${gated.name}」(${gated.safety})，已拦截——须走审批门`);
-          } else if (mcpCalls >= MCP_CALLS_PER_RUN) {
-            result = `⚠️ 本次运行的外部插件调用已达上限（${MCP_CALLS_PER_RUN} 次）。外部检索按次计费，请基于已获得的信息完成工作，不要再尝试调用插件。`;
           } else {
-            mcpCalls++;
-            result = await callMcpTool(tu.name, tu.input);
-            // 持久化审计：插件调用此前只发瞬态 status，事后无法从时间线/账本判断用没用某插件。
-            // 仿配图那条落一行可核查的 system 消息——只记 server:tool 名，绝不写参数/密钥/返回内容。
-            const mcp = tu.name.match(/^mcp__(.+?)__(.+)$/);
-            audit(channel.id, `🔌 ${agent.name} 调用了插件 ${mcp ? `${mcp[1]}:${mcp[2]}` : tu.name}`);
+            const sig = SEARCH_DEDUP ? searchQuerySignature(tu.input) : null;
+            if (sig && searchMemo.has(sig)) {
+              // 同一查询已检索过（可能是别的搜索插件）→ 回上次结果，省去重复计费的一次往返。
+              const mcp = tu.name.match(/^mcp__(.+?)__(.+)$/);
+              audit(channel.id, `↩️ ${agent.name} 重复检索「${sig.slice(0, 24)}…」已去重（省 1 次计费，复用上次结果）`);
+              result =
+                `↩️ 本次运行已检索过相同查询「${sig.slice(0, 60)}」，为避免重复计费，直接返回上次结果（如需更多信息请换不同的查询角度，不要对同一问题换搜索插件重复查）：\n\n` +
+                searchMemo.get(sig);
+            } else if (mcpCalls >= MCP_CALLS_PER_RUN) {
+              result = `⚠️ 本次运行的外部插件调用已达上限（${MCP_CALLS_PER_RUN} 次）。外部检索按次计费，请基于已获得的信息完成工作，不要再尝试调用插件。`;
+            } else {
+              mcpCalls++;
+              result = await callMcpTool(tu.name, tu.input);
+              // 持久化审计：插件调用此前只发瞬态 status，事后无法从时间线/账本判断用没用某插件。
+              // 仿配图那条落一行可核查的 system 消息——只记 server:tool 名，绝不写参数/密钥/返回内容。
+              const mcp = tu.name.match(/^mcp__(.+?)__(.+)$/);
+              audit(channel.id, `🔌 ${agent.name} 调用了插件 ${mcp ? `${mcp[1]}:${mcp[2]}` : tu.name}`);
+              // 仅缓存成功结果（失败不入 memo → 允许换插件用同查询兜底，不破坏降级链）
+              const failed = result.startsWith("MCP 工具执行失败") || result.startsWith("工具返回错误") || result.startsWith("错误：");
+              if (sig && !failed) searchMemo.set(sig, result);
+            }
           }
         } else if (tu.name === "generate_image") {
           if (imageCalls >= IMAGES_PER_RUN) {

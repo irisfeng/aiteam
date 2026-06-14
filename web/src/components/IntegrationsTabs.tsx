@@ -20,8 +20,24 @@ interface McpServerInfo {
   command: string;
   args_json: string;
   safety: "local" | "network" | "exec";
+  env_keys?: string[];
   enabled: number;
   has_token: boolean;
+}
+
+/** 把 "KEY=VALUE" 多行文本解析为对象（值里允许含 =，按首个 = 切分） */
+function parseEnvLines(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of text.split("\n")) {
+    const t = line.trim();
+    if (!t || t.startsWith("#")) continue;
+    const i = t.indexOf("=");
+    if (i <= 0) continue;
+    const k = t.slice(0, i).trim();
+    const v = t.slice(i + 1).trim();
+    if (k && v) out[k] = v;
+  }
+  return out;
 }
 
 /** MCP 插件管理（Osaurus 插件面 / Helio 集成面的 v0） */
@@ -33,6 +49,7 @@ export function McpTab() {
   const [token, setToken] = useState("");
   const [command, setCommand] = useState("");
   const [args, setArgs] = useState("");
+  const [envText, setEnvText] = useState(""); // KEY=VALUE 多行（stdio 子进程环境变量，如 BOCHA_API_KEY）
   const [safety, setSafety] = useState<"local" | "network" | "exec">("local");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -62,8 +79,11 @@ export function McpTab() {
     setArgs((p.args ?? []).join(" "));
     setSafety(p.safety);
     setToken("");
+    // 预填该预设需要的环境变量名（值留空待 admin 填，如 BOCHA_API_KEY=你的key）
+    setEnvText((p.env_keys ?? []).map((k) => `${k}=`).join("\n"));
     setShowCatalog(false);
-    setError(p.kind === "stdio" ? `已预填「${p.name}」。stdio 预设需先在服务器执行：${p.install}` : `已预填「${p.name}」，补好 Token 后添加。`);
+    const envHint = p.env_keys?.length ? `；并在"环境变量"里填好 ${p.env_keys.join("/")}` : "";
+    setError(p.kind === "stdio" ? `已预填「${p.name}」。stdio 预设需先在服务器执行：${p.install}${envHint}` : `已预填「${p.name}」，补好 Token 后添加。`);
   }
 
   async function add() {
@@ -82,10 +102,11 @@ export function McpTab() {
           command: command.trim(),
           args: args.trim(),
           safety,
+          env: parseEnvLines(envText),
         }),
       });
       if (!res.ok) throw new Error((await res.json())?.error ?? "添加失败");
-      setName(""); setUrl(""); setToken(""); setCommand(""); setArgs(""); setSafety("local");
+      setName(""); setUrl(""); setToken(""); setCommand(""); setArgs(""); setEnvText(""); setSafety("local");
       await load();
     } catch (e: any) {
       setError(e?.message ?? "添加失败");
@@ -175,7 +196,15 @@ export function McpTab() {
                 <span className="font-medium">{s.name}</span>
                 <span className="rounded bg-sel px-1 font-mono text-[10px] text-ink-3">{s.kind}</span>
                 {s.safety && s.safety !== "local" && (
-                  <span className="rounded bg-accent-soft px-1 text-[10px] text-ink-2" title="高危：调用前强制走审批门">{SAFETY_LABEL[s.safety]}</span>
+                  <span
+                    className="rounded bg-accent-soft px-1 text-[10px] text-ink-2"
+                    title={s.safety === "exec" ? "执行类高危：AI 调用前强制走审批门" : "联网：会外发查询（读为主，不拦截）"}
+                  >
+                    {SAFETY_LABEL[s.safety]}
+                  </span>
+                )}
+                {s.env_keys && s.env_keys.length > 0 && (
+                  <span className="rounded bg-sel px-1 text-[10px] text-ink-3" title={`已设环境变量：${s.env_keys.join(", ")}`}>🔑{s.env_keys.length}</span>
                 )}
                 <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-3">
                   {s.kind === "stdio" ? `${s.command} ${JSON.parse(s.args_json || "[]").join(" ")}` : s.url}
@@ -236,6 +265,8 @@ export function McpTab() {
           <input value={command} onChange={(e) => setCommand(e.target.value)} placeholder="npx" className={inputCls} />
           <label className={labelCls}>参数（空格分隔）</label>
           <input value={args} onChange={(e) => setArgs(e.target.value)} placeholder="-y @modelcontextprotocol/server-filesystem /data" className={inputCls} />
+          <label className={labelCls}>环境变量（每行 KEY=VALUE，密钥仅存服务端、不下发前端）</label>
+          <textarea value={envText} onChange={(e) => setEnvText(e.target.value)} rows={2} className={`${inputCls} resize-none font-mono text-[12px]`} placeholder="BOCHA_API_KEY=sk-..." />
         </>
       )}
       {error && <div className="mt-2 text-[12px] text-red-500">{error}</div>}
