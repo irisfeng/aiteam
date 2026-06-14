@@ -88,11 +88,40 @@ export interface Doc {
   agent_id: string | null;
   title: string;
   content: string;
-  kind: "report" | "slides" | "sheet";
+  kind: "report" | "slides" | "sheet" | "html";
   version: number;
   superseded_by: string | null;
   created_at: number;
   updated_at: number;
+}
+export interface Skill {
+  id: string;
+  name: string;
+  desc: string;
+  content: string;
+  kind: "method" | "capability";
+  trigger: string;
+  when_to_use: string;
+  body: string;
+  resources_json: string;
+  version: number;
+  enabled: number;
+  builtin: number;
+}
+export interface McpPreset {
+  key: string;
+  name: string;
+  kind: "http" | "stdio";
+  command?: string;
+  args?: string[];
+  url?: string;
+  desc: string;
+  scenario: "office-doc" | "data-viz" | "code-mvp" | "research" | "general";
+  runtime_china: "yes" | "degrade" | "no";
+  install_china: "yes" | "degrade" | "no";
+  safety: "local" | "network" | "exec";
+  install: string;
+  phase: "P1-install" | "P1" | "P2";
 }
 export interface AgentStatus {
   agent_id: string;

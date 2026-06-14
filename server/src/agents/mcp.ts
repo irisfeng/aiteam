@@ -114,6 +114,35 @@ export function isMcpTool(name: string): boolean {
   return name.startsWith("mcp__");
 }
 
+/**
+ * capability 技能依赖判断：该 MCP 工具前缀是否就绪。
+ * 启用的 server 即视为可达（懒连接：首次调用才连）；若已有缓存连接，则进一步要求工具确实存在
+ * （避免 MAX_MCP_TOOLS 截断或工具名不匹配导致"标就绪却调空"）。prefix 形如 mcp__<server>__* 或具体工具名。
+ */
+export function mcpToolPrefixReady(prefix: string): boolean {
+  const m = prefix.match(/^mcp__(.+?)__/);
+  if (!m) return false;
+  const key = m[1];
+  const server = listMcpServers().find((s) => Boolean(s.enabled) && sanitizeName(s.name) === key);
+  if (!server) return false;
+  const conn = connections.get(server.id);
+  if (!conn) return true; // 懒连接：启用即视为就绪
+  const bare = prefix.replace(/\*$/, "").replace(/^mcp__.+?__/, "");
+  return conn.tools.some((t) => (bare === "" ? true : t.name.startsWith(bare)));
+}
+
+/**
+ * 引擎审批门：若该 MCP 工具所属 server 的 safety 为 network/exec，返回该 server（高危，需先走 request_approval）。
+ * local（默认）返回 null（不拦截）。registry 安装高危预设时带入 safety。
+ */
+export function mcpSafetyGate(name: string): McpServer | null {
+  const mt = name.match(/^mcp__(.+?)__(.+)$/);
+  if (!mt) return null;
+  const server = listMcpServers().find((s) => sanitizeName(s.name) === mt[1] && Boolean(s.enabled));
+  if (!server) return null;
+  return server.safety === "exec" || server.safety === "network" ? server : null;
+}
+
 /** 执行 MCP 工具调用，返回文本结果（供 tool_result） */
 export async function callMcpTool(name: string, input: unknown): Promise<string> {
   const m = name.match(/^mcp__(.+?)__(.+)$/);

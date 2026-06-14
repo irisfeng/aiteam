@@ -43,7 +43,7 @@ async function waitFor(fn, timeout = 20000, interval = 400) {
 // Phase 1：进程内直驱引擎（DAG / 计划把关 / 停止 / 预算 / 断点恢复）
 // ---------------------------------------------------------------------------
 const db = await import(join(root, "server/dist/db.js"));
-const { seedGlobalSkills, seedForOwner } = await import(join(root, "server/dist/seed.js"));
+const { seedGlobalSkills, seedForOwner, BUILTIN_SKILLS } = await import(join(root, "server/dist/seed.js"));
 const { enterOwner, ownerFromUserId } = await import(join(root, "server/dist/ownerScope.js"));
 const { hashPassword } = await import(join(root, "server/dist/password.js"));
 const engine = await import(join(root, "server/dist/agents/engine.js"));
@@ -60,7 +60,12 @@ const agents = db.listAgents();
 const pm = agents[0];
 const eng = agents[1];
 const ch = db.listChannels()[0];
-check("P0", "种子：4 内置同事 + 4 内置技能", agents.length === 4 && db.listSkills().length === 4);
+const skillNames = new Set(db.listSkills().map((s) => s.name));
+check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（含扩库新技能）`,
+  agents.length === 4 &&
+  db.listSkills().length === BUILTIN_SKILLS.length &&
+  skillNames.has("信息图/封面/配图生成法") && skillNames.has("可验证规格法") && skillNames.has("文档解析能力"),
+  `技能数=${db.listSkills().length}/${BUILTIN_SKILLS.length}`);
 
 // C2 依赖调度 + 项目汇总
 {
@@ -193,16 +198,79 @@ check(
     slidesOk && slidesBad && sheetOk && sheetBad && reportOk && emptyBad);
 }
 
-// SK1 技能相关性注入：专项技能只在任务/消息匹配关键词时注入，通用/自定义技能始终注入
+// SK1 技能相关性：trigger 优先命中/不命中 + 无 trigger 回退 SKILL_KEYWORDS[name] + 通用始终
 {
   const rel = engine.skillRelevant;
   const ok =
-    rel({ name: "深度调研法" }, "请调研一下最新的开源 ASR 模型") === true &&
-    rel({ name: "金字塔写作法" }, "请调研一下最新的开源 ASR 模型") === false && // 调研任务不该被塞写作法
+    rel({ trigger: "调研,检索" }, "请调研最新模型") === true &&          // 带 trigger：命中
+    rel({ trigger: "调研,检索" }, "撰写一份报告") === false &&          // 带 trigger：不命中
+    rel({ name: "深度调研法" }, "请调研最新模型") === true &&            // 无 trigger 回退 SKILL_KEYWORDS[name]
+    rel({ name: "金字塔写作法" }, "请调研最新模型") === false &&         // 同上（写作法不该被调研触发）
     rel({ name: "金字塔写作法" }, "撰写一份选型报告") === true &&
-    rel({ name: "交付自查清单" }, "随便什么任务") === true && // 通用技能始终注入
-    rel({ name: "用户自定义技能X" }, "随便什么任务") === true; // 无映射=自定义=始终注入
-  check("SK1", "技能相关性注入：专项按关键词、通用/自定义始终注入", ok);
+    rel({ name: "用户自定义技能X" }, "随便什么任务") === true;           // 无 trigger 无映射=通用=始终相关
+  check("SK1", "技能相关性：trigger 优先 + 无 trigger 回退 name 关键词 + 通用始终", ok);
+}
+
+// SK2 渐进式披露：read_skill 拉正文（启用返回 body、停用返回空）
+{
+  const sk = db.listSkills().find((s) => s.name === "金字塔写作法");
+  db.updateSkill(sk.id, { enabled: true });
+  const enabledBody = engine.readSkillBody(sk.id);
+  db.updateSkill(sk.id, { enabled: false });
+  const disabledBody = engine.readSkillBody(sk.id);
+  check("SK2", "渐进披露：read_skill 启用拉到非空 body、停用返回空",
+    enabledBody.length > 50 && disabledBody === "", `len=${enabledBody.length}`);
+}
+
+// SK3 索引只放 L1（名/何时用/触发词 + read_skill 提示），不放正文；continue 不 break（最后一条仍在）
+{
+  const all = db.listSkills();
+  for (const s of all) db.updateSkill(s.id, { enabled: true }); // 全开
+  const idx = engine.buildSkillIndex("写作");
+  const allIdsPresent = all.every((s) => idx.includes(`id: ${s.id}`));
+  const py = all.find((s) => s.name === "金字塔写作法");
+  const bodyLeaked = idx.includes(py.body.slice(0, 30)); // 正文不应出现在索引里
+  const hasReadHint = idx.includes("read_skill");
+  for (const s of all) db.updateSkill(s.id, { enabled: false }); // 复位
+  check("SK3", "渐进披露索引：全部技能 id 在索引、含 read_skill 提示、正文未泄漏",
+    allIdsPresent && hasReadHint && !bodyLeaked, `idsPresent=${allIdsPresent} bodyLeaked=${bodyLeaked}`);
+}
+
+// SK4 旧库兼容：body 为空的技能（模拟旧行）read_skill 回退 content
+{
+  const old = db.createSkill({ name: "回归旧技能", body: "", content: "老正文内容X", enabled: true });
+  const got = engine.readSkillBody(old.id);
+  db.deleteSkill(old.id);
+  check("SK4", "旧库兼容：body 空时 read_skill 回退 content", got === "老正文内容X", `got=${got}`);
+}
+
+// CAP1 能力型就绪判断：依赖 MCP 未装→未就绪；装上启用→就绪；空依赖→就绪；缺图像供应商的 generate_image→未就绪
+{
+  const cap = engine.capabilityReady;
+  const ref = JSON.stringify(["mcp__markitdown__*"]);
+  const before = cap({ resources_json: ref });
+  const srv = db.createMcpServer({ name: "markitdown", kind: "stdio", command: "true", args: [] });
+  const after = cap({ resources_json: ref });
+  db.deleteMcpServer(srv.id);
+  const ok =
+    before === false &&                                              // server 未装 → 未就绪
+    after === true &&                                                // 启用同名 server → 就绪
+    cap({ resources_json: "[]" }) === true &&                        // 无依赖 → 就绪
+    cap({ resources_json: JSON.stringify(["generate_image"]) }) === false; // 测试库无图像供应商
+  check("CAP1", "能力型就绪：MCP 未装未就绪/装上就绪/空依赖就绪/缺图像供应商未就绪", ok,
+    `before=${before} after=${after}`);
+}
+
+// DOC-HTML html 交付物：格式 + 防 XSS 校验（外链 script / 内联事件 / javascript: URI 全拒）
+{
+  const v = engine.validateDocContent;
+  const ok =
+    v("html", "<section><h1>原型</h1><p>hi</p></section>") === null &&     // 合法
+    typeof v("html", "纯文本无标签") === "string" &&                       // 非 HTML 拒
+    typeof v("html", '<div></div><script src="//evil/x.js"></script>') === "string" && // 外链 script 拒
+    typeof v("html", '<img src=x onerror="alert(1)">') === "string" &&     // 内联事件 拒
+    typeof v("html", '<a href="javascript:alert(1)">x</a>') === "string";  // javascript: URI 拒
+  check("DOC-HTML", "html 交付物：合法放行 + 外链script/内联事件/js:URI 全拒（防存储型 XSS）", ok);
 }
 
 // ---------------------------------------------------------------------------
@@ -287,15 +355,31 @@ try {
       `实际=${[...kinds].join(",")}`);
   }
 
-  // G3 技能 CRUD（注入逻辑在 llmLoop，需真实 key 观察行为）
+  // G3 技能 CRUD：内置基数引用 BUILTIN_SKILLS.length（扩库不必再改）+ 启停 + 自定义增删 + v2 字段透传
   {
     const skills = (await J("/skills")).body;
     const toggled = (await J(`/skills/${skills[0].id}`, { method: "PATCH", body: JSON.stringify({ enabled: true }) })).body;
-    const custom = (await J("/skills", { method: "POST", body: JSON.stringify({ name: "回归技能", content: "规则X" }) })).body;
+    const custom = (await J("/skills", { method: "POST", body: JSON.stringify({ name: "回归技能", body: "规则X", trigger: "回归,测试", when_to_use: "回归时", kind: "method" }) })).body;
+    const fieldsOk = custom.body === "规则X" && custom.trigger === "回归,测试" && custom.when_to_use === "回归时" && custom.kind === "method";
     await J(`/skills/${custom.id}`, { method: "DELETE" });
     const after = (await J("/skills")).body;
-    check("G3", "技能：内置4 + 启停 + 自定义增删（注入待真实 key 观察）",
-      skills.length === 4 && toggled.enabled === 1 && after.length === 4);
+    check("G3", `技能：内置${BUILTIN_SKILLS.length} + 启停 + 自定义增删 + v2字段(trigger/when_to_use/kind)透传`,
+      skills.length === BUILTIN_SKILLS.length && toggled.enabled === 1 && fieldsOk && after.length === skills.length,
+      `before=${skills.length} after=${after.length} fields=${fieldsOk}`);
+  }
+
+  // REG1 预设目录：可读非空 + registry 静态无 token + mcp_servers 回吐脱敏（auth_token 不下发前端）
+  {
+    const reg = (await J("/registry")).body;
+    const hasMcp = Array.isArray(reg.mcp) && reg.mcp.length > 0;
+    const hasSkills = Array.isArray(reg.skills) && reg.skills.length > 0;
+    const noTokenInRegistry = !JSON.stringify(reg).includes("auth_token");
+    const s = (await J("/mcp-servers", { method: "POST", body: JSON.stringify({ name: "regtok", kind: "http", url: "https://x.example/mcp", auth_token: "SECRET123", safety: "network" }) })).body;
+    const list = (await J("/mcp-servers")).body;
+    const row = list.find((x) => x.id === s.id);
+    const sanitized = Boolean(row) && row.has_token === true && row.auth_token === undefined && !JSON.stringify(list).includes("SECRET123");
+    await J(`/mcp-servers/${s.id}`, { method: "DELETE" });
+    check("REG1", "预设目录可读非空 + registry 无 token + mcp 列表 auth_token 脱敏", hasMcp && hasSkills && noTokenInRegistry && sanitized);
   }
 
   // G2 MCP 容错（坏 URL 测试应报错不卡死）

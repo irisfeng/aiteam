@@ -4,6 +4,7 @@ import {
   Channel,
   Message,
   Routine,
+  Skill,
   Task,
   agentDailyStats,
   appendMemory,
@@ -23,6 +24,7 @@ import {
   getMemory,
   getMessage,
   getProject,
+  getSkill,
   getTask,
   insertMessage,
   listAgents,
@@ -40,7 +42,7 @@ import {
 import { broadcast } from "../bus.js";
 import { currentOwner, withOwner } from "../ownerScope.js";
 import { parseSlides } from "../pptx.js";
-import { callMcpTool, isMcpTool, mcpToolDefs } from "./mcp.js";
+import { callMcpTool, isMcpTool, mcpToolDefs, mcpToolPrefixReady, mcpSafetyGate } from "./mcp.js";
 import { IMAGE_TOOL, generateImage, imageGenAvailable } from "./images.js";
 
 const MAX_CHAIN_DEPTH = Number(process.env.AGENT_CHAIN_DEPTH ?? 2);
@@ -84,9 +86,22 @@ function splitCsvLine(line: string): string[] {
  * write_document 落库前的 kind 契约校验：坏格式不入库，返回可执行的修订提示让模型自纠
  * （从源头挡住 slides 无分页 / sheet 列数不齐这类要到渲染期才暴露的问题）。返回 null = 通过。
  */
-export function validateDocContent(kind: "report" | "slides" | "sheet", content: string): string | null {
+export function validateDocContent(kind: "report" | "slides" | "sheet" | "html", content: string): string | null {
   const c = content.trim();
   if (!c) return "正文为空。";
+  if (kind === "html") {
+    // 格式：至少是可渲染的 HTML 片段/文档
+    if (!/<(!doctype|html|div|section|svg|style|body|main|article|h[1-6]|p|ul|ol|table|canvas|header|footer|nav)\b/i.test(c))
+      return "html 交付物需是可直接渲染的 HTML 片段或文档（至少含一个 HTML 标签）。";
+    // 安全：内容是模型生成的不可信 HTML——堵住存储型 XSS 的三个面（预览 iframe 已 sandbox，这里再做内容侧防御）
+    if (/<script\b[^>]*\bsrc\s*=/i.test(c))
+      return "html 交付物禁止外链 <script src=...>，请把脚本内联，或改用纯 CSS / SVG。";
+    if (/\son\w+\s*=/i.test(c))
+      return "html 交付物禁止内联事件处理器（onload/onerror/onclick 等），请改用 <script> 块或纯 CSS。";
+    if (/javascript:/i.test(c))
+      return "html 交付物禁止 javascript: URI。";
+    return null;
+  }
   if (kind === "slides") {
     if (!/\n\s*---\s*\n/.test(content))
       return "slides 需要用单独一行 --- 分页（首页标题页，之后每页一个要点群），当前没有检测到任何分页符。";
@@ -547,7 +562,7 @@ export function buildWorkBrief(task: Task, channel: Channel): string {
     `工作要求：`,
     `1. 开工前先查阅你的长期记忆（见系统上下文），其中"核实过的事实/通用规则"优先遵循；`,
     `2. 如需要事实、数据或最新外部信息，先用 web_search / web_fetch 或可用插件调研，不要凭空编造；外部检索按次计费——先想清楚要查什么、合并关键词，单任务尽量不超过 3 次；能从已有文档（read_document）获得的不要重复检索。研究/写作类任务按"多视角列问题 → 搭大纲 → 成文"推进，重要事实注明来源；`,
-    `3. 用 write_document 产出完整、可直接使用的交付物，按任务性质选格式 kind：报告/方案用 report，需要演示就交 slides（Marp 分页），数据/报表交 sheet（CSV）——必要时可以多份组合（如 report + slides）；正文要详尽，逐条覆盖验收标准；${imageGenAvailable() ? "需要视觉表达（封面/概念示意/PPT 配图）时可用 generate_image 生成 1-2 张点睛配图，把返回的 Markdown 图片行原样放进交付物正文（数据图表交 sheet 即可，不要用文生图画图表）；" : ""}`,
+    `3. 用 write_document 产出完整、可直接使用的交付物，按任务性质选格式 kind：报告/方案用 report，需要演示就交 slides（Marp 分页），数据/报表交 sheet（CSV），网页/落地页/前端原型/HTML 演示(横向翻页 deck)/可交互可视化交 html（单文件、样式与脚本内联、禁外链 script 与内联事件处理器，可在预览区实时查看）——必要时可以多份组合（如 report + slides）；正文要详尽，逐条覆盖验收标准；${imageGenAvailable() ? "需要视觉表达（封面/概念示意/PPT 配图/图文混排）时可用 generate_image 生成 1-2 张点睛配图，把返回的 Markdown 图片行原样放进 report 或 html 正文（数据图表交 sheet 即可，不要用文生图画图表）；" : ""}`,
     `4. 交付前用 save_memory 记录至多 1 条本次任务沉淀的「核实过的事实」或「通用规则」（不要记流水账）；`,
     `5. 交付物正文一律结论先行（开头给核心结论 / TL;DR）、要点 MECE，关键事实与数据注明来源和检索日期；并在回复正文附「交付自查表」：逐条列出验收标准 → 满足 / 不满足 → 证据位置（章节或文档内定位），最后一句说明需要谁跟进什么；`,
     `6. 任务状态由系统管理，不要调用 update_task 改本任务状态；关单（done）只能由人类完成；`,
@@ -796,12 +811,65 @@ const SKILL_KEYWORDS: Record<string, string[]> = {
   金字塔写作法: ["写", "撰写", "报告", "文案", "方案", "prd", "文章", "稿", "总结", "演示", "slides", "ppt", "汇报", "白皮书", "长文"],
   结构化头脑风暴: ["创意", "头脑风暴", "脑暴", "构思", "设计", "选型", "策划", "点子", "发散", "方案"],
 };
-/** 该技能是否与当前工作焦点相关（决定是否注入提示词，避免给调研任务塞写作法等无关方法） */
-export function skillRelevant(skill: { name: string }, focus: string): boolean {
-  const kws = SKILL_KEYWORDS[skill.name];
-  if (!kws) return true; // 通用/自定义技能始终注入
+/** 该技能是否与当前工作焦点相关（用于索引排序：命中靠前）。
+ *  trigger 优先（扩库后内置/自定义统一走这条）；trigger 为空回退硬编码 SKILL_KEYWORDS[name]（迁移期兜底）。 */
+export function skillRelevant(
+  skill: { name?: string; trigger?: string; when_to_use?: string },
+  focus: string
+): boolean {
   const f = focus.toLowerCase();
-  return kws.some((k) => f.includes(k.toLowerCase()));
+  const kws = (skill.trigger || "").split(/[,，、]/).map((s) => s.trim()).filter(Boolean);
+  if (kws.length > 0) return kws.some((k) => f.includes(k.toLowerCase()));
+  const fallback = skill.name ? SKILL_KEYWORDS[skill.name] : undefined;
+  if (fallback) return fallback.some((k) => f.includes(k.toLowerCase()));
+  return true; // 既无 trigger 又无映射 → 通用技能，视为相关（参与注入，排序中性）
+}
+
+/** capability 技能依赖是否就绪：resources_json 引用的 MCP 工具前缀可达、或原生工具可用。 */
+export function capabilityReady(sk: { resources_json?: string }): boolean {
+  let res: string[] = [];
+  try {
+    const parsed = JSON.parse(sk.resources_json || "[]");
+    if (Array.isArray(parsed)) res = parsed.map(String);
+  } catch { /* 容错：坏 JSON 视为无依赖 */ }
+  if (res.length === 0) return true;
+  return res.every((r) => {
+    if (r.startsWith("mcp__")) return mcpToolPrefixReady(r);
+    if (r === "generate_image") return imageGenAvailable();
+    return true; // 其余内置原生工具默认可用
+  });
+}
+
+/**
+ * 技能索引（L1）构建：渐进式披露——只把 名/何时用/触发词 + read_skill 提示常驻进上下文，
+ * 正文 body 由同事按需用 read_skill 拉取，解除 v1「技能数 × 长度 ≤ 预算」死锁。
+ * 相关性只用于排序（命中靠前），不再丢弃技能；超长单项 continue 跳过而非 break 终止。导出供回归测试。
+ */
+export function buildSkillIndex(focus: string, skills?: Skill[]): string {
+  const enabled = skills ?? listSkills().filter((sk) => sk.enabled);
+  const ranked = [...enabled].sort((a, b) => Number(skillRelevant(b, focus)) - Number(skillRelevant(a, focus)));
+  let idxBudget = Number(process.env.AITEAM_SKILL_INDEX_BUDGET ?? 6000);
+  let block = "";
+  for (const sk of ranked) {
+    const ready = sk.kind === "capability" ? capabilityReady(sk) : true;
+    const item =
+      `### 技能：${sk.name}（id: ${sk.id}）\n` +
+      `何时用：${sk.when_to_use || sk.desc}\n` +
+      (sk.trigger ? `触发词：${sk.trigger}\n` : "") +
+      (sk.kind === "capability" ? `类型：能力型${ready ? "" : "（⚠️依赖未就绪，暂不可用）"}\n` : "") +
+      `→ 需要其具体方法/步骤时调用 read_skill("${sk.id}") 取正文`;
+    if (item.length > idxBudget) continue;
+    idxBudget -= item.length;
+    block += (block ? "\n\n" : "") + item;
+  }
+  return block;
+}
+
+/** read_skill 的正文解析（L2）：启用技能返回 body（旧库回退 content/desc），否则空串。导出供回归测试。 */
+export function readSkillBody(id: string): string {
+  const sk = getSkill(id);
+  if (!sk || !sk.enabled) return "";
+  return sk.body || sk.content || sk.desc;
 }
 
 function buildDynamicContext(agent: Agent, channel: Channel, focus = ""): string {
@@ -822,19 +890,7 @@ function buildDynamicContext(agent: Agent, channel: Channel, focus = ""): string
     .map((d) => `- 《${d.title}》（id: ${d.id}，作者: ${d.agent_id ? getAgent(d.agent_id)?.name ?? "?" : "用户"}）`)
     .join("\n");
   const memory = getMemory(agent.id);
-  // 技能（Osaurus）：横切的工作方法。按相关性注入——只给与当前任务/消息相关的专项方法，
-  // 通用与自定义技能始终在；无明显信号（focus 为空或全不匹配）时回退为全注入，不回归。总量封顶防膨胀。
-  const enabled = listSkills().filter((sk) => sk.enabled);
-  const relevant = enabled.filter((sk) => skillRelevant(sk, focus));
-  const pool = focus && relevant.length > 0 ? relevant : enabled;
-  let skillsBlock = "";
-  let skillBudget = 4000;
-  for (const sk of pool) {
-    const piece = `### 技能：${sk.name}\n${sk.content}`;
-    if (piece.length > skillBudget) break;
-    skillBudget -= piece.length;
-    skillsBlock += (skillsBlock ? "\n\n" : "") + piece;
-  }
+  const skillsBlock = buildSkillIndex(focus);
   const nowStr = new Date().toLocaleString("zh-CN", {
     timeZone: "Asia/Shanghai", hour12: false,
     year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
@@ -847,7 +903,7 @@ function buildDynamicContext(agent: Agent, channel: Channel, focus = ""): string
     tasks ? `频道任务看板：\n${tasks}` : `任务看板目前为空。`,
     docs ? `工作区文档（可用 read_document 阅读全文）：\n${docs}` : "",
     memory ? `## 你的长期记忆（先查阅，"核实过的事实/通用规则"优先遵循）\n${memory}` : "",
-    skillsBlock ? `## 已启用的工作方法（执行任务时遵循）\n${skillsBlock}` : "",
+    skillsBlock ? `## 已启用的技能（索引——需要某条的具体方法/步骤时用 read_skill(id) 取正文再遵循）\n${skillsBlock}` : "",
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -937,15 +993,25 @@ const TOOLS: Anthropic.ToolUnion[] = [
   {
     name: "write_document",
     description:
-      "把一份正式交付物写入工作区文档库。文档应当完整、可直接使用，而不是片段。按交付物性质选择 kind：report=报告/PRD/方案（Markdown）；slides=演示文稿（Marp 约定：每页之间用单独一行 --- 分隔，首页为标题页，每页一个要点群，可直接生成 PPT）；sheet=表格/报表（标准 CSV：首行表头，逗号分隔，含逗号的字段用双引号包裹，可直接导入 Excel）。注意：返工时对同一任务、同一 kind 再次调用本工具，会作为该交付物的新版本覆盖旧版（旧版进历史、列表只显最新），所以请提交完整新版而非补丁；若确需在同一任务下保留多份并列文档，请用不同 kind 或开新任务。",
+      "把一份正式交付物写入工作区文档库。文档应当完整、可直接使用，而不是片段。按交付物性质选择 kind：report=报告/PRD/方案（Markdown）；slides=演示文稿（Marp 约定：每页之间用单独一行 --- 分隔，首页为标题页，每页一个要点群，可直接生成 PPT）；sheet=表格/报表（标准 CSV：首行表头，逗号分隔，含逗号的字段用双引号包裹，可直接导入 Excel）；html=网页/落地页/前端原型/HTML 演示(横向翻页 deck)/可交互可视化（单文件 HTML，样式与脚本内联，可在预览区实时查看）。注意：返工时对同一任务、同一 kind 再次调用本工具，会作为该交付物的新版本覆盖旧版（旧版进历史、列表只显最新），所以请提交完整新版而非补丁；若确需在同一任务下保留多份并列文档，请用不同 kind 或开新任务。",
     input_schema: {
       type: "object" as const,
       properties: {
         title: { type: "string", description: "文档标题" },
-        content: { type: "string", description: "完整正文：report 为 Markdown；slides 为 --- 分页的 Marp Markdown；sheet 为 CSV" },
-        kind: { type: "string", enum: ["report", "slides", "sheet"], description: "交付物格式，默认 report" },
+        content: { type: "string", description: "完整正文：report 为 Markdown；slides 为 --- 分页的 Marp Markdown；sheet 为 CSV；html 为单文件 HTML（样式/脚本内联，禁外链 <script src> 与内联事件处理器 onload/onclick 等）" },
+        kind: { type: "string", enum: ["report", "slides", "sheet", "html"], description: "交付物格式，默认 report" },
       },
       required: ["title", "content"],
+    },
+  },
+  {
+    name: "read_skill",
+    description:
+      "读取某个技能的完整方法正文（L2）。当工作区上下文的「已启用的技能」索引里有与当前任务相关的技能、你需要它的具体步骤/模板/参数时调用。能力型技能(capability)的正文会说明该调用哪个工具/MCP、参数怎么填、不可达时如何降级。skill_id 见技能索引中的 id。",
+    input_schema: {
+      type: "object" as const,
+      properties: { skill_id: { type: "string", description: "技能 id（取自上下文技能索引）" } },
+      required: ["skill_id"],
     },
   },
   {
@@ -1100,7 +1166,7 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
       return `已更新任务（id: ${task.id}，状态: ${task.status}）`;
     }
     case "write_document": {
-      const kind = ["report", "slides", "sheet"].includes(input.kind) ? input.kind : "report";
+      const kind = ["report", "slides", "sheet", "html"].includes(input.kind) ? input.kind : "report";
       const content = String(input.content ?? "");
       // 契约校验：坏格式不落库，作为 tool_result 返回引导自纠（不计入交付物，不广播）
       const formatErr = validateDocContent(kind, content);
@@ -1125,6 +1191,12 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
       const doc = getDocument(String(input.doc_id));
       if (!doc) return `错误：找不到文档 ${input.doc_id}`;
       return stripLoneSurrogates(`《${doc.title}》\n\n${doc.content.slice(0, 20000)}`);
+    }
+    case "read_skill": {
+      // 渐进式披露 L2：按需拉技能正文。只读、零计费（走 execTool 同步分支，不计 MCP_CALLS_PER_RUN）。
+      const sk = getSkill(String(input.skill_id));
+      if (!sk || !sk.enabled) return `未找到该技能或未启用（id: ${input.skill_id}）。`;
+      return stripLoneSurrogates(`【技能：${sk.name}】\n${sk.body || sk.content || sk.desc}`);
     }
     case "request_approval": {
       const approval = createApproval({
@@ -1448,7 +1520,12 @@ async function llmLoop(
       let result: string;
       try {
         if (isMcpTool(tu.name)) {
-          if (mcpCalls >= MCP_CALLS_PER_RUN) {
+          const gated = mcpSafetyGate(tu.name);
+          if (gated) {
+            // 高危插件（exec/network）：引擎层硬拦截（非提示词），强制改走 request_approval 审批门。
+            result = `⛔ 插件「${gated.name}」属高危（${gated.safety === "exec" ? "本地执行" : "外发数据"}），不能直接调用。请改用 request_approval 提交本次动作的完整内容与目的，经用户批准后再执行。`;
+            audit(channel.id, `⛔ ${agent.name} 试图直接调用高危插件「${gated.name}」(${gated.safety})，已拦截——须走审批门`);
+          } else if (mcpCalls >= MCP_CALLS_PER_RUN) {
             result = `⚠️ 本次运行的外部插件调用已达上限（${MCP_CALLS_PER_RUN} 次）。外部检索按次计费，请基于已获得的信息完成工作，不要再尝试调用插件。`;
           } else {
             mcpCalls++;

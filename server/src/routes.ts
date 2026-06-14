@@ -62,6 +62,7 @@ import {
   updateProvider,
 } from "./db.js";
 import { slidesToPptx } from "./pptx.js";
+import { MCP_REGISTRY, SKILL_PACK_REGISTRY } from "./registry.js";
 import { DEFAULT_IMAGE_BASE_URL } from "./agents/images.js";
 import {
   isMock,
@@ -96,8 +97,12 @@ api.get("/bootstrap", async (req, res) => {
     skills: listSkills(),
     mcp_servers: listMcpServers().map(sanitizeMcpServer),
     image_provider: sanitizeImageProvider(getImageProvider()),
+    registry: { mcp: MCP_REGISTRY, skills: SKILL_PACK_REGISTRY }, // 静态预设目录，无实例 token
   });
 });
+
+/** 预设目录（Skill/MCP 一键浏览推荐）：静态、无 token，member 可读；安装走 /mcp-servers（requireAdmin）。 */
+api.get("/registry", (_req, res) => res.json({ mcp: MCP_REGISTRY, skills: SKILL_PACK_REGISTRY }));
 
 api.get("/channels/:id/messages", (req, res) => {
   const channel = getChannel(req.params.id);
@@ -183,7 +188,7 @@ api.post("/agents", (req, res) => {
 api.get("/mcp-servers", (_req, res) => res.json(listMcpServers().map(sanitizeMcpServer)));
 
 api.post("/mcp-servers", requireAdmin, (req, res) => {
-  const { name, kind, url, auth_token, command, args } = req.body ?? {};
+  const { name, kind, url, auth_token, command, args, safety } = req.body ?? {};
   if (!name) return res.status(400).json({ error: "name required" });
   if (kind === "stdio" && !command) return res.status(400).json({ error: "command required for stdio" });
   if (kind !== "stdio" && !url) return res.status(400).json({ error: "url required for http" });
@@ -194,6 +199,8 @@ api.post("/mcp-servers", requireAdmin, (req, res) => {
     auth_token: String(auth_token ?? "").trim(),
     command: String(command ?? "").trim(),
     args: Array.isArray(args) ? args.map(String) : String(args ?? "").split(/\s+/).filter(Boolean),
+    // 安全分级：registry 高危预设带入 exec/network → 受引擎审批门约束；缺省 local
+    safety: safety === "exec" || safety === "network" ? safety : "local",
   });
   res.json(sanitizeMcpServer(server));
 });
@@ -224,18 +231,34 @@ api.delete("/mcp-servers/:id", requireAdmin, (req, res) => {
 api.get("/skills", (_req, res) => res.json(listSkills()));
 
 api.post("/skills", requireAdmin, (req, res) => {
-  const { name, desc, content } = req.body ?? {};
-  if (!name || !content) return res.status(400).json({ error: "name and content required" });
-  res.json(createSkill({ name: String(name).trim(), desc: String(desc ?? "").trim(), content: String(content) }));
+  const { name, desc, content, body, kind, trigger, when_to_use, resources_json } = req.body ?? {};
+  const text = body ?? content; // v2 用 body；兼容旧 UI 的 content
+  if (!name || !text) return res.status(400).json({ error: "name and content required" });
+  res.json(
+    createSkill({
+      name: String(name).trim(),
+      desc: String(desc ?? "").trim(),
+      body: String(text),
+      kind: kind === "capability" ? "capability" : "method",
+      ...(trigger !== undefined ? { trigger: String(trigger).trim() } : {}),
+      ...(when_to_use !== undefined ? { when_to_use: String(when_to_use).trim() } : {}),
+      ...(resources_json !== undefined ? { resources_json: String(resources_json) } : {}),
+    })
+  );
 });
 
 api.patch("/skills/:id", requireAdmin, (req, res) => {
-  const { enabled, name, desc, content } = req.body ?? {};
+  const { enabled, name, desc, content, body, kind, trigger, when_to_use, resources_json } = req.body ?? {};
   const skill = updateSkill(req.params.id, {
     ...(enabled !== undefined ? { enabled: Boolean(enabled) } : {}),
     ...(name !== undefined ? { name: String(name) } : {}),
     ...(desc !== undefined ? { desc: String(desc) } : {}),
     ...(content !== undefined ? { content: String(content) } : {}),
+    ...(body !== undefined ? { body: String(body) } : {}),
+    ...(kind !== undefined ? { kind: kind === "capability" ? "capability" : "method" } : {}),
+    ...(trigger !== undefined ? { trigger: String(trigger) } : {}),
+    ...(when_to_use !== undefined ? { when_to_use: String(when_to_use) } : {}),
+    ...(resources_json !== undefined ? { resources_json: String(resources_json) } : {}),
   });
   if (!skill) return res.status(404).json({ error: "not found" });
   res.json(skill);
