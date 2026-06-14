@@ -450,7 +450,7 @@ ssh "$VPS" 'systemctl daemon-reload && systemctl enable aiteam && systemctl rest
 
 | 项 | 现状（源码核实） | 落地动作 |
 |---|---|---|
-| **8787 绑回环 ✅ 已合入** | `server/src/index.ts` `HOST=AITEAM_HOST||127.0.0.1`，默认只听回环 | 安全组只放 80 给可信网段 + ufw/firewalld 双层作第一层（必做）；代码已默认不暴露公网 |
+| **8787 绑回环 ✅ 已合入** | `server/src/index.ts` `HOST=AITEAM_HOST\|\|127.0.0.1`，默认只听回环 | 安全组只放 80 给可信网段 + ufw/firewalld 双层作第一层（必做）；代码已默认不暴露公网 |
 | **会话密钥 fail-fast ✅ 已合入（commit 0983fb6）** | `server/src/session.ts:12-17` 生产未设 `AITEAM_SESSION_SECRET` 直接 `process.exit(1)` 拒启 | EnvironmentFile 里 `openssl rand -base64 48` 写入强密钥 + 确保 `NODE_ENV=production`；漏配会被拒启兜底 |
 | **开放注册 + 首注册成 admin** | `server/src/auth-routes.ts:12/27` | 部署前设 `AITEAM_ADMIN_EMAILS` 白名单 → 注册首个 admin → 立刻 `AITEAM_ALLOW_SIGNUP=0` 重启（必做） |
 | **MCP test 端点 ✅ 已合入 requireAdmin（commit 0983fb6）** | `server/src/routes.ts:208` `/mcp-servers/:id/test` 现带 `requireAdmin`，与同文件 185/201/216 的 create/toggle/delete 对齐 | 普通 member 不能再触发已存在 stdio server 子进程派生；内部场景仍建议坚决不配任何 stdio MCP（args 不放可执行命令，最稳） |

@@ -45,7 +45,7 @@ const BUILTIN_AGENTS = [
 ];
 
 /**
- * 内置技能库 v2（混合 method/capability + 渐进式披露）。
+ * 内置技能库（混合 method/capability + 渐进式披露）。版本以 BUILTIN_SKILL_PACK_VERSION 为准。
  * 每条仅把 name/desc/when_to_use/trigger 作为 L1 索引常驻，正文 body 由 read_skill 按需拉取。
  * 全部 enabled=false 出厂，admin 在「设置 → 技能」按需开启。
  * 第三方方法学均为蒸馏改写（非原文照搬），来源与许可见 THIRD_PARTY_NOTICES/。

@@ -880,7 +880,12 @@ export function readSkillBody(id: string): string {
   for (const r of refs) {
     if (!r.startsWith("tpl:")) continue;
     const tpl = getSkillTemplate(r.slice(4));
-    if (tpl) out += `\n\n## 可复用模板：${tpl.name}\n${tpl.desc}\n\`\`\`${tpl.lang}\n${tpl.content}\n\`\`\``;
+    if (tpl) {
+      // 围栏长度取「比模板内任意连续反引号都多 1」，防模板正文含 ``` 时把代码块提前闭合
+      const longest = (tpl.content.match(/`+/g) ?? []).reduce((m, s) => Math.max(m, s.length), 0);
+      const fence = "`".repeat(Math.max(3, longest + 1));
+      out += `\n\n## 可复用模板：${tpl.name}\n${tpl.desc}\n${fence}${tpl.lang}\n${tpl.content}\n${fence}`;
+    }
   }
   return out;
 }
