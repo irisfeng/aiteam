@@ -17,6 +17,8 @@ export function docKindMeta(kind: Doc["kind"]) {
       return { icon: "🖥️", label: "演示文稿", ext: ".md", mime: "text/markdown", hint: "Marp 格式，可直接生成 PPT" };
     case "sheet":
       return { icon: "📊", label: "数据表", ext: ".csv", mime: "text/csv", hint: "CSV，可导入 Excel" };
+    case "html":
+      return { icon: "🌐", label: "网页", ext: ".html", mime: "text/html", hint: "单文件 HTML，沙箱预览，可下载本地打开" };
     default:
       return { icon: "📄", label: "报告", ext: ".md", mime: "text/markdown", hint: "Markdown" };
   }
@@ -62,11 +64,13 @@ ${slides ? ".slide-page{page-break-after:always;border:none!important;box-shadow
 function download(doc: Doc) {
   const meta = docKindMeta(doc.kind);
   const isCsv = doc.kind === "sheet" && !doc.content.trimStart().startsWith("|");
-  const blob = new Blob([doc.content], { type: isCsv ? "text/csv" : "text/markdown" });
+  const mime = doc.kind === "html" ? "text/html" : isCsv ? "text/csv" : "text/markdown";
+  const ext = isCsv ? ".csv" : meta.ext;
+  const blob = new Blob([doc.content], { type: mime });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = doc.title.replace(/[\\/:*?"<>|]/g, "_") + (isCsv ? ".csv" : meta.ext);
+  a.download = doc.title.replace(/[\\/:*?"<>|]/g, "_") + ext;
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -306,7 +310,7 @@ export function DocViewerModal({ doc, onClose }: { doc: Doc; onClose: () => void
             className="ml-auto rounded-lg border border-line px-2.5 py-1 text-[12px] text-ink-2 hover:bg-sel"
             title={meta.hint}
           >
-            ⬇{doc.kind === "sheet" && !doc.content.trimStart().startsWith("|") ? " .csv" : " .md"}
+            ⬇{doc.kind === "html" ? " .html" : doc.kind === "sheet" && !doc.content.trimStart().startsWith("|") ? " .csv" : " .md"}
           </button>
           {doc.kind === "slides" && (
             <a
@@ -317,20 +321,25 @@ export function DocViewerModal({ doc, onClose }: { doc: Doc; onClose: () => void
               ⬇ .pptx
             </a>
           )}
-          <button
-            onClick={() => contentRef.current && exportWord(doc.title, contentRef.current.innerHTML)}
-            className="rounded-lg border border-line px-2.5 py-1 text-[12px] text-ink-2 hover:bg-sel"
-            title="导出为 Word 可打开的 .doc（保留排版）"
-          >
-            Word
-          </button>
-          <button
-            onClick={() => contentRef.current && printDoc(doc.title, contentRef.current.innerHTML, doc.kind === "slides")}
-            className="rounded-lg border border-line px-2.5 py-1 text-[12px] text-ink-2 hover:bg-sel"
-            title="系统打印对话框中可另存为 PDF；演示文稿按页分页"
-          >
-            🖨 PDF
-          </button>
+          {/* html 交付物内容是模型生成的不可信 HTML：禁走 exportWord/printDoc 的 document.write 同源路径（防存储型 XSS），只允许下载文件在 null 源打开 */}
+          {doc.kind !== "html" && (
+            <>
+              <button
+                onClick={() => contentRef.current && exportWord(doc.title, contentRef.current.innerHTML)}
+                className="rounded-lg border border-line px-2.5 py-1 text-[12px] text-ink-2 hover:bg-sel"
+                title="导出为 Word 可打开的 .doc（保留排版）"
+              >
+                Word
+              </button>
+              <button
+                onClick={() => contentRef.current && printDoc(doc.title, contentRef.current.innerHTML, doc.kind === "slides")}
+                className="rounded-lg border border-line px-2.5 py-1 text-[12px] text-ink-2 hover:bg-sel"
+                title="系统打印对话框中可另存为 PDF；演示文稿按页分页"
+              >
+                🖨 PDF
+              </button>
+            </>
+          )}
           <button onClick={onClose} className="rounded px-1.5 text-ink-3 hover:bg-sel">✕</button>
         </div>
         <div ref={contentRef} className={`flex-1 overflow-y-auto px-6 py-4 ${doc.kind === "slides" ? "bg-sel/40" : ""}`}>
@@ -338,6 +347,15 @@ export function DocViewerModal({ doc, onClose }: { doc: Doc; onClose: () => void
             <SlidesPreview content={doc.content} />
           ) : doc.kind === "sheet" ? (
             <SheetTable content={doc.content} />
+          ) : doc.kind === "html" ? (
+            // 不可信 HTML 沙箱预览：sandbox 留空 = 脚本不执行、无同源、无父窗口访问（防存储型 XSS）。
+            // 注：内联 <script> 在此不运行；纯展示型 HTML/CSS/SVG 正常渲染（与"禁外链/内联事件"校验配套）。
+            <iframe
+              srcDoc={doc.content}
+              sandbox=""
+              className="h-[64vh] w-full rounded border border-line bg-white"
+              title={doc.title}
+            />
           ) : (
             <div className="md text-[14px]">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{doc.content}</ReactMarkdown>
@@ -444,6 +462,7 @@ const DOC_KINDS: { k: "all" | Doc["kind"]; label: string }[] = [
   { k: "report", label: "📄 报告" },
   { k: "slides", label: "🖥 演示" },
   { k: "sheet", label: "📊 数据表" },
+  { k: "html", label: "🌐 网页" },
 ];
 
 export function DocsView() {

@@ -201,6 +201,16 @@ addColumnIfMissing("providers", "is_strong", "is_strong INTEGER NOT NULL DEFAULT
 addColumnIfMissing("documents", "version", "version INTEGER NOT NULL DEFAULT 1");
 addColumnIfMissing("documents", "superseded_by", "superseded_by TEXT");
 db.exec(`CREATE INDEX IF NOT EXISTS idx_documents_task_kind ON documents(task_id, kind, superseded_by)`);
+// 技能系统 v2（渐进式披露 + 混合 method/capability 模型）：旧库补列，向后兼容。
+// 旧库的 content 仍是正文权威来源，read_skill 优先 body、回退 content；when_to_use 空时注入回退 desc。
+addColumnIfMissing("skills", "kind", "kind TEXT NOT NULL DEFAULT 'method'");          // method | capability
+addColumnIfMissing("skills", "trigger", "trigger TEXT NOT NULL DEFAULT ''");          // L1 召回词（逗号/、分隔），取代硬编码 SKILL_KEYWORDS
+addColumnIfMissing("skills", "when_to_use", "when_to_use TEXT NOT NULL DEFAULT ''");  // L1 一句话触发条件
+addColumnIfMissing("skills", "body", "body TEXT NOT NULL DEFAULT ''");                // L2 正文，按需 read_skill 才进上下文
+addColumnIfMissing("skills", "resources_json", "resources_json TEXT NOT NULL DEFAULT '[]'"); // L3 capability 指向的工具/MCP 前缀
+addColumnIfMissing("skills", "version", "version INTEGER NOT NULL DEFAULT 1");        // 内置技能版本化（解决"空库才播种"）
+// MCP 安全分级（registry 预设带入）：exec/network 受引擎层审批门约束（见 engine.callMcpTool 前置门）
+addColumnIfMissing("mcp_servers", "safety", "safety TEXT NOT NULL DEFAULT 'local'");  // local | network | exec
 db.exec(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '')`);
 // 用户表（standalone 多用户登录）：全局表，不带 owner_id（owner = user:<id> 由此派生）
 db.exec(`CREATE TABLE IF NOT EXISTS users (
@@ -277,13 +287,28 @@ export interface McpServer {
   command: string;
   args_json: string;
   enabled: number;
+  /** local=本地无副作用 | network=外发数据 | exec=本地执行（后两者受引擎审批门约束） */
+  safety: "local" | "network" | "exec";
   created_at: number;
 }
 export interface Skill {
   id: string;
   name: string;
   desc: string;
+  /** 旧字段：v1 全量注入的正文；v2 起 read_skill 优先 body、回退 content */
   content: string;
+  /** method=提示词方法包 | capability=指向工具/MCP 的能力型技能 */
+  kind: "method" | "capability";
+  /** L1 召回词（逗号/、分隔）；空则回退硬编码 SKILL_KEYWORDS[name] */
+  trigger: string;
+  /** L1 一句话触发条件；空则注入回退 desc */
+  when_to_use: string;
+  /** L2 正文，按需 read_skill 才进上下文 */
+  body: string;
+  /** L3 capability 指向的工具/MCP 工具前缀，JSON 数组字符串 */
+  resources_json: string;
+  /** 内置技能版本（version-based upsert 用） */
+  version: number;
   enabled: number;
   builtin: number;
   created_at: number;
@@ -589,6 +614,7 @@ export function createMcpServer(s: {
   auth_token?: string;
   command?: string;
   args?: string[];
+  safety?: McpServer["safety"];
 }): McpServer {
   const server: McpServer = {
     id: nanoid(10),
@@ -598,11 +624,12 @@ export function createMcpServer(s: {
     auth_token: s.auth_token ?? "",
     command: s.command ?? "",
     args_json: JSON.stringify(s.args ?? []),
+    safety: s.safety ?? "local",
     enabled: 1,
     created_at: now(),
   };
   db.prepare(
-    "INSERT INTO mcp_servers (id, name, kind, url, auth_token, command, args_json, enabled, created_at) VALUES (@id, @name, @kind, @url, @auth_token, @command, @args_json, @enabled, @created_at)"
+    "INSERT INTO mcp_servers (id, name, kind, url, auth_token, command, args_json, safety, enabled, created_at) VALUES (@id, @name, @kind, @url, @auth_token, @command, @args_json, @safety, @enabled, @created_at)"
   ).run(server);
   return server;
 }
@@ -622,6 +649,7 @@ export function sanitizeMcpServer(s: McpServer) {
     url: s.url,
     command: s.command,
     args_json: s.args_json,
+    safety: s.safety, // 风险分级前端可见（registry/手填带入）；非敏感，不脱敏
     enabled: s.enabled,
     has_token: Boolean(s.auth_token),
   };
@@ -631,22 +659,59 @@ export function sanitizeMcpServer(s: McpServer) {
 export function listSkills(): Skill[] {
   return db.prepare("SELECT * FROM skills ORDER BY builtin DESC, created_at").all() as Skill[];
 }
-export function createSkill(s: { name: string; desc?: string; content: string; enabled?: boolean; builtin?: boolean }): Skill {
+export function getSkill(id: string): Skill | undefined {
+  return db.prepare("SELECT * FROM skills WHERE id = ?").get(id) as Skill | undefined;
+}
+export interface SkillInput {
+  name: string;
+  desc?: string;
+  /** v2 正文权威字段；缺省时回填 content（向后兼容旧 UI/调用） */
+  body?: string;
+  content?: string;
+  kind?: Skill["kind"];
+  trigger?: string;
+  when_to_use?: string;
+  resources_json?: string;
+  version?: number;
+  enabled?: boolean;
+  builtin?: boolean;
+}
+export function createSkill(s: SkillInput): Skill {
+  const body = s.body ?? s.content ?? "";
   const skill: Skill = {
     id: nanoid(10),
     name: s.name,
     desc: s.desc ?? "",
-    content: s.content,
+    content: s.content ?? body, // 旧字段保持非空：回退读取链路（read_skill body→content）始终有值
+    kind: s.kind === "capability" ? "capability" : "method",
+    trigger: s.trigger ?? "",
+    when_to_use: s.when_to_use ?? "",
+    body,
+    resources_json: s.resources_json ?? "[]",
+    version: s.version ?? 1,
     enabled: s.enabled ? 1 : 0,
     builtin: s.builtin ? 1 : 0,
     created_at: now(),
   };
   db.prepare(
-    "INSERT INTO skills (id, name, desc, content, enabled, builtin, created_at) VALUES (@id, @name, @desc, @content, @enabled, @builtin, @created_at)"
+    "INSERT INTO skills (id, name, desc, content, kind, trigger, when_to_use, body, resources_json, version, enabled, builtin, created_at) VALUES (@id, @name, @desc, @content, @kind, @trigger, @when_to_use, @body, @resources_json, @version, @enabled, @builtin, @created_at)"
   ).run(skill);
   return skill;
 }
-export function updateSkill(id: string, fields: { enabled?: boolean; name?: string; desc?: string; content?: string }): Skill | undefined {
+export function updateSkill(
+  id: string,
+  fields: {
+    enabled?: boolean;
+    name?: string;
+    desc?: string;
+    content?: string;
+    kind?: Skill["kind"];
+    trigger?: string;
+    when_to_use?: string;
+    body?: string;
+    resources_json?: string;
+  }
+): Skill | undefined {
   const cur = db.prepare("SELECT * FROM skills WHERE id = ?").get(id) as Skill | undefined;
   if (!cur) return undefined;
   const next: Skill = {
@@ -654,9 +719,42 @@ export function updateSkill(id: string, fields: { enabled?: boolean; name?: stri
     ...(fields.name !== undefined ? { name: fields.name } : {}),
     ...(fields.desc !== undefined ? { desc: fields.desc } : {}),
     ...(fields.content !== undefined ? { content: fields.content } : {}),
+    ...(fields.kind !== undefined ? { kind: fields.kind } : {}),
+    ...(fields.trigger !== undefined ? { trigger: fields.trigger } : {}),
+    ...(fields.when_to_use !== undefined ? { when_to_use: fields.when_to_use } : {}),
+    ...(fields.body !== undefined ? { body: fields.body } : {}),
+    ...(fields.resources_json !== undefined ? { resources_json: fields.resources_json } : {}),
     ...(fields.enabled !== undefined ? { enabled: fields.enabled ? 1 : 0 } : {}),
   };
-  db.prepare("UPDATE skills SET name = @name, desc = @desc, content = @content, enabled = @enabled WHERE id = @id").run(next);
+  // 保持 body/content 同步：只改其一时镜像到另一，避免 read_skill / 列表读到旧值（旧 content 字段是 read_skill 的回退源）
+  if (fields.body !== undefined && fields.content === undefined) next.content = fields.body;
+  if (fields.content !== undefined && fields.body === undefined) next.body = fields.content;
+  db.prepare(
+    "UPDATE skills SET name = @name, desc = @desc, content = @content, kind = @kind, trigger = @trigger, when_to_use = @when_to_use, body = @body, resources_json = @resources_json, enabled = @enabled WHERE id = @id"
+  ).run(next);
+  return next;
+}
+/** version-based upsert：升级内置技能正文/元数据，但保留用户的 enabled 开关与 id。 */
+export function upsertBuiltinSkill(id: string, s: SkillInput): Skill | undefined {
+  const cur = db.prepare("SELECT * FROM skills WHERE id = ?").get(id) as Skill | undefined;
+  if (!cur) return undefined;
+  const body = s.body ?? s.content ?? cur.body;
+  const next: Skill = {
+    ...cur,
+    name: s.name,
+    desc: s.desc ?? cur.desc,
+    content: s.content ?? body,
+    kind: s.kind === "capability" ? "capability" : "method",
+    trigger: s.trigger ?? cur.trigger,
+    when_to_use: s.when_to_use ?? cur.when_to_use,
+    body,
+    resources_json: s.resources_json ?? cur.resources_json,
+    version: s.version ?? cur.version,
+    // enabled 不动：尊重用户的开关
+  };
+  db.prepare(
+    "UPDATE skills SET name = @name, desc = @desc, content = @content, kind = @kind, trigger = @trigger, when_to_use = @when_to_use, body = @body, resources_json = @resources_json, version = @version WHERE id = @id"
+  ).run(next);
   return next;
 }
 export function deleteSkill(id: string) {

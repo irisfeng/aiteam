@@ -1,4 +1,4 @@
-import { createAgent, createChannel, createSkill, insertMessage, listAgents, listChannels, listSkills } from "./db.js";
+import { createAgent, createChannel, createSkill, insertMessage, listAgents, listChannels, listSkills, upsertBuiltinSkill, type SkillInput } from "./db.js";
 
 export const SHARED_RULES = `
 你在一个名为 AITeam 的团队工作台中作为 AI 同事工作，与人类用户和其他 AI 同事在频道里协作。
@@ -44,38 +44,188 @@ const BUILTIN_AGENTS = [
   },
 ];
 
-/** 内置技能（Osaurus 思想：技能=横切的工作方法，启用后注入所有同事；默认关闭，用户按需开启） */
-const BUILTIN_SKILLS: { name: string; desc: string; content: string }[] = [
+/**
+ * 内置技能库 v2（混合 method/capability + 渐进式披露）。
+ * 每条仅把 name/desc/when_to_use/trigger 作为 L1 索引常驻，正文 body 由 read_skill 按需拉取。
+ * 全部 enabled=false 出厂，admin 在「设置 → 技能」按需开启。
+ * 第三方方法学均为蒸馏改写（非原文照搬），来源与许可见 THIRD_PARTY_NOTICES/。
+ * 扩库或改正文时整体把 BUILTIN_SKILL_PACK_VERSION +1，并把对应条目 version 设为该值。
+ */
+export const BUILTIN_SKILL_PACK_VERSION = 2;
+const V = BUILTIN_SKILL_PACK_VERSION;
+
+type BuiltinSkill = Required<Pick<SkillInput, "name" | "desc" | "trigger" | "when_to_use" | "body" | "kind" | "version">> &
+  Pick<SkillInput, "resources_json">;
+
+export const BUILTIN_SKILLS: BuiltinSkill[] = [
+  // ── 通用方法（v1 升级：补 trigger/when_to_use，正文沉入 body）──
   {
-    name: "深度调研法",
-    desc: "多源交叉验证、区分事实与推断、全程标注来源",
-    content:
-      "调研类工作遵循：1) 同一问题至少换 3 组关键词检索，优先一手来源（官方文档/论文/财报）；2) 关键事实需两个独立来源交叉验证，矛盾时同时记录两种说法；3) 明确区分【事实】【推断】【传闻】并标注；4) 每个结论附来源链接或出处；5) 注明检索时间，时效敏感的数据标注采集日期。",
-  },
-  {
-    name: "金字塔写作法",
+    name: "金字塔写作法", kind: "method", version: V,
     desc: "结论先行、以上统下、归类分组、逻辑递进",
-    content:
-      "写作类交付遵循金字塔原理：1) 结论先行——第一段给出核心答案/主张；2) 以上统下——每层论点统领下层论据，段首句即该段主旨；3) 归类分组——并列要点遵循 MECE（相互独立、完全穷尽），3±2 个为宜；4) 逻辑递进——按时间/结构/重要性其一排序，不混用；5) 收尾给行动建议而非总结复述。",
+    trigger: "写,撰写,报告,文案,方案,prd,文章,稿,总结,演示,slides,ppt,汇报,白皮书,长文",
+    when_to_use: "写报告/PRD/方案/文案/长文等任何写作类交付时",
+    body: "写作类交付遵循金字塔原理：1) 结论先行——第一段给出核心答案/主张；2) 以上统下——每层论点统领下层论据，段首句即该段主旨；3) 归类分组——并列要点遵循 MECE（相互独立、完全穷尽），3±2 个为宜；4) 逻辑递进——按时间/结构/重要性其一排序，不混用；5) 收尾给行动建议而非总结复述。",
   },
   {
-    name: "交付自查清单",
+    name: "深度调研法", kind: "method", version: V,
+    desc: "多源交叉验证、区分事实与推断、全程标注来源",
+    trigger: "调研,检索,搜索,搜一下,资料,来源,事实,核实,竞品,市场,行业,最新,对比,数据",
+    when_to_use: "需要事实/数据/最新外部信息、做竞品或行业研究时",
+    body: "调研类工作遵循：1) 同一问题至少换 3 组关键词检索，优先一手来源（官方文档/论文/财报）；2) 关键事实需两个独立来源交叉验证，矛盾时同时记录两种说法；3) 明确区分【事实】【推断】【传闻】并标注；4) 每个结论附来源链接或出处；5) 注明检索时间，时效敏感的数据标注采集日期。",
+  },
+  {
+    name: "交付自查清单", kind: "method", version: V,
     desc: "交付前按验收标准逐条自查，附自查结果",
-    content:
-      "任何交付物提交前完成自查：1) 逐条对照任务的验收标准，在交付摘要中附「自查表」（标准→是否满足→证据位置）；2) 数字一致性——同一指标在全文中数值一致；3) 完整性——没有「待补充」「TODO」残留；4) 可用性——读者无需追问即可直接使用；5) 自查发现的未解决项明确列出，不隐瞒。",
+    trigger: "交付,验收,自查,提交,checklist,自查表",
+    when_to_use: "任何正式交付物提交前",
+    body: "任何交付物提交前完成自查：1) 逐条对照任务的验收标准，在交付摘要中附「自查表」（标准→是否满足→证据位置）；2) 数字一致性——同一指标在全文中数值一致；3) 完整性——没有「待补充」「TODO」残留；4) 可用性——读者无需追问即可直接使用；5) 自查发现的未解决项明确列出，不隐瞒。",
   },
   {
-    name: "结构化头脑风暴",
+    name: "结构化头脑风暴", kind: "method", version: V,
     desc: "先发散后收敛：多视角生成、去重归类、按价值排序",
-    content:
-      "创意/方案类工作先发散后收敛：1) 发散阶段从至少 4 个视角生成想法（用户视角/竞品视角/技术视角/成本视角），不做评判；2) 每个视角至少 5 个想法，鼓励极端选项（最贵的做法/最便宜的做法）；3) 收敛阶段去重归类，按「价值×可行性」二维排序；4) 输出 Top3 推荐 + 完整清单附录，说明取舍理由。",
+    trigger: "创意,头脑风暴,脑暴,构思,选型,策划,点子,发散,方案",
+    when_to_use: "创意/方案/选型类工作需要先发散后收敛时",
+    body: "创意/方案类工作先发散后收敛：1) 发散阶段从至少 4 个视角生成想法（用户视角/竞品视角/技术视角/成本视角），不做评判；2) 每个视角至少 5 个想法，鼓励极端选项（最贵的做法/最便宜的做法）；3) 收敛阶段去重归类，按「价值×可行性」二维排序；4) 输出 Top3 推荐 + 完整清单附录，说明取舍理由。",
+  },
+
+  // ── 办公/文档产出 ──
+  {
+    name: "文档结构化排版法", kind: "method", version: V,
+    desc: "只调呈现不改内容：标题层级/加粗/列表/表格让读者 3 秒抓重点（蒸馏 baoyu-format-markdown, MIT）",
+    trigger: "排版,格式化,美化,层级,markdown,文档优化,可读性",
+    when_to_use: "Markdown/文案缺标题/加粗/列表/表格层级、难以扫读时",
+    body: "结论先行：好排版=读者 3 秒抓重点，只调呈现不改内容。1) 读者视角通读，标出金句/核心结论/可并列项/可表格化数据；2) 加粗仅给关键结论与核心要点，不滥用；3) 转折/分段处插 ## / ###；4) 平行项→列表，对比或结构化数据→表格；5) 命令/路径/术语用行内代码；6) 金句/警告用引用块；7) CJK 与英文/数字间留空格。禁：改写原意、堆砌加粗。产出走 write_document(report)。（蒸馏自 baoyu-format-markdown，见 THIRD_PARTY_NOTICES/baoyu-skills.txt）",
+  },
+  {
+    name: "Diataxis 文档生成法", kind: "method", version: V,
+    desc: "按 tutorial/how-to/reference/explanation 四象限分流写系统化文档（蒸馏 Hermes document-generate）",
+    trigger: "文档,说明,手册,api文档,使用指南,教程,reference,readme",
+    when_to_use: "为代码/功能/模块产出系统化文档时",
+    body: "结论先行：按 Diataxis 四象限分流。1) 先「代码考古」读 README/入口/测试/架构再动笔；2) 分象限：新用户功能→tutorial+how-to+reference，内部模块→reference+explanation，配置项→how-to+reference；3) reference 完整且可溯源到代码；4) explanation 讲「为什么这样设计」；5) 本工作台无代码执行沙箱，代码示例须标注「未实跑」而非声称已运行。产出走 write_document(report)。（蒸馏自 Hermes/gstack document-generate 的 CC0 SKILL.md 部分）",
+  },
+  {
+    name: "翻译三档法", kind: "method", version: V,
+    desc: "按质量需求选快速/常规/精品三档，长文先统一术语（蒸馏 baoyu-translate, MIT）",
+    trigger: "翻译,精翻,本地化,改成中文,改成英文,translate,润色",
+    when_to_use: "文档在中英等语言之间翻译时",
+    body: "结论先行：按质量需求选档，长文先统一术语。1) 快速档=直译；2) 常规档(默认)=分析→翻译→存稿，长文(≥4000字)先抽术语表再分块译；3) 精品档=分析→初稿→批评式评审→修订→润色；4) 术语优先级：内联指定>外部术语表>常识；5) 保留源文 frontmatter，发现源语言文字图时提醒用户。产出走 write_document(report)。（蒸馏自 baoyu-translate）",
+  },
+
+  // ── 数据可视化 / 设计 / 多媒体 ──
+  {
+    name: "SVG 图表生成法", kind: "method", version: V,
+    desc: "先定图类型再画：简单图出 Mermaid、复杂图写响应式 SVG（蒸馏 baoyu-diagram + Hermes diagram）",
+    trigger: "架构图,流程图,示意图,svg,图表,时序图,思维导图,diagram,mermaid",
+    when_to_use: "需要可视化系统架构/流程/数据关系/时序时",
+    body: "结论先行：先定图类型再动手。1) 选型：架构图(组件边界+数据流)/流程图(决策菱形)/时序图/思维导图/状态机；2) 简单图输出 Mermaid 代码块嵌入 write_document(report)（前端 react-markdown 渲染），复杂图直接写 SVG（响应式 viewBox，不写死像素）；3) SVG 设计系统：深色底+网格、语义化配色、组件名 11px 加粗/标签 9px、中文字距加宽；4) z 序：defs→背景→边界→连线→遮罩→组件框→图例。（蒸馏自 baoyu-diagram 与 Hermes diagram 的 CC0 部分）",
+  },
+  {
+    name: "演示设计与防溢出法", kind: "method", version: V,
+    desc: "先定『讲者驱动 vs 读物优先』再控密度与节奏，单页防溢出（蒸馏 frontend-slides, MIT）",
+    trigger: "ppt,演示,幻灯片,slides,presentation,演讲稿,路演,deck",
+    when_to_use: "制作演示/幻灯片，需要确定信息密度与节奏时",
+    body: "结论先行：先问『讲者驱动 vs 读物优先』再定密度。1) 讲者驱动：每页 1-2 个观点、大字号、≤3 个要点，宁可多分页；2) 读物优先：更紧凑、4-6 个信息单元、每页自包含；3) 防溢出：估算单页元素数对照密度上限，超了就拆续页；4) 交 HTML 演示时锁定 16:9 舞台（整体 scale 缩放、不重排，letterbox 可接受），可用横向翻页单 HTML 模板（走 html 交付物）；5) 主题节奏：避免连续 3 页同色调；6) 落点：slides(Marp，可导出 pptx) 或 html(网页 deck) 按需选。（蒸馏自 frontend-slides / guizang-ppt）",
+  },
+  {
+    name: "反 AI-slop 设计审美守则", kind: "method", version: V,
+    desc: "每个产出像『专为此 brief 设计』，禁通用模板与默认紫蓝（蒸馏 design-taste / frontend-slides, MIT）",
+    trigger: "设计,审美,排版,配色,字体,网页,landing,ui,封面,品味",
+    when_to_use: "产出任何视觉交付（网页/PPT/封面/信息图）之前",
+    body: "结论先行：每个产出都要像『专为此 brief 设计』，禁默认模板感。1) 字体：禁 Inter/Roboto/Arial/系统字直接当标题，选与气质匹配的特色字；2) 配色：禁默认紫蓝(#6366f1)、禁平均分布，强制『主色承诺』或一条故事色线；3) 布局：按内容选 editorial grid / split panel / card cascade，而非千篇一律居中卡片；4) 装饰：几何抽象/渐变/纹理点到为止，禁过度玻璃态；5) 全篇字体/色板/圆角统一。这是所有 design 类产出的前置守则。（蒸馏自 Leonxlnx/taste-skill 与 frontend-slides）",
+  },
+  {
+    name: "信息图/封面/配图生成法", kind: "method", version: V,
+    desc: "先选 layout×style 再用 generate_image 生成，图服务于内容做图文混排（蒸馏 baoyu-infographic/cover/illustrator）",
+    trigger: "信息图,封面,配图,插图,infographic,可视化大图,图文,小红书,公众号配图",
+    when_to_use: "报告/网页/文章需要配图、信息图、封面或图文混排时",
+    body: "结论先行：先选 layout×style 再生成，图服务于内容、不是装饰。1) 信息图：从内容抽 layout（时间线/对比/流程/金字塔…）×视觉 style，先给推荐组合再调 generate_image；2) 封面：按 type×palette×rendering×mood 选，尺寸 cinematic(2.35:1)/widescreen(16:9)/square(1:1)；3) 文章配图：分析结构定位需配图处，Type×Style 两维生成；4) 把返回的 Markdown 图片行原样嵌入 write_document(report) 或 html 交付物做图文混排（图存 /aiteam/assets）；5) 遵守『反 AI-slop 设计审美守则』；6) 受 AITEAM_IMAGES_PER_RUN 限，一个任务 1-2 张点睛即可。底座 generate_image(Seedream) 已就位。（蒸馏自 baoyu-infographic/cover-image/article-illustrator）",
+  },
+
+  // ── 代码 MVP（诚实标注：本工作台无代码执行沙箱）──
+  {
+    name: "可验证规格法", kind: "method", version: V,
+    desc: "动手前把要交付的行为写成可验证用例，测行为不测实现（蒸馏 superpowers TDD + mattpocock, MIT）",
+    trigger: "开发,编码,实现,功能,代码,测试,tdd,接口,需求",
+    when_to_use: "写新功能或修 bug 前，先确定行为与验收口径时",
+    body: "结论先行：动手前把『要交付的行为』写成可验证用例，测行为不测实现。1) 列行为清单按价值排序，与人确认公开接口；2) 对每个行为先用 write_document 写『测试用例：输入→预期可观察输出』，只针对公开接口（抗重构）；3) 写满足用例的最小实现，YAGNI；4) 覆盖后重构去重；5) 用例清单作为 submit_verdict 的 fail-closed 依据，声称『满足』须逐条对照。注意：本工作台无沙箱，禁声称『已运行通过』，只能给『按规格应通过』+用例清单；前端代码若交 html 交付物，可在其中内联自测断言(console.assert/可见断言区)并附『手动验收清单』作为人工 QA。（蒸馏自 superpowers test-driven-development 与 mattpocock/skills）",
+  },
+  {
+    name: "假设-证伪调试法", kind: "method", version: V,
+    desc: "先追根因再动手：列可证伪假设、验证、写回归用例再修（蒸馏 superpowers systematic-debugging, MIT）",
+    trigger: "调试,debug,排查,报错,故障,bug,定位,异常,崩溃",
+    when_to_use: "遇到 bug/异常、在提出修复方案之前",
+    body: "结论先行：先追根因再动手，禁猜测乱改。1) 把症状写成可判定的判据；2) 列 3-5 个可证伪假设按可能性排序，每个写出『若 X 为因，则改 Y 会让 bug 消失』的预测；3) 指出该看哪段状态/数据流来验证；4) 定位根因后先写回归用例再给修复；5) 同一处 3 次失败→质疑架构假设；6) 复盘『什么能预防此 bug』并 save_memory。禁：无判据乱改、未验证就声称已修。（蒸馏自 superpowers systematic-debugging 与 mattpocock diagnose）",
+  },
+  {
+    name: "PR 审查法", kind: "method", version: V,
+    desc: "技术评估而非表演性同意：读完整 diff、分级缺陷、有据 push back（蒸馏 superpowers review, MIT）",
+    trigger: "审查,review,代码评审,pr,diff,把关,评审",
+    when_to_use: "做代码评审、或接收他人评审意见时",
+    body: "结论先行：评审是技术评估，不是表演性同意。作为评审者：1) 读完整 diff 与意图；2) 作用域检测（是否越界改动）；3) 结构审核（SQL/LLM prompt 注入、N+1、死代码、隐藏副作用）；4) 缺陷分级 critical/high/medium/low。接收意见时：1) 读完再反应并复述需求；2) 对照本 codebase 评估；3) 有据可 push back（引用工作代码），无据则照做；4) 逐条单步落实。禁：盲从、未验证就实现。本工作台用 update_task/文档承接评审，不动 submit_verdict（仅人工裁决）。（蒸馏自 superpowers receiving/requesting-code-review 与 Hermes review）",
+  },
+  {
+    name: "设计前置头脑风暴法", kind: "method", version: V,
+    desc: "实现前必须有获批设计：需求澄清→方案对比→分段呈现获批（蒸馏 superpowers brainstorming, MIT）",
+    trigger: "需求,设计,方案,功能设计,重构,选型,规划,架构",
+    when_to_use: "开发新功能或重构前，先澄清需求与方案时",
+    body: "结论先行：实现前必须有获批设计，禁跳过直接写代码。1) 需求澄清：开放式问题逐个问（目的/约束/成功标准），一次一问；2) 方案探索：给 2-3 个方案各配 trade-off，推荐最优；3) 分段呈现设计（架构/组件/数据流/错误处理/测试），每段获认可再下一段；4) 落地为 write_document(report) 设计文档；5) 批准后才进入实现。（蒸馏自 superpowers brainstorming）",
+  },
+  {
+    name: "实现计划法", kind: "method", version: V,
+    desc: "把 spec 切成 2-5 分钟可独立完成的任务 DAG，落到看板分批推进（蒸馏 superpowers plans, MIT）",
+    trigger: "计划,拆解,任务分解,排期,plan,roadmap,里程碑",
+    when_to_use: "有 spec/设计，需要拆成可执行任务序列时",
+    body: "结论先行：把工作切成 2-5 分钟可独立完成的任务 DAG。1) 每个任务列出涉及文件清单+关键代码片段+验收点；2) 标可并行 / 必串行；3) 排查冗余并合并；4) 落点：用内置 start_project/create_task 把任务落到看板（带依赖），正文走 write_document(report)；5) 按批推进（默认每批 3 个），批间留人工 review。（蒸馏自 superpowers writing/executing-plans）",
+  },
+  {
+    name: "前端工程自查法", kind: "method", version: V,
+    desc: "前端 MVP 产出后做性能/包体积/可访问性/React 模式自查（蒸馏 Vercel react-best-practices + addyosmani）",
+    trigger: "前端,react,next,性能,可访问性,组件,优化,bundle,a11y",
+    when_to_use: "产出前端代码或 html MVP 后，做工程质量自查时",
+    body: "结论先行：前端 MVP 产出要附自查维度，别只看『跑起来』。1) 性能：避免不必要 re-render（memo/稳定 key）、数据获取就近、长列表虚拟化；2) 包体积：按需 import、避免巨型依赖、code-split；3) 可访问性：语义标签、alt/aria、键盘可达、对比度；4) React 模式：状态最小化、副作用收敛、受控/非受控一致；5) 交 html 交付物时把以上做成『手动验收清单』内联进文档（本工作台无自动 QA，需人工逐项核对）。（蒸馏自 Vercel react-best-practices 与 addyosmani/agent-skills）",
+  },
+
+  // ── 能力型技能（capability：指向工具/MCP，read_skill 给用法+降级）──
+  {
+    name: "文档解析能力", kind: "capability", version: V,
+    desc: "把 PDF/docx/pptx/xlsx/图片转 Markdown 再处理（依赖 markitdown MCP）",
+    trigger: "解析,提取,读取文档,pdf,docx,pptx,xlsx,附件,转markdown",
+    when_to_use: "用户给出 PDF/Word/PPT/Excel/图片等文件、需要提取其内容时",
+    resources_json: JSON.stringify(["mcp__markitdown__*"]),
+    body: "当需要从 PDF/docx/pptx/xlsx/图片提取内容时：1) 调用 mcp__markitdown__* 把文件转成 Markdown，再据此分析/改写/汇总；2) 若该 MCP 未就绪（索引标『依赖未就绪』），降级为请用户直接粘贴文本，不要假装读到了内容。markitdown 为纯本地 stdio、大陆可达、零外网。",
+  },
+  {
+    name: "可编辑 PPTX 能力", kind: "capability", version: V,
+    desc: "高保真可编辑 PPTX 优先用 MCP，不可达则降级 Marp（依赖 pptx MCP，默认未就绪）",
+    trigger: "可编辑ppt,高保真pptx,母版,模板ppt,精美演示",
+    when_to_use: "需要高保真、可在 PowerPoint 里继续编辑的 PPTX 时",
+    resources_json: JSON.stringify(["mcp__pptx-native__*", "generate_image"]),
+    body: "需要高保真可编辑 PPTX 时：1) 优先用 ppt-master/pptx MCP（真 DrawingML，可在 PowerPoint 编辑）；2) 该 MCP 不可达时（一期默认未就绪），降级用 write_document(slides)（Marp→pptxgenjs 真 .pptx，已可导出）。该类 MCP 在宿主本地执行、属高危(exec)，受引擎审批门约束、默认关闭。",
+  },
+  {
+    name: "国产联网检索能力", kind: "capability", version: V,
+    desc: "仅国内模型部署下以智谱 web-search-prime 作主检索路径（依赖 web-search-prime MCP）",
+    trigger: "联网搜索,实时检索,查最新,国产搜索,web检索",
+    when_to_use: "仅国内模型部署、Anthropic 服务端 web_search 不可用、又需要联网检索时",
+    resources_json: JSON.stringify(["mcp__web-search-prime__*"]),
+    body: "仅国内模型部署下，官方服务端 web_search/web_fetch 走降档可能不可用。此时：1) 以 mcp__web-search-prime__*（智谱，http+bearer，大陆可达）作为主检索路径；2) 仍遵守『深度调研法』的多源交叉验证与来源标注；3) 该 MCP 也不可达时，降级为请用户粘贴资料，不要凭空编造。",
   },
 ];
 
-/** 全局内置技能（与 owner 无关，服务启动时播种一次）。 */
+/**
+ * 全局内置技能（与 owner 无关，服务启动时调用，幂等）。
+ * version-based upsert：解决旧库『非空就不播种』——新内置技能插入，旧版按 name 升级正文/元数据但
+ * 保留用户的 enabled 开关；自定义技能不受影响。
+ */
 export function seedGlobalSkills() {
-  if (listSkills().length === 0) {
-    for (const s of BUILTIN_SKILLS) createSkill({ ...s, builtin: true, enabled: false });
+  const builtinByName = new Map(listSkills().filter((s) => s.builtin).map((s) => [s.name, s]));
+  for (const s of BUILTIN_SKILLS) {
+    const cur = builtinByName.get(s.name);
+    if (!cur) {
+      createSkill({ ...s, builtin: true, enabled: false });
+    } else if ((cur.version ?? 1) < s.version) {
+      upsertBuiltinSkill(cur.id, s);
+    }
   }
 }
 
