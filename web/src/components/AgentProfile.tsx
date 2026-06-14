@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useWorkspace } from "../store";
+import { API_BASE } from "../api";
 import type { Agent } from "../types";
 import { AgentAvatar, memberColor } from "./Avatar";
 
@@ -10,7 +11,7 @@ export function AgentProfileModal({ agent, onClose }: { agent: Agent; onClose: (
   const [showPrompt, setShowPrompt] = useState(false);
 
   useEffect(() => {
-    fetch(`/api/agents/${agent.id}/memory`)
+    fetch(`${API_BASE}/agents/${agent.id}/memory`)
       .then((r) => r.json())
       .then((d) => setMemory(d.content ?? ""))
       .catch(() => setMemory(""));
@@ -18,7 +19,7 @@ export function AgentProfileModal({ agent, onClose }: { agent: Agent; onClose: (
 
   async function clearMemory() {
     if (!confirm(`确认清空 ${agent.name} 的长期记忆？此操作不可恢复。`)) return;
-    await fetch(`/api/agents/${agent.id}/memory`, { method: "DELETE" });
+    await fetch(`${API_BASE}/agents/${agent.id}/memory`, { method: "DELETE" });
     setMemory("");
   }
 

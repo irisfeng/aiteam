@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useWorkspace } from "../store";
 import type { Doc, Task } from "../types";
-import { api } from "../api";
+import { api, API_BASE } from "../api";
 import { DocViewerModal } from "./DocsView";
 
 const COLUMNS: { key: Task["status"]; label: string }[] = [
@@ -79,7 +79,7 @@ function TaskCard({ task, onOpenDoc }: { task: Task; onOpenDoc: (doc: Doc) => vo
         <span className="ml-auto flex gap-0.5">
           {task.status === "doing" && (
             <button
-              onClick={() => void fetch(`/api/tasks/${task.id}/stop`, { method: "POST" })}
+              onClick={() => void fetch(`${API_BASE}/tasks/${task.id}/stop`, { method: "POST" })}
               className="rounded px-1 text-ink-3 hover:bg-sel hover:text-red-500"
               title="停止：运行中的工作在下一个步骤边界停下，任务退回待办"
             >

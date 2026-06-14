@@ -1,7 +1,8 @@
 import type { Agent, Approval, Channel, Doc, Message, Project, Provider, Task } from "./types";
 
-// 统一入口下 AiTeam 挂在 /aiteam/，BASE_URL 即 "/aiteam/"
-const API_BASE = `${import.meta.env.BASE_URL}api`;
+// 统一入口下 AiTeam 挂在 /aiteam/，BASE_URL 即 "/aiteam/"。
+// 导出供少数绕过 req() 直接 fetch 的组件（MCP/技能/用量/团队等）复用，确保都带 /aiteam 前缀。
+export const API_BASE = `${import.meta.env.BASE_URL}api`;
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {

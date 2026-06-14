@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { API_BASE } from "../api";
 
 interface DailyRow {
   date: string;
@@ -28,7 +29,7 @@ export function UsageView() {
   const [recent, setRecent] = useState<RecentRow[]>([]);
 
   useEffect(() => {
-    fetch("/api/usage")
+    fetch(`${API_BASE}/usage`)
       .then((r) => r.json())
       .then((d) => {
         setDaily(d.daily ?? []);

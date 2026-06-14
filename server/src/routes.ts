@@ -205,7 +205,9 @@ api.post("/mcp-servers/:id/toggle", requireAdmin, (req, res) => {
   res.json(sanitizeMcpServer(server));
 });
 
-api.post("/mcp-servers/:id/test", (req, res) => {
+api.post("/mcp-servers/:id/test", requireAdmin, (req, res) => {
+  // 必须 requireAdmin：test 会真实拉起 stdio 子进程（StdioClientTransport），
+  // 与 create/toggle/delete 同级别风险，不能只 requireUser 让普通成员触发子进程派生。
   const server = getMcpServer(req.params.id);
   if (!server) return res.status(404).json({ error: "not found" });
   testMcpServer(server)

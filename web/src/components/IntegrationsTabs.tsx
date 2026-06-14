@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { API_BASE } from "../api";
 
 const inputCls =
   "w-full rounded-lg border border-line bg-panel px-3 py-2 text-[13.5px] outline-none focus:border-accent/50";
@@ -29,7 +30,7 @@ export function McpTab() {
   const [testResult, setTestResult] = useState<Record<string, string>>({});
 
   const load = () =>
-    fetch("/api/mcp-servers")
+    fetch(`${API_BASE}/mcp-servers`)
       .then((r) => r.json())
       .then(setServers)
       .catch(() => undefined);
@@ -42,7 +43,7 @@ export function McpTab() {
     setBusy(true);
     setError("");
     try {
-      const res = await fetch("/api/mcp-servers", {
+      const res = await fetch(`${API_BASE}/mcp-servers`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -65,7 +66,7 @@ export function McpTab() {
   }
 
   async function toggle(s: McpServerInfo) {
-    await fetch(`/api/mcp-servers/${s.id}/toggle`, {
+    await fetch(`${API_BASE}/mcp-servers/${s.id}/toggle`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ enabled: !s.enabled }),
@@ -75,13 +76,13 @@ export function McpTab() {
 
   async function test(s: McpServerInfo) {
     setTestResult((r) => ({ ...r, [s.id]: "测试中…" }));
-    const res = await fetch(`/api/mcp-servers/${s.id}/test`, { method: "POST" });
+    const res = await fetch(`${API_BASE}/mcp-servers/${s.id}/test`, { method: "POST" });
     const body = await res.json().catch(() => ({}));
     setTestResult((r) => ({ ...r, [s.id]: res.ok ? `✓ ${body.tools} 个工具` : `✗ ${body.error ?? "失败"}` }));
   }
 
   async function remove(id: string) {
-    await fetch(`/api/mcp-servers/${id}`, { method: "DELETE" });
+    await fetch(`${API_BASE}/mcp-servers/${id}`, { method: "DELETE" });
     await load();
   }
 
@@ -181,7 +182,7 @@ export function SkillsTab() {
   const [content, setContent] = useState("");
 
   const load = () =>
-    fetch("/api/skills")
+    fetch(`${API_BASE}/skills`)
       .then((r) => r.json())
       .then(setSkills)
       .catch(() => undefined);
@@ -190,7 +191,7 @@ export function SkillsTab() {
   }, []);
 
   async function toggle(s: SkillInfo) {
-    await fetch(`/api/skills/${s.id}`, {
+    await fetch(`${API_BASE}/skills/${s.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ enabled: !s.enabled }),
@@ -200,7 +201,7 @@ export function SkillsTab() {
 
   async function create() {
     if (!name.trim() || !content.trim()) return;
-    await fetch("/api/skills", {
+    await fetch(`${API_BASE}/skills`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: name.trim(), desc: desc.trim(), content: content.trim() }),
@@ -210,7 +211,7 @@ export function SkillsTab() {
   }
 
   async function remove(id: string) {
-    await fetch(`/api/skills/${id}`, { method: "DELETE" });
+    await fetch(`${API_BASE}/skills/${id}`, { method: "DELETE" });
     await load();
   }
 

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useWorkspace } from "../store";
+import { API_BASE } from "../api";
 import { AgentAvatar } from "./Avatar";
 
 function ThemeToggle() {
@@ -71,7 +72,7 @@ function TodayUsage() {
   useEffect(() => {
     let alive = true;
     const load = () =>
-      fetch("/api/team")
+      fetch(`${API_BASE}/team`)
         .then((r) => r.json())
         .then((d) => {
           if (!alive) return;

@@ -51,7 +51,6 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_messages_owner ON messages(owner_id, created_at);
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
   owner_id TEXT NOT NULL DEFAULT '',
@@ -154,6 +153,8 @@ function addColumnIfMissing(table: string, column: string, ddl: string) {
 for (const t of ["agents", "channels", "messages", "tasks", "approvals", "documents", "routines", "projects"]) {
   addColumnIfMissing(t, "owner_id", "owner_id TEXT NOT NULL DEFAULT ''");
 }
+// owner 索引必须在 owner_id 列补好之后建（旧库 messages 升级前没有该列，建在 schema 块里会报 no such column）
+db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_owner ON messages(owner_id, created_at)`);
 addColumnIfMissing("tasks", "acceptance_criteria", "acceptance_criteria TEXT NOT NULL DEFAULT ''");
 addColumnIfMissing("tasks", "depends_on", "depends_on TEXT NOT NULL DEFAULT '[]'");
 addColumnIfMissing("tasks", "project_id", "project_id TEXT");

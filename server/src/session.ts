@@ -7,12 +7,21 @@ import { SignJWT, jwtVerify } from "jose";
 export const SESSION_COOKIE = "aiteam_session";
 const SESSION_TTL = "30d";
 
+// 生产环境必须显式配置密钥：缺省静默回退到这个公开弱密钥会让任何人伪造任意用户的 JWT。
+// 故在生产下直接 fail-fast 拒启（而非 warn 后照常用弱密钥）；开发/测试仍可用回退值。
+const DEV_FALLBACK_SECRET = "aiteam-dev-secret-change-me";
+const SECRET_ENV = process.env.AITEAM_SESSION_SECRET;
+if (!SECRET_ENV && process.env.NODE_ENV === "production") {
+  console.error(
+    "[aiteam] 致命：生产环境（NODE_ENV=production）未设置 AITEAM_SESSION_SECRET，拒绝以公开弱密钥启动。\n" +
+      "         请生成强密钥后重启：openssl rand -base64 48"
+  );
+  process.exit(1);
+}
+const SECRET_BYTES = new TextEncoder().encode(SECRET_ENV || DEV_FALLBACK_SECRET);
+
 function secret(): Uint8Array {
-  const s = process.env.AITEAM_SESSION_SECRET;
-  if (!s && process.env.NODE_ENV === "production") {
-    console.warn("[aiteam] 未设置 AITEAM_SESSION_SECRET，会话密钥不安全——生产环境务必配置");
-  }
-  return new TextEncoder().encode(s || "aiteam-dev-secret-change-me");
+  return SECRET_BYTES;
 }
 
 export async function signSession(userId: string): Promise<string> {

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useWorkspace } from "../store";
+import { API_BASE } from "../api";
 import { AgentAvatar } from "./Avatar";
 
 interface Member {
@@ -26,7 +27,7 @@ export function TeamView({ onOpenProfile }: { onOpenProfile: (a: import("../type
   useEffect(() => {
     let alive = true;
     const load = () =>
-      fetch("/api/team")
+      fetch(`${API_BASE}/team`)
         .then((r) => r.json())
         .then((d) => {
           if (!alive) return;
@@ -43,7 +44,7 @@ export function TeamView({ onOpenProfile }: { onOpenProfile: (a: import("../type
   }, []);
 
   async function removeRoutine(id: string) {
-    await fetch(`/api/routines/${id}`, { method: "DELETE" });
+    await fetch(`${API_BASE}/routines/${id}`, { method: "DELETE" });
     setRoutines((rs) => rs.filter((r) => r.id !== id));
   }
 
