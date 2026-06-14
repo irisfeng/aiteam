@@ -6,7 +6,7 @@
  * 用法：npm run build && node scripts/regression.mjs
  */
 import { spawn, execSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -426,6 +426,26 @@ try {
       const echo = await callMcpTool("mcp__everything__echo", { message: "回归" });
       await J(`/mcp-servers/${s.id}`, { method: "DELETE" });
       check("G1", "MCP 真连接：注册→列工具→真实调用回包", test.ok && test.body.tools > 0 && echo.includes("回归"),
+        `tools=${test.body.tools}`);
+    }
+  }
+
+  // MD1 markitdown 能力端到端（P1·B；未安装 markitdown-mcp 则跳过）。冷启动较慢，故超时给足。
+  {
+    let hasBin = false;
+    try { execSync("command -v markitdown-mcp", { stdio: "ignore" }); hasBin = true; } catch { /* not installed */ }
+    if (!hasBin) {
+      check("MD1", "markitdown 文档解析端到端", "SKIP", "未安装 markitdown-mcp（uv tool install markitdown-mcp）");
+    } else {
+      const { callMcpTool } = await import(join(root, "server/dist/agents/mcp.js"));
+      const s = (await J("/mcp-servers", { method: "POST", body: JSON.stringify({ name: "markitdown", kind: "stdio", command: "markitdown-mcp", args: "", safety: "local" }) })).body;
+      const test = await J(`/mcp-servers/${s.id}/test`, { method: "POST" });
+      const sample = join(testDataDir, "md1-sample.html");
+      writeFileSync(sample, "<html><body><h1>季度报告</h1><p>营收 <b>1200万</b></p></body></html>");
+      const out = await callMcpTool("mcp__markitdown__convert_to_markdown", { uri: "file://" + sample });
+      await J(`/mcp-servers/${s.id}`, { method: "DELETE" });
+      check("MD1", "markitdown 端到端：注册→列工具→convert_to_markdown 转出 Markdown",
+        test.ok && test.body.tools > 0 && out.includes("# 季度报告") && out.includes("**1200万**"),
         `tools=${test.body.tools}`);
     }
   }

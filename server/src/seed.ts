@@ -230,7 +230,7 @@ export const BUILTIN_SKILLS: BuiltinSkill[] = [
     trigger: "解析,提取,读取文档,pdf,docx,pptx,xlsx,附件,转markdown",
     when_to_use: "用户给出 PDF/Word/PPT/Excel/图片等文件、需要提取其内容时",
     resources_json: JSON.stringify(["mcp__markitdown__*"]),
-    body: "当需要从 PDF/docx/pptx/xlsx/图片提取内容时：1) 调用 mcp__markitdown__* 把文件转成 Markdown，再据此分析/改写/汇总；2) 若该 MCP 未就绪（索引标『依赖未就绪』），降级为请用户直接粘贴文本，不要假装读到了内容。markitdown 为纯本地 stdio、大陆可达、零外网。",
+    body: "当需要从 PDF/docx/pptx/xlsx/图片提取内容时：1) 调用 `mcp__markitdown__convert_to_markdown`，参数 `uri` 传文件地址（本地文件用 `file:///绝对路径`，网络用 http(s) URL），返回 Markdown 后再据此分析/改写/汇总；2) 若该 MCP 未就绪（索引标『依赖未就绪』），降级为请用户直接粘贴文本，不要假装读到了内容。markitdown 为纯本地 stdio、大陆可达、零外网；首次连接冷启动较慢（约 20-30s，已在超时内），后续走缓存连接。",
   },
   {
     name: "可编辑 PPTX 能力", kind: "capability", version: V,
