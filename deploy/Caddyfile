@@ -1,0 +1,28 @@
+# 统一入口反向代理（单云主机）：一个域名，路径区分两个空间。
+# Caddy 自动处理 /aiteam/ws 的 WebSocket upgrade，无需额外配置。
+#
+# 用法：把 your-domain.com 换成真实域名（自动签发 HTTPS）；本地开发可用 :80 段。
+
+your-domain.com {
+	encode zstd gzip
+
+	# AiTeam 空间：前端 + /aiteam/api + /aiteam/ws + /aiteam/assets 全部前缀路由到 Express 进程
+	handle /aiteam/* {
+		reverse_proxy localhost:8787
+	}
+
+	# 其余一切归 Coworker（Next.js）
+	handle {
+		reverse_proxy localhost:3000
+	}
+}
+
+# 本地开发（无证书）：caddy run --config deploy/Caddyfile，访问 http://localhost
+:80 {
+	handle /aiteam/* {
+		reverse_proxy localhost:8787
+	}
+	handle {
+		reverse_proxy localhost:3000
+	}
+}

@@ -11,6 +11,7 @@ import { TeamView } from "./components/TeamView";
 import { UsageView } from "./components/UsageView";
 import { ChannelSettingsModal, NewAgentModal, NewChannelModal, SettingsModal } from "./components/Modals";
 import { MockBanner, WelcomeOverlay } from "./components/Onboarding";
+import { LoginView } from "./components/LoginView";
 
 export default function App() {
   const ws = useWorkspace();
@@ -18,6 +19,7 @@ export default function App() {
   const [configChannel, setConfigChannel] = useState<Channel | null>(null);
   const [profileAgent, setProfileAgent] = useState<Agent | null>(null);
 
+  if (ws.authed === false) return <LoginView />;
   if (!ws.ready) {
     return <div className="flex h-full items-center justify-center text-ink-3">加载中…</div>;
   }

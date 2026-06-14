@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { nanoid } from "nanoid";
+import { currentOwner } from "./ownerScope.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // AITEAM_DATA_DIR：测试/多实例可指向隔离目录；不设则用默认 server/data
@@ -15,15 +16,18 @@ db.pragma("journal_mode = WAL");
 db.exec(`
 CREATE TABLE IF NOT EXISTS agents (
   id TEXT PRIMARY KEY,
-  name TEXT NOT NULL UNIQUE,
+  owner_id TEXT NOT NULL DEFAULT '',
+  name TEXT NOT NULL,
   emoji TEXT NOT NULL DEFAULT '🤖',
   role TEXT NOT NULL DEFAULT '',
   system_prompt TEXT NOT NULL,
   model TEXT NOT NULL DEFAULT 'claude-opus-4-8',
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  UNIQUE(owner_id, name)
 );
 CREATE TABLE IF NOT EXISTS channels (
   id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL DEFAULT '',
   name TEXT NOT NULL,
   kind TEXT NOT NULL DEFAULT 'channel',
   dm_agent_id TEXT,
@@ -36,6 +40,7 @@ CREATE TABLE IF NOT EXISTS channel_agents (
 );
 CREATE TABLE IF NOT EXISTS messages (
   id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL DEFAULT '',
   channel_id TEXT NOT NULL,
   author_type TEXT NOT NULL,
   author_id TEXT,
@@ -46,8 +51,10 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_owner ON messages(owner_id, created_at);
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL DEFAULT '',
   channel_id TEXT,
   title TEXT NOT NULL,
   description TEXT NOT NULL DEFAULT '',
@@ -59,6 +66,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 CREATE TABLE IF NOT EXISTS approvals (
   id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL DEFAULT '',
   channel_id TEXT,
   agent_id TEXT NOT NULL,
   title TEXT NOT NULL,
@@ -74,6 +82,7 @@ CREATE TABLE IF NOT EXISTS agent_memory (
 );
 CREATE TABLE IF NOT EXISTS documents (
   id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL DEFAULT '',
   channel_id TEXT,
   task_id TEXT,
   agent_id TEXT,
@@ -114,6 +123,7 @@ CREATE TABLE IF NOT EXISTS skills (
 );
 CREATE TABLE IF NOT EXISTS routines (
   id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL DEFAULT '',
   channel_id TEXT NOT NULL,
   agent_id TEXT NOT NULL,
   time TEXT NOT NULL,
@@ -123,6 +133,7 @@ CREATE TABLE IF NOT EXISTS routines (
 );
 CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL DEFAULT '',
   channel_id TEXT,
   lead_agent_id TEXT,
   title TEXT NOT NULL,
@@ -139,6 +150,10 @@ function addColumnIfMissing(table: string, column: string, ddl: string) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
   if (!cols.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
 }
+// owner_id：每用户工作区隔离（旧库无此列则补上，归到空 owner 桶，需要时迁移）
+for (const t of ["agents", "channels", "messages", "tasks", "approvals", "documents", "routines", "projects"]) {
+  addColumnIfMissing(t, "owner_id", "owner_id TEXT NOT NULL DEFAULT ''");
+}
 addColumnIfMissing("tasks", "acceptance_criteria", "acceptance_criteria TEXT NOT NULL DEFAULT ''");
 addColumnIfMissing("tasks", "depends_on", "depends_on TEXT NOT NULL DEFAULT '[]'");
 addColumnIfMissing("tasks", "project_id", "project_id TEXT");
@@ -154,16 +169,52 @@ addColumnIfMissing("messages", "reply_to", "reply_to TEXT");
 addColumnIfMissing("providers", "light_model", "light_model TEXT NOT NULL DEFAULT ''");
 addColumnIfMissing("tasks", "model_tier", "model_tier TEXT NOT NULL DEFAULT 'standard'");
 addColumnIfMissing("providers", "is_strong", "is_strong INTEGER NOT NULL DEFAULT 0");
+// 旧库迁移：早期 agents 是全局 UNIQUE(name)；多用户化后应为 UNIQUE(owner_id,name)。
+// CREATE TABLE IF NOT EXISTS 不会替换已存在表的约束 → 重建表，否则新用户 seed 撞全局唯一名导致 bootstrap 崩。
+(function migrateAgentsUnique() {
+  const idx = db.prepare("PRAGMA index_list(agents)").all() as { name: string; unique: number }[];
+  let hasNameOnly = false;
+  let hasOwnerName = false;
+  for (const i of idx) {
+    if (!i.unique) continue;
+    const cols = (db.prepare(`PRAGMA index_info("${i.name}")`).all() as { name: string }[]).map((c) => c.name);
+    if (cols.length === 1 && cols[0] === "name") hasNameOnly = true;
+    if (cols.length === 2 && cols.includes("owner_id") && cols.includes("name")) hasOwnerName = true;
+  }
+  if (!hasNameOnly || hasOwnerName) return; // 新库或已迁移
+  db.transaction(() => {
+    db.exec(`CREATE TABLE agents_new (
+      id TEXT PRIMARY KEY, owner_id TEXT NOT NULL DEFAULT '', name TEXT NOT NULL,
+      emoji TEXT NOT NULL DEFAULT '🤖', role TEXT NOT NULL DEFAULT '',
+      system_prompt TEXT NOT NULL, model TEXT NOT NULL DEFAULT 'claude-opus-4-8',
+      provider_id TEXT, created_at INTEGER NOT NULL, UNIQUE(owner_id, name)
+    )`);
+    db.exec(`INSERT INTO agents_new (id, owner_id, name, emoji, role, system_prompt, model, provider_id, created_at)
+             SELECT id, owner_id, name, emoji, role, system_prompt, model, provider_id, created_at FROM agents`);
+    db.exec(`DROP TABLE agents`);
+    db.exec(`ALTER TABLE agents_new RENAME TO agents`);
+  })();
+})();
 // 文档版本归并：version=第几版（1 起）；superseded_by=被哪条新版取代（NULL=当前版）。
 // 返工再写同 (task_id,kind) 不再并列堆叠——旧版自动标 superseded，列表默认只显当前版。
 addColumnIfMissing("documents", "version", "version INTEGER NOT NULL DEFAULT 1");
 addColumnIfMissing("documents", "superseded_by", "superseded_by TEXT");
 db.exec(`CREATE INDEX IF NOT EXISTS idx_documents_task_kind ON documents(task_id, kind, superseded_by)`);
 db.exec(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '')`);
+// 用户表（standalone 多用户登录）：全局表，不带 owner_id（owner = user:<id> 由此派生）
+db.exec(`CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY,
+  email TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  display_name TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL DEFAULT 'member',
+  created_at INTEGER NOT NULL
+)`);
 backfillDocVersions(); // 一次性把存量重复版本按 (task_id,kind) 链成版本（幂等，仅处理多当前版的组）
 
 export interface Agent {
   id: string;
+  owner_id: string;
   name: string;
   emoji: string;
   role: string;
@@ -193,6 +244,7 @@ export interface Provider {
 }
 export interface Channel {
   id: string;
+  owner_id: string;
   name: string;
   kind: "channel" | "dm";
   dm_agent_id: string | null;
@@ -201,6 +253,7 @@ export interface Channel {
 }
 export interface Message {
   id: string;
+  owner_id: string;
   channel_id: string;
   author_type: "user" | "agent" | "system";
   author_id: string | null;
@@ -236,6 +289,7 @@ export interface Skill {
 }
 export interface Task {
   id: string;
+  owner_id: string;
   channel_id: string | null;
   title: string;
   description: string;
@@ -254,6 +308,7 @@ export interface Task {
 }
 export interface Project {
   id: string;
+  owner_id: string;
   channel_id: string | null;
   lead_agent_id: string | null;
   title: string;
@@ -268,6 +323,7 @@ export interface Project {
 }
 export interface Approval {
   id: string;
+  owner_id: string;
   channel_id: string | null;
   agent_id: string;
   title: string;
@@ -283,12 +339,12 @@ export interface Approval {
 
 const now = () => Date.now();
 
-// ---- agents ----
+// ---- agents（每用户私有）----
 export function listAgents(): Agent[] {
-  return db.prepare("SELECT * FROM agents ORDER BY created_at, rowid").all() as Agent[];
+  return db.prepare("SELECT * FROM agents WHERE owner_id = ? ORDER BY created_at, rowid").all(currentOwner()) as Agent[];
 }
 export function getAgent(id: string): Agent | undefined {
-  return db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as Agent | undefined;
+  return db.prepare("SELECT * FROM agents WHERE id = ? AND owner_id = ?").get(id, currentOwner()) as Agent | undefined;
 }
 export function createAgent(a: {
   name: string;
@@ -300,6 +356,7 @@ export function createAgent(a: {
 }): Agent {
   const agent: Agent = {
     id: nanoid(10),
+    owner_id: currentOwner(),
     name: a.name,
     emoji: a.emoji,
     role: a.role,
@@ -309,12 +366,12 @@ export function createAgent(a: {
     created_at: now(),
   };
   db.prepare(
-    "INSERT INTO agents (id, name, emoji, role, system_prompt, model, provider_id, created_at) VALUES (@id, @name, @emoji, @role, @system_prompt, @model, @provider_id, @created_at)"
+    "INSERT INTO agents (id, owner_id, name, emoji, role, system_prompt, model, provider_id, created_at) VALUES (@id, @owner_id, @name, @emoji, @role, @system_prompt, @model, @provider_id, @created_at)"
   ).run(agent);
   return agent;
 }
 
-// ---- providers（模型供应商 / BYOM）----
+// ---- providers（模型供应商 / BYOM）—— 全局共享（管理员配一套 key，所有用户共用）----
 export function listProviders(): Provider[] {
   return db.prepare("SELECT * FROM providers ORDER BY created_at").all() as Provider[];
 }
@@ -388,7 +445,7 @@ export function sanitizeProvider(p: Provider) {
   };
 }
 
-// ---- app settings（服务端键值配置）与图像生成供应商 ----
+// ---- app settings（服务端键值配置）与图像生成供应商 —— 全局共享 ----
 export function getSetting(key: string): string {
   const row = db.prepare("SELECT value FROM app_settings WHERE key = ?").get(key) as { value: string } | undefined;
   return row?.value ?? "";
@@ -433,21 +490,22 @@ export function sanitizeImageProvider(p: ImageProvider) {
   return { base_url: p.base_url, model: p.model, has_key: Boolean(p.api_key) };
 }
 
-// ---- channels ----
+// ---- channels（每用户私有）----
 export function listChannels(): Channel[] {
-  const channels = db.prepare("SELECT * FROM channels ORDER BY created_at, rowid").all() as Channel[];
+  const owner = currentOwner();
+  const channels = db.prepare("SELECT * FROM channels WHERE owner_id = ? ORDER BY created_at, rowid").all(owner) as Channel[];
   const members = db
     .prepare(
-      "SELECT ca.channel_id, ca.agent_id FROM channel_agents ca JOIN agents a ON a.id = ca.agent_id ORDER BY a.created_at, a.rowid"
+      "SELECT ca.channel_id, ca.agent_id FROM channel_agents ca JOIN channels c ON c.id = ca.channel_id JOIN agents a ON a.id = ca.agent_id WHERE c.owner_id = ? ORDER BY a.created_at, a.rowid"
     )
-    .all() as { channel_id: string; agent_id: string }[];
+    .all(owner) as { channel_id: string; agent_id: string }[];
   for (const c of channels) {
     c.agent_ids = members.filter((m) => m.channel_id === c.id).map((m) => m.agent_id);
   }
   return channels;
 }
 export function getChannel(id: string): Channel | undefined {
-  const c = db.prepare("SELECT * FROM channels WHERE id = ?").get(id) as Channel | undefined;
+  const c = db.prepare("SELECT * FROM channels WHERE id = ? AND owner_id = ?").get(id, currentOwner()) as Channel | undefined;
   if (c) {
     c.agent_ids = (
       db
@@ -460,9 +518,9 @@ export function getChannel(id: string): Channel | undefined {
   return c;
 }
 export function createChannel(name: string, agentIds: string[], kind: "channel" | "dm" = "channel", dmAgentId?: string): Channel {
-  const channel: Channel = { id: nanoid(10), name, kind, dm_agent_id: dmAgentId ?? null, created_at: now() };
-  db.prepare("INSERT INTO channels (id, name, kind, dm_agent_id, created_at) VALUES (?, ?, ?, ?, ?)").run(
-    channel.id, channel.name, channel.kind, channel.dm_agent_id, channel.created_at
+  const channel: Channel = { id: nanoid(10), owner_id: currentOwner(), name, kind, dm_agent_id: dmAgentId ?? null, created_at: now() };
+  db.prepare("INSERT INTO channels (id, owner_id, name, kind, dm_agent_id, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(
+    channel.id, channel.owner_id, channel.name, channel.kind, channel.dm_agent_id, channel.created_at
   );
   const ins = db.prepare("INSERT OR IGNORE INTO channel_agents (channel_id, agent_id) VALUES (?, ?)");
   for (const id of agentIds) ins.run(channel.id, id);
@@ -470,18 +528,18 @@ export function createChannel(name: string, agentIds: string[], kind: "channel" 
   return channel;
 }
 export function findDm(agentId: string): Channel | undefined {
-  const c = db.prepare("SELECT * FROM channels WHERE kind = 'dm' AND dm_agent_id = ?").get(agentId) as
+  const c = db.prepare("SELECT * FROM channels WHERE kind = 'dm' AND dm_agent_id = ? AND owner_id = ?").get(agentId, currentOwner()) as
     | Channel
     | undefined;
   if (c) c.agent_ids = [agentId];
   return c;
 }
 
-// ---- messages ----
+// ---- messages（每用户私有）----
 export function listMessages(channelId: string, limit = 200): Message[] {
   return db
-    .prepare("SELECT * FROM messages WHERE channel_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?")
-    .all(channelId, limit)
+    .prepare("SELECT * FROM messages WHERE channel_id = ? AND owner_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?")
+    .all(channelId, currentOwner(), limit)
     .reverse() as Message[];
 }
 export function insertMessage(m: {
@@ -495,6 +553,7 @@ export function insertMessage(m: {
 }): Message {
   const msg: Message = {
     id: nanoid(12),
+    owner_id: currentOwner(),
     channel_id: m.channel_id,
     author_type: m.author_type,
     author_id: m.author_id ?? null,
@@ -507,15 +566,15 @@ export function insertMessage(m: {
     created_at: now(),
   };
   db.prepare(
-    "INSERT INTO messages (id, channel_id, author_type, author_id, content, status, reply_depth, usage_json, model, reply_to, created_at) VALUES (@id, @channel_id, @author_type, @author_id, @content, @status, @reply_depth, @usage_json, @model, @reply_to, @created_at)"
+    "INSERT INTO messages (id, owner_id, channel_id, author_type, author_id, content, status, reply_depth, usage_json, model, reply_to, created_at) VALUES (@id, @owner_id, @channel_id, @author_type, @author_id, @content, @status, @reply_depth, @usage_json, @model, @reply_to, @created_at)"
   ).run(msg);
   return msg;
 }
 export function getMessage(id: string): Message | undefined {
-  return db.prepare("SELECT * FROM messages WHERE id = ?").get(id) as Message | undefined;
+  return db.prepare("SELECT * FROM messages WHERE id = ? AND owner_id = ?").get(id, currentOwner()) as Message | undefined;
 }
 
-// ---- MCP servers ----
+// ---- MCP servers —— 全局共享 ----
 export function listMcpServers(): McpServer[] {
   return db.prepare("SELECT * FROM mcp_servers ORDER BY created_at").all() as McpServer[];
 }
@@ -567,7 +626,7 @@ export function sanitizeMcpServer(s: McpServer) {
   };
 }
 
-// ---- skills（技能：横切的工作方法，可注入任意同事）----
+// ---- skills（技能：横切的工作方法）—— 全局共享（内置 + 管理员自定义，启用后注入所有同事）----
 export function listSkills(): Skill[] {
   return db.prepare("SELECT * FROM skills ORDER BY builtin DESC, created_at").all() as Skill[];
 }
@@ -606,7 +665,7 @@ export function updateMessage(
   id: string,
   fields: { content?: string; status?: Message["status"]; usage_json?: string | null; model?: string }
 ) {
-  const cur = db.prepare("SELECT * FROM messages WHERE id = ?").get(id) as Message | undefined;
+  const cur = db.prepare("SELECT * FROM messages WHERE id = ? AND owner_id = ?").get(id, currentOwner()) as Message | undefined;
   if (!cur) return;
   db.prepare("UPDATE messages SET content = ?, status = ?, usage_json = ?, model = ? WHERE id = ?").run(
     fields.content ?? cur.content,
@@ -617,7 +676,7 @@ export function updateMessage(
   );
 }
 
-// ---- 用量统计（Helio 用量页同构：每日消耗 + 最近活动账本，含模型归因） ----
+// ---- 用量统计（每用户私有：只统计当前 owner；Helio 同构：每日消耗 + 活动账本，含模型归因）----
 // 计费权重：缓存读 ≈ 全价 1/10，缓存写 ≈ 1.25 倍（贴近 Anthropic 计费）。预算护栏据此估真实成本。
 const CACHE_READ_WEIGHT = 0.1;
 const CACHE_CREATE_WEIGHT = 1.25;
@@ -648,8 +707,8 @@ export function readUsage(json: string | null): {
 export function usageDaily(days = 14): { date: string; input: number; output: number }[] {
   const since = Date.now() - days * 86400_000;
   const rows = db
-    .prepare("SELECT created_at, usage_json FROM messages WHERE author_type = 'agent' AND usage_json IS NOT NULL AND created_at >= ?")
-    .all(since) as { created_at: number; usage_json: string }[];
+    .prepare("SELECT created_at, usage_json FROM messages WHERE owner_id = ? AND author_type = 'agent' AND usage_json IS NOT NULL AND created_at >= ?")
+    .all(currentOwner(), since) as { created_at: number; usage_json: string }[];
   const byDay = new Map<string, { input: number; output: number }>();
   for (const r of rows) {
     const date = new Date(r.created_at).toLocaleDateString("sv-SE", { timeZone: "Asia/Shanghai" });
@@ -669,13 +728,15 @@ export function usageDaily(days = 14): { date: string; input: number; output: nu
 export function usageRecent(limit = 40) {
   return db
     .prepare(
-      "SELECT id, channel_id, author_id, model, usage_json, created_at, substr(content, 1, 80) AS snippet FROM messages WHERE author_type = 'agent' AND usage_json IS NOT NULL ORDER BY created_at DESC LIMIT ?"
+      "SELECT id, channel_id, author_id, model, usage_json, created_at, substr(content, 1, 80) AS snippet FROM messages WHERE owner_id = ? AND author_type = 'agent' AND usage_json IS NOT NULL ORDER BY created_at DESC LIMIT ?"
     )
-    .all(limit) as { id: string; channel_id: string; author_id: string; model: string; usage_json: string; created_at: number; snippet: string }[];
+    .all(currentOwner(), limit) as { id: string; channel_id: string; author_id: string; model: string; usage_json: string; created_at: number; snippet: string }[];
 }
 
 // ---- 频道管理 ----
 export function renameChannel(id: string, name: string): Channel | undefined {
+  const cur = getChannel(id);
+  if (!cur) return undefined;
   db.prepare("UPDATE channels SET name = ? WHERE id = ?").run(name, id);
   return getChannel(id);
 }
@@ -692,24 +753,26 @@ export function setChannelAgents(id: string, agentIds: string[]): Channel | unde
   return getChannel(id);
 }
 export function clearChannelMessages(id: string) {
-  db.prepare("DELETE FROM messages WHERE channel_id = ?").run(id);
+  db.prepare("DELETE FROM messages WHERE channel_id = ? AND owner_id = ?").run(id, currentOwner());
 }
 export function deleteChannel(id: string) {
-  db.prepare("UPDATE tasks SET channel_id = NULL WHERE channel_id = ?").run(id);
-  db.prepare("DELETE FROM messages WHERE channel_id = ?").run(id);
+  const owner = currentOwner();
+  db.prepare("UPDATE tasks SET channel_id = NULL WHERE channel_id = ? AND owner_id = ?").run(id, owner);
+  db.prepare("DELETE FROM messages WHERE channel_id = ? AND owner_id = ?").run(id, owner);
   db.prepare("DELETE FROM channel_agents WHERE channel_id = ?").run(id);
-  db.prepare("DELETE FROM routines WHERE channel_id = ?").run(id);
-  db.prepare("DELETE FROM channels WHERE id = ?").run(id);
+  db.prepare("DELETE FROM routines WHERE channel_id = ? AND owner_id = ?").run(id, owner);
+  db.prepare("DELETE FROM channels WHERE id = ? AND owner_id = ?").run(id, owner);
 }
 
-// ---- tasks ----
+// ---- tasks（每用户私有）----
 export function listTasks(channelId?: string): Task[] {
+  const owner = currentOwner();
   if (channelId)
-    return db.prepare("SELECT * FROM tasks WHERE channel_id = ? ORDER BY created_at DESC").all(channelId) as Task[];
-  return db.prepare("SELECT * FROM tasks ORDER BY created_at DESC").all() as Task[];
+    return db.prepare("SELECT * FROM tasks WHERE channel_id = ? AND owner_id = ? ORDER BY created_at DESC").all(channelId, owner) as Task[];
+  return db.prepare("SELECT * FROM tasks WHERE owner_id = ? ORDER BY created_at DESC").all(owner) as Task[];
 }
 export function getTask(id: string): Task | undefined {
-  return db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Task | undefined;
+  return db.prepare("SELECT * FROM tasks WHERE id = ? AND owner_id = ?").get(id, currentOwner()) as Task | undefined;
 }
 export function createTask(t: {
   channel_id?: string | null;
@@ -725,6 +788,7 @@ export function createTask(t: {
 }): Task {
   const task: Task = {
     id: nanoid(10),
+    owner_id: currentOwner(),
     channel_id: t.channel_id ?? null,
     title: t.title,
     description: t.description ?? "",
@@ -740,7 +804,7 @@ export function createTask(t: {
     updated_at: now(),
   };
   db.prepare(
-    "INSERT INTO tasks (id, channel_id, title, description, status, assignee_agent_id, created_by, acceptance_criteria, depends_on, model_tier, project_id, revision_count, created_at, updated_at) VALUES (@id, @channel_id, @title, @description, @status, @assignee_agent_id, @created_by, @acceptance_criteria, @depends_on, @model_tier, @project_id, @revision_count, @created_at, @updated_at)"
+    "INSERT INTO tasks (id, owner_id, channel_id, title, description, status, assignee_agent_id, created_by, acceptance_criteria, depends_on, model_tier, project_id, revision_count, created_at, updated_at) VALUES (@id, @owner_id, @channel_id, @title, @description, @status, @assignee_agent_id, @created_by, @acceptance_criteria, @depends_on, @model_tier, @project_id, @revision_count, @created_at, @updated_at)"
   ).run(task);
   return task;
 }
@@ -770,12 +834,12 @@ export function taskDependsOn(task: Task): string[] {
   }
 }
 
-// ---- projects ----
+// ---- projects（每用户私有）----
 export function listProjects(): Project[] {
-  return db.prepare("SELECT * FROM projects ORDER BY created_at DESC").all() as Project[];
+  return db.prepare("SELECT * FROM projects WHERE owner_id = ? ORDER BY created_at DESC").all(currentOwner()) as Project[];
 }
 export function getProject(id: string): Project | undefined {
-  return db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as Project | undefined;
+  return db.prepare("SELECT * FROM projects WHERE id = ? AND owner_id = ?").get(id, currentOwner()) as Project | undefined;
 }
 export function createProject(p: {
   channel_id?: string | null;
@@ -787,6 +851,7 @@ export function createProject(p: {
 }): Project {
   const project: Project = {
     id: nanoid(10),
+    owner_id: currentOwner(),
     channel_id: p.channel_id ?? null,
     lead_agent_id: p.lead_agent_id ?? null,
     title: p.title,
@@ -798,7 +863,7 @@ export function createProject(p: {
     updated_at: now(),
   };
   db.prepare(
-    "INSERT INTO projects (id, channel_id, lead_agent_id, title, goal, status, autonomy, summary_doc_id, created_at, updated_at) VALUES (@id, @channel_id, @lead_agent_id, @title, @goal, @status, @autonomy, @summary_doc_id, @created_at, @updated_at)"
+    "INSERT INTO projects (id, owner_id, channel_id, lead_agent_id, title, goal, status, autonomy, summary_doc_id, created_at, updated_at) VALUES (@id, @owner_id, @channel_id, @lead_agent_id, @title, @goal, @status, @autonomy, @summary_doc_id, @created_at, @updated_at)"
   ).run(project);
   return project;
 }
@@ -822,7 +887,7 @@ export function updateProject(
 export function closeProject(projectId: string): { project: Project | undefined; tasks: Task[] } {
   const project = getProject(projectId);
   if (!project) return { project: undefined, tasks: [] };
-  const open = (db.prepare("SELECT * FROM tasks WHERE project_id = ? AND status != 'done'").all(projectId) as Task[]);
+  const open = (db.prepare("SELECT * FROM tasks WHERE owner_id = ? AND project_id = ? AND status != 'done'").all(currentOwner(), projectId) as Task[]);
   const updated: Task[] = [];
   for (const t of open) {
     const next = updateTask(t.id, { status: "done" });
@@ -832,9 +897,9 @@ export function closeProject(projectId: string): { project: Project | undefined;
   return { project: nextProject, tasks: updated };
 }
 
-// ---- approvals ----
+// ---- approvals（每用户私有）----
 export function listApprovals(): Approval[] {
-  return db.prepare("SELECT * FROM approvals ORDER BY created_at DESC").all() as Approval[];
+  return db.prepare("SELECT * FROM approvals WHERE owner_id = ? ORDER BY created_at DESC").all(currentOwner()) as Approval[];
 }
 export function createApproval(a: {
   channel_id?: string | null;
@@ -846,6 +911,7 @@ export function createApproval(a: {
 }): Approval {
   const approval: Approval = {
     id: nanoid(10),
+    owner_id: currentOwner(),
     channel_id: a.channel_id ?? null,
     agent_id: a.agent_id,
     title: a.title,
@@ -857,21 +923,22 @@ export function createApproval(a: {
     resolved_at: null,
   };
   db.prepare(
-    "INSERT INTO approvals (id, channel_id, agent_id, title, payload, kind, ref_id, status, created_at, resolved_at) VALUES (@id, @channel_id, @agent_id, @title, @payload, @kind, @ref_id, @status, @created_at, @resolved_at)"
+    "INSERT INTO approvals (id, owner_id, channel_id, agent_id, title, payload, kind, ref_id, status, created_at, resolved_at) VALUES (@id, @owner_id, @channel_id, @agent_id, @title, @payload, @kind, @ref_id, @status, @created_at, @resolved_at)"
   ).run(approval);
   return approval;
 }
 export function resolveApproval(id: string, approve: boolean): Approval | undefined {
-  const cur = db.prepare("SELECT * FROM approvals WHERE id = ?").get(id) as Approval | undefined;
+  const cur = db.prepare("SELECT * FROM approvals WHERE id = ? AND owner_id = ?").get(id, currentOwner()) as Approval | undefined;
   if (!cur || cur.status !== "pending") return cur;
   const next: Approval = { ...cur, status: approve ? "approved" : "rejected", resolved_at: now() };
   db.prepare("UPDATE approvals SET status = ?, resolved_at = ? WHERE id = ?").run(next.status, next.resolved_at, id);
   return next;
 }
 
-// ---- documents ----
+// ---- documents（每用户私有）----
 export interface Doc {
   id: string;
+  owner_id: string;
   channel_id: string | null;
   task_id: string | null;
   agent_id: string | null;
@@ -888,14 +955,16 @@ export interface Doc {
 }
 /** 默认只返回当前版（superseded_by IS NULL），把返工产生的旧版从主列表收起。 */
 export function listDocuments(): Doc[] {
-  return db.prepare("SELECT * FROM documents WHERE superseded_by IS NULL ORDER BY created_at DESC").all() as Doc[];
+  return db.prepare("SELECT * FROM documents WHERE owner_id = ? AND superseded_by IS NULL ORDER BY created_at DESC").all(currentOwner()) as Doc[];
 }
-/** 某任务（可指定 kind）的全部历史版本，含已被取代的旧版，按版本号降序，供「查看历史版本」用。 */
+/** 某任务（可指定 kind）的全部历史版本，含已被取代的旧版，按版本号降序，供「查看历史版本」用。
+ *  按 owner 隔离（fail-closed，防跨租户翻版本历史）。 */
 export function listDocumentVersions(taskId: string, kind?: Doc["kind"]): Doc[] {
+  const owner = currentOwner();
   const sql = kind
-    ? "SELECT * FROM documents WHERE task_id = ? AND kind = ? ORDER BY version DESC"
-    : "SELECT * FROM documents WHERE task_id = ? ORDER BY kind, version DESC";
-  return db.prepare(sql).all(...(kind ? [taskId, kind] : [taskId])) as Doc[];
+    ? "SELECT * FROM documents WHERE owner_id = ? AND task_id = ? AND kind = ? ORDER BY version DESC"
+    : "SELECT * FROM documents WHERE owner_id = ? AND task_id = ? ORDER BY kind, version DESC";
+  return db.prepare(sql).all(...(kind ? [owner, taskId, kind] : [owner, taskId])) as Doc[];
 }
 /** 一次性回填：把存量同 (task_id,kind) 的多个「当前版」按时间链成版本（幂等，只处理多当前版的组）。 */
 export function backfillDocVersions(): number {
@@ -920,7 +989,7 @@ export function backfillDocVersions(): number {
   return groups.length;
 }
 export function getDocument(id: string): Doc | undefined {
-  return db.prepare("SELECT * FROM documents WHERE id = ?").get(id) as Doc | undefined;
+  return db.prepare("SELECT * FROM documents WHERE id = ? AND owner_id = ?").get(id, currentOwner()) as Doc | undefined;
 }
 export function createDocument(d: {
   channel_id?: string | null;
@@ -932,14 +1001,15 @@ export function createDocument(d: {
 }): Doc {
   const kind = d.kind ?? "report";
   const taskId = d.task_id ?? null;
-  // 版本感知：带 task_id 时，同 (task_id,kind) 的现存当前版会被本次新版取代（不再并列堆叠）。
+  const owner = currentOwner();
+  // 版本感知：带 task_id 时，同 (owner,task_id,kind) 的现存当前版会被本次新版取代（不再并列堆叠）。
   const insert = db.transaction((): Doc => {
     let version = 1;
     let prevCurrentId: string | null = null;
     if (taskId) {
       const prev = db
-        .prepare("SELECT id, version FROM documents WHERE task_id = ? AND kind = ? AND superseded_by IS NULL ORDER BY version DESC LIMIT 1")
-        .get(taskId, kind) as { id: string; version: number } | undefined;
+        .prepare("SELECT id, version FROM documents WHERE owner_id = ? AND task_id = ? AND kind = ? AND superseded_by IS NULL ORDER BY version DESC LIMIT 1")
+        .get(owner, taskId, kind) as { id: string; version: number } | undefined;
       if (prev) {
         version = prev.version + 1;
         prevCurrentId = prev.id;
@@ -947,6 +1017,7 @@ export function createDocument(d: {
     }
     const doc: Doc = {
       id: nanoid(10),
+      owner_id: owner,
       channel_id: d.channel_id ?? null,
       task_id: taskId,
       agent_id: d.agent_id ?? null,
@@ -959,7 +1030,7 @@ export function createDocument(d: {
       updated_at: now(),
     };
     db.prepare(
-      "INSERT INTO documents (id, channel_id, task_id, agent_id, title, content, kind, version, superseded_by, created_at, updated_at) VALUES (@id, @channel_id, @task_id, @agent_id, @title, @content, @kind, @version, @superseded_by, @created_at, @updated_at)"
+      "INSERT INTO documents (id, owner_id, channel_id, task_id, agent_id, title, content, kind, version, superseded_by, created_at, updated_at) VALUES (@id, @owner_id, @channel_id, @task_id, @agent_id, @title, @content, @kind, @version, @superseded_by, @created_at, @updated_at)"
     ).run(doc);
     if (prevCurrentId) db.prepare("UPDATE documents SET superseded_by = ? WHERE id = ?").run(doc.id, prevCurrentId);
     return doc;
@@ -980,8 +1051,46 @@ export function finalizeStaleStreaming(): number {
   return rows.length;
 }
 
+// ---- users（standalone 多用户登录）----
+export interface User {
+  id: string;
+  email: string;
+  password_hash: string;
+  display_name: string;
+  role: "admin" | "member";
+  created_at: number;
+}
+export function countUsers(): number {
+  return (db.prepare("SELECT COUNT(*) AS n FROM users").get() as { n: number }).n;
+}
+export function getUserByEmail(email: string): User | undefined {
+  return db.prepare("SELECT * FROM users WHERE email = ?").get(email.toLowerCase().trim()) as User | undefined;
+}
+export function getUserById(id: string): User | undefined {
+  return db.prepare("SELECT * FROM users WHERE id = ?").get(id) as User | undefined;
+}
+export function listUsers(): Omit<User, "password_hash">[] {
+  return db.prepare("SELECT id, email, display_name, role, created_at FROM users ORDER BY created_at ASC").all() as Omit<User, "password_hash">[];
+}
+export function createUser(u: { email: string; password_hash: string; display_name: string; role: "admin" | "member" }): User {
+  const user: User = {
+    id: nanoid(12),
+    email: u.email.toLowerCase().trim(),
+    password_hash: u.password_hash,
+    display_name: u.display_name,
+    role: u.role,
+    created_at: now(),
+  };
+  db.prepare("INSERT INTO users (id, email, password_hash, display_name, role, created_at) VALUES (@id, @email, @password_hash, @display_name, @role, @created_at)").run(user);
+  return user;
+}
+export function setUserRole(id: string, role: "admin" | "member"): User | undefined {
+  db.prepare("UPDATE users SET role = ? WHERE id = ?").run(role, id);
+  return getUserById(id);
+}
+
 export function deleteDocument(id: string): void {
-  db.prepare("DELETE FROM documents WHERE id = ?").run(id);
+  db.prepare("DELETE FROM documents WHERE id = ? AND owner_id = ?").run(id, currentOwner());
 }
 export function updateDocument(id: string, fields: { title?: string; content?: string }): Doc | undefined {
   const cur = getDocument(id);
@@ -993,9 +1102,10 @@ export function updateDocument(id: string, fields: { title?: string; content?: s
   return next;
 }
 
-// ---- routines（例行任务）----
+// ---- routines（例行任务，每用户私有）----
 export interface Routine {
   id: string;
+  owner_id: string;
   channel_id: string;
   agent_id: string;
   /** 每日触发时刻 "HH:MM"（Asia/Shanghai） */
@@ -1005,11 +1115,12 @@ export interface Routine {
   created_at: number;
 }
 export function listRoutines(): Routine[] {
-  return db.prepare("SELECT * FROM routines ORDER BY time").all() as Routine[];
+  return db.prepare("SELECT * FROM routines WHERE owner_id = ? ORDER BY time").all(currentOwner()) as Routine[];
 }
 export function createRoutine(r: { channel_id: string; agent_id: string; time: string; instruction: string }): Routine {
   const routine: Routine = {
     id: nanoid(10),
+    owner_id: currentOwner(),
     channel_id: r.channel_id,
     agent_id: r.agent_id,
     time: r.time,
@@ -1018,23 +1129,38 @@ export function createRoutine(r: { channel_id: string; agent_id: string; time: s
     created_at: now(),
   };
   db.prepare(
-    "INSERT INTO routines (id, channel_id, agent_id, time, instruction, last_run_date, created_at) VALUES (@id, @channel_id, @agent_id, @time, @instruction, @last_run_date, @created_at)"
+    "INSERT INTO routines (id, owner_id, channel_id, agent_id, time, instruction, last_run_date, created_at) VALUES (@id, @owner_id, @channel_id, @agent_id, @time, @instruction, @last_run_date, @created_at)"
   ).run(routine);
   return routine;
 }
 export function deleteRoutine(id: string) {
-  db.prepare("DELETE FROM routines WHERE id = ?").run(id);
+  db.prepare("DELETE FROM routines WHERE id = ? AND owner_id = ?").run(id, currentOwner());
 }
 export function markRoutineRun(id: string, date: string) {
-  db.prepare("UPDATE routines SET last_run_date = ? WHERE id = ?").run(date, id);
+  // 防御性 owner 约束：调度器已在 withOwner 上下文内调用，避免任何路径下跨 owner 误更新
+  db.prepare("UPDATE routines SET last_run_date = ? WHERE id = ? AND owner_id = ?").run(date, id, currentOwner());
 }
 
-/** 今日各 Agent 的消息用量（tokens）与交付数，供团队视图使用 */
+// ---------------------------------------------------------------------------
+// 系统级清扫（跨 owner，不受 AsyncLocalStorage 约束）：仅供调度器/重启恢复使用。
+// 调用方拿到行后必须用 withOwner(row.owner_id, ...) 重建上下文再处理。
+// ---------------------------------------------------------------------------
+/** 全部 owner 的"运行中"任务（服务重启恢复用）。 */
+export function listInFlightTasksAllOwners(): Task[] {
+  return db.prepare("SELECT * FROM tasks WHERE status = 'doing' AND assignee_agent_id IS NOT NULL").all() as Task[];
+}
+/** 全部 owner 的例行任务（定时调度用）。 */
+export function listRoutinesAllOwners(): Routine[] {
+  return db.prepare("SELECT * FROM routines").all() as Routine[];
+}
+
+/** 今日各 Agent 的消息用量（tokens）与交付数（当前 owner），供团队视图使用 */
 export function agentDailyStats(sinceTs: number): Map<string, { input: number; output: number; billable: number; delivered: number }> {
+  const owner = currentOwner();
   const stats = new Map<string, { input: number; output: number; billable: number; delivered: number }>();
   const rows = db
-    .prepare("SELECT author_id, usage_json FROM messages WHERE author_type = 'agent' AND created_at >= ?")
-    .all(sinceTs) as { author_id: string; usage_json: string | null }[];
+    .prepare("SELECT author_id, usage_json FROM messages WHERE owner_id = ? AND author_type = 'agent' AND created_at >= ?")
+    .all(owner, sinceTs) as { author_id: string; usage_json: string | null }[];
   for (const r of rows) {
     if (!r.author_id || !r.usage_json) continue;
     const s = stats.get(r.author_id) ?? { input: 0, output: 0, billable: 0, delivered: 0 };
@@ -1046,9 +1172,9 @@ export function agentDailyStats(sinceTs: number): Map<string, { input: number; o
   }
   const delivered = db
     .prepare(
-      "SELECT assignee_agent_id AS id, COUNT(*) AS n FROM tasks WHERE assignee_agent_id IS NOT NULL AND status IN ('review','done') AND updated_at >= ? GROUP BY assignee_agent_id"
+      "SELECT assignee_agent_id AS id, COUNT(*) AS n FROM tasks WHERE owner_id = ? AND assignee_agent_id IS NOT NULL AND status IN ('review','done') AND updated_at >= ? GROUP BY assignee_agent_id"
     )
-    .all(sinceTs) as { id: string; n: number }[];
+    .all(owner, sinceTs) as { id: string; n: number }[];
   for (const d of delivered) {
     const s = stats.get(d.id) ?? { input: 0, output: 0, billable: 0, delivered: 0 };
     s.delivered = d.n;
@@ -1057,7 +1183,7 @@ export function agentDailyStats(sinceTs: number): Map<string, { input: number; o
   return stats;
 }
 
-// ---- memory ----
+// ---- memory（按 agent_id；agent 已是 owner 私有且 id 不可猜，故天然隔离）----
 export function getMemory(agentId: string): string {
   const row = db.prepare("SELECT content FROM agent_memory WHERE agent_id = ?").get(agentId) as
     | { content: string }

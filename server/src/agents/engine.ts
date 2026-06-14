@@ -29,6 +29,8 @@ import {
   listChannels,
   listDocuments,
   listMessages,
+  listInFlightTasksAllOwners,
+  listRoutinesAllOwners,
   listTasks,
   taskDependsOn,
   updateMessage,
@@ -36,6 +38,7 @@ import {
   updateTask,
 } from "../db.js";
 import { broadcast } from "../bus.js";
+import { currentOwner, withOwner } from "../ownerScope.js";
 import { parseSlides } from "../pptx.js";
 import { callMcpTool, isMcpTool, mcpToolDefs } from "./mcp.js";
 import { IMAGE_TOOL, generateImage, imageGenAvailable } from "./images.js";
@@ -373,23 +376,26 @@ export function onTaskAssigned(task: Task) {
     if (task.channel_id) audit(task.channel_id, `⏸️ 并发已满，任务「${task.title}」暂未自动开工`);
     return;
   }
+  // 捕获当前 owner：队列里的 .then 会在另一个请求/运行解析 prev 时才执行，
+  // 届时 AsyncLocalStorage 上下文已丢失，必须用 withOwner 重建，否则 db 查询会 fail-closed 抛错。
+  const ownerId = currentOwner();
   runningTasks.add(task.id);
   queuedCount.set(agent.id, (queuedCount.get(agent.id) ?? 0) + 1);
   const prev = agentQueues.get(agent.id) ?? Promise.resolve();
   const next = prev
-    .then(() => {
+    .then(() => withOwner(ownerId, () => {
       queuedCount.set(agent.id, Math.max(0, (queuedCount.get(agent.id) ?? 1) - 1));
       currentWork.set(agent.id, task.id);
       return runTaskWork(agent, task.id);
-    })
-    .catch((err) => {
+    }))
+    .catch((err) => withOwner(ownerId, () => {
       console.error(`[engine] task work failed:`, err);
       // 失败的任务不能卡在 doing：退回待办，重新指派负责人即可重试
       const t = getTask(task.id);
       if (t && t.status === "doing") setTaskStatus(task.id, "todo");
       if (t?.channel_id)
         audit(t.channel_id, `⚠️ ${agent.name} 处理任务「${task.title}」失败：${err?.message ?? err}。任务已退回待办，重新指派负责人即可重试。`);
-    })
+    }))
     .finally(() => {
       runningTasks.delete(task.id);
       if (currentWork.get(agent.id) === task.id) currentWork.delete(agent.id);
@@ -419,10 +425,12 @@ export function teamStatus() {
 
 /** Durability（借鉴 Microsoft Agent Framework）：服务重启时，恢复上次运行中被打断的任务。 */
 export function recoverInFlightTasks() {
-  const stuck = listTasks().filter((t) => t.status === "doing" && t.assignee_agent_id);
-  for (const task of stuck) {
-    if (task.channel_id) audit(task.channel_id, `🔁 服务重启，恢复执行任务「${task.title}」`);
-    onTaskAssigned(task);
+  // 跨 owner 清扫，再用各自 owner 重建上下文恢复
+  for (const task of listInFlightTasksAllOwners()) {
+    withOwner(task.owner_id, () => {
+      if (task.channel_id) audit(task.channel_id, `🔁 服务重启，恢复执行任务「${task.title}」`);
+      onTaskAssigned(task);
+    });
   }
 }
 
@@ -1176,10 +1184,13 @@ function shanghaiNow(): { hhmm: string; date: string } {
 export function startScheduler() {
   setInterval(() => {
     const { hhmm, date } = shanghaiNow();
-    for (const routine of listRoutines()) {
+    // 跨 owner 清扫，每条到点的例行任务在各自 owner 上下文里执行
+    for (const routine of listRoutinesAllOwners()) {
       if (routine.time !== hhmm || routine.last_run_date === date) continue;
-      markRoutineRun(routine.id, date);
-      void runRoutine(routine).catch((err) => console.error("[engine] routine failed:", err));
+      withOwner(routine.owner_id, () => {
+        markRoutineRun(routine.id, date);
+        void runRoutine(routine).catch((err) => console.error("[engine] routine failed:", err));
+      });
     }
   }, 30_000);
 }

@@ -35,10 +35,10 @@ interface SlidePage {
 }
 
 /** assets/xxx.png → 磁盘路径（仅本地生成图可嵌入 pptx；外链跳过）。
- *  生成工具回传的是 /assets/xxx.png，但 LLM 落进 Markdown 时常把它改写成
- *  assets/xxx.png 或 ./assets/xxx.png（相对路径），这里一并容忍，否则配图嵌不进 pptx。 */
+ *  新前缀为 /aiteam/assets/xxx.png；同时兼容历史 /assets/xxx.png 及 LLM 落进 Markdown
+ *  时常改写成的相对路径 assets/xxx.png、./assets/xxx.png，否则配图嵌不进 pptx。 */
 function localImagePath(src: string): string | null {
-  const m = src.match(/^\.?\/?assets\/([\w.-]+)$/);
+  const m = src.match(/^(?:\/aiteam\/|\.?\/?)assets\/([\w.-]+)$/);
   if (!m) return null;
   const file = join(assetsDir, m[1]);
   return existsSync(file) ? file : null;

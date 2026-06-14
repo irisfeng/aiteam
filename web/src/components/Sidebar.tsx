@@ -215,11 +215,25 @@ export function Sidebar({
 
       <div className="flex items-center gap-2 border-t border-line px-4 py-3 text-[13px] text-ink-2">
         <span className="h-2 w-2 rounded-full bg-green-500" />
-        <span className="flex-1">{ws.user.name}</span>
+        <span className="flex min-w-0 flex-1 items-center gap-1">
+          <span className="truncate">{ws.user.name}</span>
+          {ws.user.role === "admin" && (
+            <span className="shrink-0 rounded bg-accent-soft px-1 text-[10px] text-ink-3" title="管理员">admin</span>
+          )}
+        </span>
         <TodayUsage />
         <ThemeToggle />
-        <button onClick={onSettings} className="rounded px-1 text-ink-3 hover:bg-sel hover:text-ink" title="模型供应商设置">
-          ⚙
+        {ws.user.role === "admin" && (
+          <button onClick={onSettings} className="rounded px-1 text-ink-3 hover:bg-sel hover:text-ink" title="模型供应商设置（仅管理员）">
+            ⚙
+          </button>
+        )}
+        <button
+          onClick={() => void ws.logout()}
+          className="rounded px-1 text-ink-3 hover:bg-sel hover:text-red-500"
+          title="退出登录"
+        >
+          ⏻
         </button>
       </div>
     </aside>

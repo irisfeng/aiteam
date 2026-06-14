@@ -72,11 +72,19 @@ const BUILTIN_SKILLS: { name: string; desc: string; content: string }[] = [
   },
 ];
 
-export function seedIfEmpty() {
+/** 全局内置技能（与 owner 无关，服务启动时播种一次）。 */
+export function seedGlobalSkills() {
   if (listSkills().length === 0) {
     for (const s of BUILTIN_SKILLS) createSkill({ ...s, builtin: true, enabled: false });
   }
-  if (listAgents().length > 0) return;
+}
+
+/**
+ * 为「当前 owner」播种工作区（首次进入时调用，须在 withOwner 上下文内）。
+ * 每个用户拿到自己私有的一支 AI 同事团队与默认频道；agents/channels/messages 自动归属当前 owner。
+ */
+export function seedForOwner() {
+  if (listAgents().length > 0) return; // 当前 owner 已有数据 → 跳过
   const agents = BUILTIN_AGENTS.map((a) => createAgent(a));
   const channel = createChannel("general", agents.map((a) => a.id));
   insertMessage({

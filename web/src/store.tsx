@@ -13,7 +13,10 @@ import type { Agent, AgentStatus, Approval, Channel, Doc, Message, Project, Prov
 
 interface State {
   ready: boolean;
-  user: { id: string; name: string };
+  /** null=鉴权检查中；false=未登录显示登录页；true=已登录 */
+  authed: boolean | null;
+  authInfo: { allow_signup: boolean; needs_setup: boolean };
+  user: { id: string; name: string; role: "admin" | "member" };
   mockMode: boolean;
   agents: Agent[];
   channels: Channel[];
@@ -30,6 +33,7 @@ interface State {
 
 type Action =
   | { type: "bootstrap"; data: Bootstrap }
+  | { type: "auth:set"; authed: boolean; info?: { allow_signup: boolean; needs_setup: boolean } }
   | { type: "view"; view: View }
   | { type: "messages"; channelId: string; messages: Message[] }
   | { type: "message:new"; message: Message }
@@ -50,7 +54,9 @@ type Action =
 
 const initial: State = {
   ready: false,
-  user: { id: "user", name: "我" },
+  authed: null,
+  authInfo: { allow_signup: true, needs_setup: false },
+  user: { id: "user", name: "我", role: "admin" },
   mockMode: false,
   agents: [],
   channels: [],
@@ -80,6 +86,7 @@ function reducer(state: State, action: Action): State {
       return {
         ...state,
         ready: true,
+        authed: true,
         user: d.user,
         mockMode: d.mock_mode,
         agents: d.agents,
@@ -92,6 +99,8 @@ function reducer(state: State, action: Action): State {
         view: firstChannel ? { kind: "channel", id: firstChannel.id } : state.view,
       };
     }
+    case "auth:set":
+      return { ...state, authed: action.authed, ...(action.info ? { authInfo: action.info } : {}) };
     case "view":
       return { ...state, view: action.view };
     case "messages":
@@ -172,6 +181,9 @@ function reducer(state: State, action: Action): State {
 interface Store extends State {
   setView: (v: View) => void;
   openChannel: (id: string) => void;
+  login: (email: string, password: string) => Promise<void>;
+  register: (email: string, password: string, name: string) => Promise<void>;
+  logout: () => Promise<void>;
   send: (channelId: string, content: string, replyTo?: string | null) => Promise<void>;
   openDm: (agentId: string) => Promise<void>;
   createChannel: (name: string, agentIds: string[]) => Promise<void>;
@@ -205,23 +217,37 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initial);
   const loadedChannels = useRef(new Set<string>());
 
-  useEffect(() => {
-    api.bootstrap().then((data) => {
-      dispatch({ type: "bootstrap", data });
-      const first = data.channels.find((c) => c.kind === "channel") ?? data.channels[0];
-      if (first) openChannel(first.id);
-    });
+  const loadWorkspace = useCallback(async () => {
+    const data = await api.bootstrap();
+    dispatch({ type: "bootstrap", data });
+    const first = data.channels.find((c) => c.kind === "channel") ?? data.channels[0];
+    if (first) openChannel(first.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // WebSocket（断线自动重连）
   useEffect(() => {
+    (async () => {
+      const info = await api.authInfo().catch(() => ({ authed: false, allow_signup: true, needs_setup: false }) as const);
+      if (!info.authed) {
+        dispatch({ type: "auth:set", authed: false, info: { allow_signup: info.allow_signup, needs_setup: info.needs_setup } });
+        return;
+      }
+      await loadWorkspace();
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // WebSocket（断线自动重连）。依赖 authed + user.id：未登录不连；
+  // 同一标签页换用户（A 登出→B 登录）时关旧连重连，避免 socket 仍绑在旧 owner 导致实时事件串台。
+  useEffect(() => {
+    if (!state.authed) return;
     let ws: WebSocket | null = null;
     let closed = false;
     let retry = 0;
     const connect = () => {
       const proto = location.protocol === "https:" ? "wss" : "ws";
-      ws = new WebSocket(`${proto}://${location.host}/ws`);
+      // 统一入口下 WS 也挂在 /aiteam/ 前缀（BASE_URL = "/aiteam/"），同源 upgrade 自动带上会话 cookie
+      ws = new WebSocket(`${proto}://${location.host}${import.meta.env.BASE_URL}ws`);
       ws.onopen = () => (retry = 0);
       ws.onmessage = (ev) => {
         const { type, payload } = JSON.parse(ev.data);
@@ -284,7 +310,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       closed = true;
       ws?.close();
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.authed, state.user.id]);
 
   const openChannel = useCallback((id: string) => {
     dispatch({ type: "view", view: { kind: "channel", id } });
@@ -299,6 +326,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       ...state,
       setView: (view) => dispatch({ type: "view", view }),
       openChannel,
+      login: async (email, password) => { await api.login(email, password); await loadWorkspace(); },
+      register: async (email, password, name) => { await api.register(email, password, name); await loadWorkspace(); },
+      logout: async () => { await api.logout(); dispatch({ type: "auth:set", authed: false }); },
       send: async (channelId, content, replyTo) => {
         await api.send(channelId, content, replyTo);
       },
@@ -368,7 +398,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       },
       agentById: (id) => (id ? state.agents.find((a) => a.id === id) : undefined),
     }),
-    [state, openChannel]
+    [state, openChannel, loadWorkspace]
   );
 
   return <Ctx.Provider value={store}>{children}</Ctx.Provider>;
