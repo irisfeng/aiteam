@@ -155,6 +155,21 @@ export function mcpSafetyGate(name: string): McpServer | null {
   return server.safety === "exec" ? server : null;
 }
 
+/**
+ * 从 MCP 工具入参提取"检索查询签名"，用于跨插件去重（同一查询别用多个搜索引擎重复花钱）。
+ * 仅匹配常见的查询字段；非检索类工具（如 markitdown 的 uri、tavily_extract 的 urls）返回 null（不参与去重）。
+ */
+export function searchQuerySignature(input: unknown): string | null {
+  if (!input || typeof input !== "object") return null;
+  const queryKeys = new Set(["query", "search_query", "q", "keyword", "keywords", "question", "search"]);
+  const parts: string[] = [];
+  for (const [k, v] of Object.entries(input as Record<string, unknown>)) {
+    if (queryKeys.has(k.toLowerCase()) && typeof v === "string" && v.trim()) parts.push(v);
+  }
+  if (parts.length === 0) return null;
+  return parts.join(" ").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
 /** 执行 MCP 工具调用，返回文本结果（供 tool_result） */
 export async function callMcpTool(name: string, input: unknown): Promise<string> {
   const m = name.match(/^mcp__(.+?)__(.+)$/);

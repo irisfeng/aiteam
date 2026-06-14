@@ -305,6 +305,19 @@ check(
   check("ENV1", "stdio MCP 环境变量：值入库 + sanitize 只回 key 名不下发值", ok);
 }
 
+// DEDUP1 跨插件检索去重签名：不同搜索插件的 query/search_query 同句 → 同签名（会被去重）；非检索类(uri/urls) → null
+{
+  const { searchQuerySignature: sig } = await import(join(root, "server/dist/agents/mcp.js"));
+  const a = sig({ query: "最新 AI 模型" });                 // bocha/tavily
+  const b = sig({ search_query: "最新  AI 模型 " });         // 智谱(空格/大小写归一)
+  const ok =
+    a !== null && a === b &&                                  // 同句跨插件 → 同签名
+    sig({ uri: "file:///x.pdf" }) === null &&                 // markitdown 非检索 → 不去重
+    sig({ urls: ["http://a"] }) === null &&                   // tavily_extract → 不去重
+    sig({}) === null;
+  check("DEDUP1", "跨插件检索去重：同句不同插件同签名、非检索类不参与", ok, `a=${a}`);
+}
+
 // ---------------------------------------------------------------------------
 // Phase 2：拉起服务，走 HTTP API（聊天/引用/文档/技能/MCP/用量/导出/模板/频道）
 // ---------------------------------------------------------------------------
