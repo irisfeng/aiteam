@@ -292,6 +292,19 @@ check(
   check("TPL1", "内置模板自洽：全部 SKILL_TEMPLATES 通过 html 交付物校验", allValid, `模板数=${SKILL_TEMPLATES.length}`);
 }
 
+// ENV1 stdio MCP 环境变量：值入库（仅服务端），sanitize 只回 key 名、绝不下发值（博查 BOCHA_API_KEY 用例）
+{
+  const s = db.createMcpServer({ name: "envtest", kind: "stdio", command: "true", args: [], env: { BOCHA_API_KEY: "sk-secret-xyz" } });
+  const raw = db.getMcpServer(s.id);
+  const san = db.sanitizeMcpServer(raw);
+  db.deleteMcpServer(s.id);
+  const ok =
+    Array.isArray(san.env_keys) && san.env_keys.includes("BOCHA_API_KEY") &&        // 暴露 key 名
+    san.env_json === undefined && !JSON.stringify(san).includes("sk-secret-xyz") && // 不泄露值
+    JSON.parse(raw.env_json).BOCHA_API_KEY === "sk-secret-xyz";                      // 值确实入库
+  check("ENV1", "stdio MCP 环境变量：值入库 + sanitize 只回 key 名不下发值", ok);
+}
+
 // ---------------------------------------------------------------------------
 // Phase 2：拉起服务，走 HTTP API（聊天/引用/文档/技能/MCP/用量/导出/模板/频道）
 // ---------------------------------------------------------------------------

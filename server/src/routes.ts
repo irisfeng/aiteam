@@ -188,10 +188,18 @@ api.post("/agents", (req, res) => {
 api.get("/mcp-servers", (_req, res) => res.json(listMcpServers().map(sanitizeMcpServer)));
 
 api.post("/mcp-servers", requireAdmin, (req, res) => {
-  const { name, kind, url, auth_token, command, args, safety } = req.body ?? {};
+  const { name, kind, url, auth_token, command, args, safety, env } = req.body ?? {};
   if (!name) return res.status(400).json({ error: "name required" });
   if (kind === "stdio" && !command) return res.status(400).json({ error: "command required for stdio" });
   if (kind !== "stdio" && !url) return res.status(400).json({ error: "url required for http" });
+  // 环境变量（stdio MCP 的密钥，如 BOCHA_API_KEY）：仅收非空字符串键值对
+  const envObj: Record<string, string> = {};
+  if (env && typeof env === "object" && !Array.isArray(env)) {
+    for (const [k, v] of Object.entries(env)) {
+      const key = String(k).trim();
+      if (key && v != null && String(v) !== "") envObj[key] = String(v);
+    }
+  }
   const server = createMcpServer({
     name: String(name).trim(),
     kind: kind === "stdio" ? "stdio" : "http",
@@ -199,8 +207,9 @@ api.post("/mcp-servers", requireAdmin, (req, res) => {
     auth_token: String(auth_token ?? "").trim(),
     command: String(command ?? "").trim(),
     args: Array.isArray(args) ? args.map(String) : String(args ?? "").split(/\s+/).filter(Boolean),
-    // 安全分级：registry 高危预设带入 exec/network → 受引擎审批门约束；缺省 local
+    // 安全分级：registry 高危预设带入 exec/network → exec 受引擎审批门约束；缺省 local
     safety: safety === "exec" || safety === "network" ? safety : "local",
+    env: envObj,
   });
   res.json(sanitizeMcpServer(server));
 });

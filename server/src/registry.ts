@@ -33,6 +33,8 @@ export interface McpPreset {
   install: string;
   /** P0-catalog=一期仅入目录；P1-install=二期实装；P2=高危/沙箱依赖，默认关 */
   phase: "P1-install" | "P1" | "P2";
+  /** stdio MCP 需要的环境变量名（如 ["BOCHA_API_KEY"]）——UI 据此提示填写，值存服务端、脱敏 */
+  env_keys?: string[];
 }
 
 const NPM_MIRROR = "（大陆镜像：先 `npm config set registry https://registry.npmmirror.com`）";
@@ -63,7 +65,22 @@ export const MCP_REGISTRY: McpPreset[] = [
     runtime_china: "yes",
     install_china: "yes",
     safety: "network",
-    install: "在智谱开放平台 open.bigmodel.cn 申请 API Key，填入 Bearer Token；无需本地安装。",
+    install: "在智谱开放平台 open.bigmodel.cn 申请 API Key（注意 web_search_prime 属 GLM Coding 套餐能力，需套餐有效），填入 Bearer Token；无需本地安装。",
+    phase: "P1",
+  },
+  {
+    key: "bocha",
+    name: "博查 AI 搜索（国产）",
+    kind: "stdio",
+    command: "npx",
+    args: ["-y", "@humansean/mcp-bocha"],
+    desc: "博查 Bocha 国产 AI 网页搜索/语义搜索（Bocha Web Search / AI Search）。读为主、按次计费，需 BOCHA_API_KEY（env 注入）。",
+    scenario: "research",
+    runtime_china: "yes",
+    install_china: "degrade",
+    safety: "network",
+    env_keys: ["BOCHA_API_KEY"],
+    install: `在 open.bochaai.com 申请 API Key；运行 \`npx -y @humansean/mcp-bocha\`${NPM_MIRROR}（官方仓库 github.com/BochaAI/bocha-search-mcp）。Key 在 UI 的"环境变量"里填 BOCHA_API_KEY。`,
     phase: "P1",
   },
   {

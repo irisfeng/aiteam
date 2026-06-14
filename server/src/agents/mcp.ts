@@ -1,6 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type Anthropic from "@anthropic-ai/sdk";
 import { McpServer, listMcpServers } from "../db.js";
 
@@ -39,7 +39,16 @@ async function connect(server: McpServer): Promise<Connection> {
     try {
       args = JSON.parse(server.args_json);
     } catch { /* ignore */ }
-    await client.connect(new StdioClientTransport({ command: server.command, args }));
+    // 自定义环境变量（如 BOCHA_API_KEY）：在 SDK 安全默认环境(含 PATH)之上叠加，让需要 env key 的 stdio MCP 可用。
+    let envExtra: Record<string, string> = {};
+    try {
+      const parsed = JSON.parse(server.env_json || "{}");
+      if (parsed && typeof parsed === "object") {
+        for (const [k, v] of Object.entries(parsed)) envExtra[k] = String(v);
+      }
+    } catch { /* ignore */ }
+    const env = { ...getDefaultEnvironment(), ...envExtra };
+    await client.connect(new StdioClientTransport({ command: server.command, args, env }));
   } else {
     await client.connect(
       new StreamableHTTPClientTransport(new URL(server.url), {
@@ -134,15 +143,16 @@ export function mcpToolPrefixReady(prefix: string): boolean {
 }
 
 /**
- * 引擎审批门：若该 MCP 工具所属 server 的 safety 为 network/exec，返回该 server（高危，需先走 request_approval）。
- * local（默认）返回 null（不拦截）。registry 安装高危预设时带入 safety。
+ * 引擎审批门：仅当该 MCP 工具所属 server 的 safety 为 **exec**（本地执行/写盘，高 blast radius）时返回该 server，
+ * 强制改走 request_approval。network（如联网搜索/抓取，读为主、只发查询）不拦截——否则每次搜索都要人工放行、体验崩坏；
+ * network 仅在 UI 标徽章提示。local 不拦截。registry 安装时带入 safety。
  */
 export function mcpSafetyGate(name: string): McpServer | null {
   const mt = name.match(/^mcp__(.+?)__(.+)$/);
   if (!mt) return null;
   const server = listMcpServers().find((s) => sanitizeName(s.name) === mt[1] && Boolean(s.enabled));
   if (!server) return null;
-  return server.safety === "exec" || server.safety === "network" ? server : null;
+  return server.safety === "exec" ? server : null;
 }
 
 /** 执行 MCP 工具调用，返回文本结果（供 tool_result） */

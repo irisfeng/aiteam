@@ -122,6 +122,7 @@ export interface McpPreset {
   safety: "local" | "network" | "exec";
   install: string;
   phase: "P1-install" | "P1" | "P2";
+  env_keys?: string[];
 }
 export interface AgentStatus {
   agent_id: string;
