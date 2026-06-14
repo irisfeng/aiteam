@@ -127,8 +127,10 @@ export function mcpToolPrefixReady(prefix: string): boolean {
   if (!server) return false;
   const conn = connections.get(server.id);
   if (!conn) return true; // 懒连接：启用即视为就绪
+  const wildcard = prefix.endsWith("*");
   const bare = prefix.replace(/\*$/, "").replace(/^mcp__.+?__/, "");
-  return conn.tools.some((t) => (bare === "" ? true : t.name.startsWith(bare)));
+  // 通配前缀（mcp__srv__*）用 startsWith；具体工具名（mcp__srv__tool）必须精确匹配，避免 tool_v2 误判就绪
+  return conn.tools.some((t) => (bare === "" ? true : wildcard ? t.name.startsWith(bare) : t.name === bare));
 }
 
 /**

@@ -583,13 +583,13 @@ export interface McpPreset {
 ---
 
 **关键改动文件清单（绝对路径）**：
-- `/Users/tony/Documents/GitHub/aiteam/server/src/db.ts`（skills +6 列 / Skill 接口 / getSkill / upsertBuiltinSkill / createSkill+updateSkill 全字段贯通）
-- `/Users/tony/Documents/GitHub/aiteam/server/src/seed.ts`（BUILTIN_SKILLS 扩至 S1-S17 / version-based seedGlobalSkills / 导出 BUILTIN_SKILLS+VERSION）
-- `/Users/tony/Documents/GitHub/aiteam/server/src/agents/engine.ts`（skillRelevant trigger+name回退 / buildDynamicContext 索引+env / read_skill / :1103 白名单+html / validateDocContent +html安全校验 / capabilityReady / callMcpTool require_approval 门）
-- `/Users/tony/Documents/GitHub/aiteam/server/src/registry.ts`（新建：MCP_REGISTRY+SKILL_PACK_REGISTRY）
-- `/Users/tony/Documents/GitHub/aiteam/server/src/routes.ts`（/bootstrap +registry / GET /registry / POST+PATCH /skills 新字段透传 / sanitize 覆盖）
-- `/Users/tony/Documents/GitHub/aiteam/web/src/types.ts`（Doc.kind +html / Skill / McpPreset）
-- `/Users/tony/Documents/GitHub/aiteam/web/src/components/IntegrationsTabs.tsx`（SkillsTab trigger/when_to_use/kind 输入 / McpTab 浏览推荐）
-- `/Users/tony/Documents/GitHub/aiteam/web/src/components/DocsView.tsx`（5 处：docKindMeta / 渲染 dispatch iframe sandbox="" / DOC_KINDS / 导出禁 printDoc&exportWord 仅下载 / 配合 types）
-- `/Users/tony/Documents/GitHub/aiteam/scripts/regression.mjs`（改 :63 P0 + :298 G3 引用 BUILTIN_SKILLS.length + 重写 SK1 + 新增 SK2/SK3/SK4/DOC-HTML/REG1/CAP1）
-- `/Users/tony/Documents/GitHub/aiteam/THIRD_PARTY_NOTICES/`（新建：各蒸馏来源 LICENSE 全文 + 版权行）
+- `server/src/db.ts`（skills +6 列 / Skill 接口 / getSkill / upsertBuiltinSkill / createSkill+updateSkill 全字段贯通）
+- `server/src/seed.ts`（BUILTIN_SKILLS 扩至 S1-S17 / version-based seedGlobalSkills / 导出 BUILTIN_SKILLS+VERSION）
+- `server/src/agents/engine.ts`（skillRelevant trigger+name回退 / buildDynamicContext 索引+env / read_skill / :1103 白名单+html / validateDocContent +html安全校验 / capabilityReady / callMcpTool require_approval 门）
+- `server/src/registry.ts`（新建：MCP_REGISTRY+SKILL_PACK_REGISTRY）
+- `server/src/routes.ts`（/bootstrap +registry / GET /registry / POST+PATCH /skills 新字段透传 / sanitize 覆盖）
+- `web/src/types.ts`（Doc.kind +html / Skill / McpPreset）
+- `web/src/components/IntegrationsTabs.tsx`（SkillsTab trigger/when_to_use/kind 输入 / McpTab 浏览推荐）
+- `web/src/components/DocsView.tsx`（5 处：docKindMeta / 渲染 dispatch iframe sandbox="" / DOC_KINDS / 导出禁 printDoc&exportWord 仅下载 / 配合 types）
+- `scripts/regression.mjs`（改 :63 P0 + :298 G3 引用 BUILTIN_SKILLS.length + 重写 SK1 + 新增 SK2/SK3/SK4/DOC-HTML/REG1/CAP1）
+- `THIRD_PARTY_NOTICES/`（新建：各蒸馏来源 LICENSE 全文 + 版权行）

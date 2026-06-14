@@ -99,7 +99,7 @@ export const MCP_REGISTRY: McpPreset[] = [
     name: "本地 SQLite 查询",
     kind: "stdio",
     command: "uvx",
-    args: ["mcp-server-sqlite", "--db-path", "./server/data/app.db"],
+    args: ["mcp-server-sqlite", "--db-path", "./server/data/aiteam.db"],
     desc: "对本地 SQLite 库做查询/分析（官方 reference server）。data-viz 场景。含写操作=高危，受审批门约束。",
     scenario: "data-viz",
     runtime_china: "yes",

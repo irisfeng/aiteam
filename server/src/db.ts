@@ -649,6 +649,7 @@ export function sanitizeMcpServer(s: McpServer) {
     url: s.url,
     command: s.command,
     args_json: s.args_json,
+    safety: s.safety, // 风险分级前端可见（registry/手填带入）；非敏感，不脱敏
     enabled: s.enabled,
     has_token: Boolean(s.auth_token),
   };
@@ -725,6 +726,9 @@ export function updateSkill(
     ...(fields.resources_json !== undefined ? { resources_json: fields.resources_json } : {}),
     ...(fields.enabled !== undefined ? { enabled: fields.enabled ? 1 : 0 } : {}),
   };
+  // 保持 body/content 同步：只改其一时镜像到另一，避免 read_skill / 列表读到旧值（旧 content 字段是 read_skill 的回退源）
+  if (fields.body !== undefined && fields.content === undefined) next.content = fields.body;
+  if (fields.content !== undefined && fields.body === undefined) next.body = fields.content;
   db.prepare(
     "UPDATE skills SET name = @name, desc = @desc, content = @content, kind = @kind, trigger = @trigger, when_to_use = @when_to_use, body = @body, resources_json = @resources_json, enabled = @enabled WHERE id = @id"
   ).run(next);

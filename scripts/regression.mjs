@@ -268,9 +268,10 @@ check(
     v("html", "<section><h1>原型</h1><p>hi</p></section>") === null &&     // 合法
     typeof v("html", "纯文本无标签") === "string" &&                       // 非 HTML 拒
     typeof v("html", '<div></div><script src="//evil/x.js"></script>') === "string" && // 外链 script 拒
-    typeof v("html", '<img src=x onerror="alert(1)">') === "string" &&     // 内联事件 拒
+    typeof v("html", '<img src=x onerror="alert(1)">') === "string" &&     // 内联事件(空格分隔) 拒
+    typeof v("html", "<svg/onload=alert(1)>") === "string" &&             // 内联事件(/ 分隔，HTML5 绕过) 拒
     typeof v("html", '<a href="javascript:alert(1)">x</a>') === "string";  // javascript: URI 拒
-  check("DOC-HTML", "html 交付物：合法放行 + 外链script/内联事件/js:URI 全拒（防存储型 XSS）", ok);
+  check("DOC-HTML", "html 交付物：合法放行 + 外链script/内联事件(含 /onload 绕过)/js:URI 全拒（防存储型 XSS）", ok);
 }
 
 // ---------------------------------------------------------------------------

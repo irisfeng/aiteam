@@ -199,7 +199,7 @@ export const BUILTIN_SKILLS: BuiltinSkill[] = [
     desc: "高保真可编辑 PPTX 优先用 MCP，不可达则降级 Marp（依赖 pptx MCP，默认未就绪）",
     trigger: "可编辑ppt,高保真pptx,母版,模板ppt,精美演示",
     when_to_use: "需要高保真、可在 PowerPoint 里继续编辑的 PPTX 时",
-    resources_json: JSON.stringify(["mcp__pptx__*", "generate_image"]),
+    resources_json: JSON.stringify(["mcp__pptx-native__*", "generate_image"]),
     body: "需要高保真可编辑 PPTX 时：1) 优先用 ppt-master/pptx MCP（真 DrawingML，可在 PowerPoint 编辑）；2) 该 MCP 不可达时（一期默认未就绪），降级用 write_document(slides)（Marp→pptxgenjs 真 .pptx，已可导出）。该类 MCP 在宿主本地执行、属高危(exec)，受引擎审批门约束、默认关闭。",
   },
   {

@@ -96,7 +96,7 @@ export function validateDocContent(kind: "report" | "slides" | "sheet" | "html",
     // 安全：内容是模型生成的不可信 HTML——堵住存储型 XSS 的三个面（预览 iframe 已 sandbox，这里再做内容侧防御）
     if (/<script\b[^>]*\bsrc\s*=/i.test(c))
       return "html 交付物禁止外链 <script src=...>，请把脚本内联，或改用纯 CSS / SVG。";
-    if (/\son\w+\s*=/i.test(c))
+    if (/[\s/]on\w+\s*=/i.test(c)) // [\s/]：HTML5 允许 / 作属性分隔，需同时挡 <svg/onload=...> 绕过
       return "html 交付物禁止内联事件处理器（onload/onerror/onclick 等），请改用 <script> 块或纯 CSS。";
     if (/javascript:/i.test(c))
       return "html 交付物禁止 javascript: URI。";

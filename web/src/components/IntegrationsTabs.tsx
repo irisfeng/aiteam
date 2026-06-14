@@ -19,6 +19,7 @@ interface McpServerInfo {
   url: string;
   command: string;
   args_json: string;
+  safety: "local" | "network" | "exec";
   enabled: number;
   has_token: boolean;
 }
@@ -173,6 +174,9 @@ export function McpTab() {
                 <input type="checkbox" checked={Boolean(s.enabled)} onChange={() => void toggle(s)} title="启用/停用" />
                 <span className="font-medium">{s.name}</span>
                 <span className="rounded bg-sel px-1 font-mono text-[10px] text-ink-3">{s.kind}</span>
+                {s.safety && s.safety !== "local" && (
+                  <span className="rounded bg-accent-soft px-1 text-[10px] text-ink-2" title="高危：调用前强制走审批门">{SAFETY_LABEL[s.safety]}</span>
+                )}
                 <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-3">
                   {s.kind === "stdio" ? `${s.command} ${JSON.parse(s.args_json || "[]").join(" ")}` : s.url}
                 </span>
@@ -204,6 +208,18 @@ export function McpTab() {
             className={`rounded-lg border px-3 py-1.5 text-[12.5px] ${kind === k ? "border-accent bg-accent-soft text-ink" : "border-line text-ink-2"}`}
           >
             {k === "http" ? "远程 HTTP" : "本地 stdio"}
+          </button>
+        ))}
+      </div>
+      <label className={labelCls}>安全分级（联网/执行=高危，AI 调用前强制走审批门）</label>
+      <div className="flex gap-2">
+        {(["local", "network", "exec"] as const).map((sv) => (
+          <button
+            key={sv}
+            onClick={() => setSafety(sv)}
+            className={`rounded-lg border px-3 py-1.5 text-[12.5px] ${safety === sv ? "border-accent bg-accent-soft text-ink" : "border-line text-ink-2"}`}
+          >
+            {sv === "local" ? "本地" : sv === "network" ? "联网" : "执行·高危"}
           </button>
         ))}
       </div>
@@ -256,6 +272,7 @@ export function SkillsTab() {
   const [content, setContent] = useState("");
   const [trigger, setTrigger] = useState("");
   const [whenToUse, setWhenToUse] = useState("");
+  const [error, setError] = useState("");
 
   const load = () =>
     fetch(`${API_BASE}/skills`)
@@ -277,7 +294,8 @@ export function SkillsTab() {
 
   async function create() {
     if (!name.trim() || !content.trim()) return;
-    await fetch(`${API_BASE}/skills`, {
+    setError("");
+    const res = await fetch(`${API_BASE}/skills`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -289,7 +307,11 @@ export function SkillsTab() {
         kind: "method",
       }),
     });
-    setName(""); setDesc(""); setContent(""); setTrigger(""); setWhenToUse(""); setCreating(false);
+    if (!res.ok) {
+      setError((await res.json().catch(() => ({})))?.error ?? "创建失败，请重试");
+      return; // 失败时保留用户输入，不清空、不收起表单
+    }
+    setName(""); setDesc(""); setContent(""); setTrigger(""); setWhenToUse(""); setError(""); setCreating(false);
     await load();
   }
 
@@ -341,6 +363,7 @@ export function SkillsTab() {
           <input value={trigger} onChange={(e) => setTrigger(e.target.value)} placeholder="邮件,回复,跟进,致谢" className={inputCls} />
           <label className={labelCls}>方法正文（body，写给 AI 同事的工作守则；按需才注入，可写长）</label>
           <textarea value={content} onChange={(e) => setContent(e.target.value)} rows={5} className={`${inputCls} resize-none`} placeholder="结论先行：… 1) … 2) … 3) …" />
+          {error && <div className="mt-2 text-[12px] text-red-500">{error}</div>}
           <div className="mt-3 flex gap-2">
             <button
               onClick={() => void create()}
