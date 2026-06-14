@@ -51,7 +51,7 @@ const BUILTIN_AGENTS = [
  * 第三方方法学均为蒸馏改写（非原文照搬），来源与许可见 THIRD_PARTY_NOTICES/。
  * 扩库或改正文时整体把 BUILTIN_SKILL_PACK_VERSION +1，并把对应条目 version 设为该值。
  */
-export const BUILTIN_SKILL_PACK_VERSION = 2;
+export const BUILTIN_SKILL_PACK_VERSION = 3;
 const V = BUILTIN_SKILL_PACK_VERSION;
 
 type BuiltinSkill = Required<Pick<SkillInput, "name" | "desc" | "trigger" | "when_to_use" | "body" | "kind" | "version">> &
@@ -124,7 +124,8 @@ export const BUILTIN_SKILLS: BuiltinSkill[] = [
     desc: "先定『讲者驱动 vs 读物优先』再控密度与节奏，单页防溢出（蒸馏 frontend-slides, MIT）",
     trigger: "ppt,演示,幻灯片,slides,presentation,演讲稿,路演,deck",
     when_to_use: "制作演示/幻灯片，需要确定信息密度与节奏时",
-    body: "结论先行：先问『讲者驱动 vs 读物优先』再定密度。1) 讲者驱动：每页 1-2 个观点、大字号、≤3 个要点，宁可多分页；2) 读物优先：更紧凑、4-6 个信息单元、每页自包含；3) 防溢出：估算单页元素数对照密度上限，超了就拆续页；4) 交 HTML 演示时锁定 16:9 舞台（整体 scale 缩放、不重排，letterbox 可接受），可用横向翻页单 HTML 模板（走 html 交付物）；5) 主题节奏：避免连续 3 页同色调；6) 落点：slides(Marp，可导出 pptx) 或 html(网页 deck) 按需选。（蒸馏自 frontend-slides / guizang-ppt）",
+    resources_json: JSON.stringify(["tpl:html-deck-horizontal"]),
+    body: "结论先行：先问『讲者驱动 vs 读物优先』再定密度。1) 讲者驱动：每页 1-2 个观点、大字号、≤3 个要点，宁可多分页；2) 读物优先：更紧凑、4-6 个信息单元、每页自包含；3) 防溢出：估算单页元素数对照密度上限，超了就拆续页；4) 交 HTML 演示时锁定 16:9 舞台（整体 scale 缩放、不重排，letterbox 可接受），可直接套用本技能附带的『横向翻页网页 PPT』模板（走 html 交付物）；5) 主题节奏：避免连续 3 页同色调；6) 落点：slides(Marp，可导出 pptx) 或 html(网页 deck) 按需选。（蒸馏自 frontend-slides / guizang-ppt）",
   },
   {
     name: "反 AI-slop 设计审美守则", kind: "method", version: V,
@@ -183,6 +184,43 @@ export const BUILTIN_SKILLS: BuiltinSkill[] = [
     trigger: "前端,react,next,性能,可访问性,组件,优化,bundle,a11y",
     when_to_use: "产出前端代码或 html MVP 后，做工程质量自查时",
     body: "结论先行：前端 MVP 产出要附自查维度，别只看『跑起来』。1) 性能：避免不必要 re-render（memo/稳定 key）、数据获取就近、长列表虚拟化；2) 包体积：按需 import、避免巨型依赖、code-split；3) 可访问性：语义标签、alt/aria、键盘可达、对比度；4) React 模式：状态最小化、副作用收敛、受控/非受控一致；5) 交 html 交付物时把以上做成『手动验收清单』内联进文档（本工作台无自动 QA，需人工逐项核对）。（蒸馏自 Vercel react-best-practices 与 addyosmani/agent-skills）",
+  },
+
+  // ── P1 扩库：工程与设计高频方法（v3 新增）──
+  {
+    name: "设计风格探索法", kind: "method", version: V,
+    desc: "视觉交付先给 2-3 个差异化风格小样让用户选，再做全量（蒸馏 frontend-slides 三预览流程）",
+    trigger: "设计风格,风格探索,多版本,风格选择,landing,首页,视觉方向,改版",
+    when_to_use: "做网页/落地页/封面/PPT 等视觉交付，方向尚未敲定时",
+    body: "结论先行：视觉交付先给 2-3 个差异化风格小样、让用户选定方向，再做全量，避免一把梭做错方向。1) 从 brief 提炼 3 个差异化方向（如 编辑杂志风 / 极简瑞士风 / 大胆撞色风），各一句调性描述；2) 每个方向用 write_document(html) 出一页可预览小样（可套『演示设计与防溢出法』附带的横向翻页模板）；3) 用 request_approval 或在频道里请用户选定方向后再继续；4) 据选定方向做全量交付；5) 全程遵守『反 AI-slop 设计审美守则』。（蒸馏自 frontend-slides 的多预览选择流程）",
+  },
+  {
+    name: "设计系统咨询法", kind: "method", version: V,
+    desc: "产出可落地的 design tokens + 组件规范 + DESIGN.md，而非单页美化（蒸馏 Hermes design-consultation）",
+    trigger: "设计系统,design system,设计规范,组件库,品牌,视觉规范,tokens,样式规范",
+    when_to_use: "需要为产品建立统一设计语言/规范，而非临时美化单页时",
+    body: "结论先行：交付可落地的设计系统，不是把某一页调好看。1) 先定品牌气质 / 目标受众 / 竞品基调；2) 定 design tokens（色板、字阶、间距、圆角、阴影、动效时长）；3) 列组件清单与每个状态（默认 / hover / 聚焦 / 禁用 / 错误 / 加载）；4) 排版网格与响应式断点；5) 沉淀为 DESIGN.md（write_document report），关键组件配 html 示例页可预览。遵守『反 AI-slop 设计审美守则』。（蒸馏自 Hermes/gstack design-consultation 的 CC0 要点）",
+  },
+  {
+    name: "安全审计法", kind: "method", version: V,
+    desc: "按 STRIDE 威胁建模 + OWASP Top10 逐项查，给风险等级与修复（蒸馏 Hermes cso，OWASP/STRIDE）",
+    trigger: "安全,审计,漏洞,owasp,stride,鉴权,注入,xss,csrf,越权,渗透,风险评估",
+    when_to_use: "对代码/系统/功能做安全审查、上线前风险评估时",
+    body: "结论先行：按 STRIDE 建模 + OWASP Top10 逐项核，每条给风险等级 + 证据 + 修复。1) 梳理资产与信任边界；2) STRIDE 逐类问（仿冒 / 篡改 / 否认 / 信息泄露 / 拒绝服务 / 提权）；3) OWASP：注入、失效鉴权、敏感数据暴露、失效访问控制、安全配置错误、XSS、不安全反序列化、已知漏洞组件、日志监控不足、SSRF；4) 每条标 严重级别 + 触发条件 + 证据位置 + 修复建议；5) 高危项用 create_task 落到看板。声明：风险提示而非替代专业渗透测试。（蒸馏自 Hermes/gstack cso）",
+  },
+  {
+    name: "规格驱动开发法", kind: "method", version: V,
+    desc: "先写可验证规格与接口契约再拆任务，契约先行（蒸馏 github/spec-kit + superpowers）",
+    trigger: "规格,spec,需求规格,接口契约,api契约,验收口径,契约先行",
+    when_to_use: "把模糊需求转成可落地、可验收的工程规格时",
+    body: "结论先行：先写可验证规格再写代码，契约先行。1) 把需求写成『用户故事 + 可观察的验收标准』；2) 定接口契约（输入 / 输出 / 错误码 / 边界）；3) 明确非目标（这次不做什么），防范围蔓延；4) 规格送评审获认可；5) 据规格用 start_project 拆成带依赖的任务。与『设计前置头脑风暴法』衔接：先头脑风暴定方向，再本法定契约。（蒸馏自 github/spec-kit 与 superpowers writing-plans）",
+  },
+  {
+    name: "开发分支收尾法", kind: "method", version: V,
+    desc: "合并/提测前过完整检查单：验收逐条、测试构建贴证据、清残留（蒸馏 superpowers finishing-a-development-branch）",
+    trigger: "收尾,合并,merge,pr,提测,交付分支,landing,封板,上线前",
+    when_to_use: "一段开发完成、准备合并/提测/交付前",
+    body: "结论先行：合并前过完整检查单，用证据而非口头声称。1) 全部验收标准逐条核对；2) 测试 / 构建跑通并贴出输出证据（不口头声称『应该没问题』）；3) 清理死代码 / 调试残留 / TODO；4) 文档与变更同步；5) 在 PR 描述里附自查表 + 已知风险 + 回滚方式；6) 关单（done）由人工确认。（蒸馏自 superpowers finishing-a-development-branch 与 verification-before-completion）",
   },
 
   // ── 能力型技能（capability：指向工具/MCP，read_skill 给用法+降级）──

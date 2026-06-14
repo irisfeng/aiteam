@@ -274,6 +274,24 @@ check(
   check("DOC-HTML", "html 交付物：合法放行 + 外链script/内联事件(含 /onload 绕过)/js:URI 全拒（防存储型 XSS）", ok);
 }
 
+// SK5 L3 模板资源：技能用 tpl: 引用内置模板，read_skill 附带模板正文返回
+{
+  const sk = db.listSkills().find((s) => s.name === "演示设计与防溢出法");
+  db.updateSkill(sk.id, { enabled: true });
+  const out = engine.readSkillBody(sk.id);
+  db.updateSkill(sk.id, { enabled: false });
+  check("SK5", "L3 模板：read_skill 把 tpl: 引用的内置模板正文附带返回",
+    out.includes("可复用模板") && out.includes("横向翻页网页 PPT") && out.includes("<!doctype html>"),
+    `len=${out.length}`);
+}
+
+// TPL1 内置模板自洽：每个 SKILL_TEMPLATES 都是合法 html 交付物（agent 照抄即可过 validateDocContent）
+{
+  const { SKILL_TEMPLATES } = await import(join(root, "server/dist/registry.js"));
+  const allValid = SKILL_TEMPLATES.length > 0 && SKILL_TEMPLATES.every((t) => engine.validateDocContent("html", t.content) === null);
+  check("TPL1", "内置模板自洽：全部 SKILL_TEMPLATES 通过 html 交付物校验", allValid, `模板数=${SKILL_TEMPLATES.length}`);
+}
+
 // ---------------------------------------------------------------------------
 // Phase 2：拉起服务，走 HTTP API（聊天/引用/文档/技能/MCP/用量/导出/模板/频道）
 // ---------------------------------------------------------------------------

@@ -184,3 +184,76 @@ export const SKILL_PACK_REGISTRY: SkillPreset[] = BUILTIN_SKILLS.map((s) => ({
   trigger: s.trigger,
   builtin: true,
 }));
+
+// ───────────────────────────────────────────────────────────────────────────
+// L3 技能模板资源：技能可在 resources_json 里用 `tpl:<id>` 引用；read_skill 时把模板正文附带返回。
+// 模板本身必须是合法 html 交付物（内联脚本/样式、无外链 <script src>、无内联事件处理器、无 javascript:），
+// 这样 AI 同事照模板产出的 html 交付物能直接通过 validateDocContent。
+// ───────────────────────────────────────────────────────────────────────────
+export interface SkillTemplate {
+  id: string;
+  name: string;
+  desc: string;
+  lang: string;
+  content: string;
+}
+
+const HTML_DECK_HORIZONTAL = `<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>演示</title>
+<style>
+  :root{ --bg:#0f1115; --ink:#f4f1ea; --dim:#9aa0a6; --accent:#ffd84d; }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;background:var(--bg);color:var(--ink);font-family:"PingFang SC","Helvetica Neue",Arial,sans-serif;overflow:hidden}
+  #stage{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+  .deck{aspect-ratio:16/9;width:min(100vw,calc(100vh*16/9));height:min(100vh,calc(100vw*9/16));position:relative;overflow:hidden}
+  .slide{position:absolute;inset:0;padding:7% 9%;display:flex;flex-direction:column;justify-content:center;gap:.6em;opacity:0;transition:opacity .35s;pointer-events:none}
+  .slide.active{opacity:1;pointer-events:auto}
+  h1{font-size:5.2vmin;font-weight:800;letter-spacing:-.01em}
+  h2{font-size:3.4vmin;font-weight:700;color:var(--accent)}
+  p,li{font-size:2.4vmin;line-height:1.5;color:var(--dim)}
+  ul{padding-left:1.2em;display:flex;flex-direction:column;gap:.4em}
+  .kicker{font-size:1.8vmin;letter-spacing:.3em;text-transform:uppercase;color:var(--accent)}
+  #bar{position:fixed;bottom:2.4vmin;left:50%;transform:translateX(-50%);display:flex;gap:.8vmin}
+  .dot{width:1vmin;height:1vmin;border-radius:50%;background:#3a3f47}
+  .dot.on{background:var(--accent)}
+  #hint{position:fixed;bottom:2vmin;right:2.4vmin;font-size:1.5vmin;color:#5b6068}
+</style>
+</head>
+<body>
+<div id="stage"><div class="deck" id="deck">
+  <section class="slide"><div class="kicker">封面</div><h1>在此填标题</h1><p>副标题 / 一句话主张</p></section>
+  <section class="slide"><h2>要点一</h2><ul><li>用 ← / → 或点击翻页</li><li>每页一个要点群、宁多分页</li></ul></section>
+  <section class="slide"><h2>结尾</h2><p>行动建议 / 联系方式</p></section>
+</div></div>
+<div id="bar"></div><div id="hint">← / → 翻页</div>
+<script>
+  const slides=[...document.querySelectorAll('.slide')];
+  const bar=document.getElementById('bar');
+  let i=0;
+  slides.forEach(()=>{const d=document.createElement('div');d.className='dot';bar.appendChild(d);});
+  const dots=[...bar.children];
+  function show(n){i=Math.max(0,Math.min(slides.length-1,n));slides.forEach((s,k)=>s.classList.toggle('active',k===i));dots.forEach((d,k)=>d.classList.toggle('on',k===i));}
+  document.addEventListener('keydown',e=>{if(e.key==='ArrowRight'||e.key===' ')show(i+1);if(e.key==='ArrowLeft')show(i-1);});
+  document.getElementById('deck').addEventListener('click',()=>show(i+1));
+  show(0);
+</script>
+</body>
+</html>`;
+
+export const SKILL_TEMPLATES: SkillTemplate[] = [
+  {
+    id: "html-deck-horizontal",
+    name: "横向翻页网页 PPT（单文件 HTML）",
+    desc: "16:9 锁定舞台、← / → 或点击翻页、进度点；瑞士国际主义骨架。替换 .slide 内容即用，可作为 html 交付物直接预览。",
+    lang: "html",
+    content: HTML_DECK_HORIZONTAL,
+  },
+];
+
+export function getSkillTemplate(id: string): SkillTemplate | undefined {
+  return SKILL_TEMPLATES.find((t) => t.id === id);
+}

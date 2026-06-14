@@ -17,7 +17,7 @@
 | **数据** | **全新部署**（VPS 空 data 目录，注册首个 admin） | 不迁移本地旧库；备份/恢复脚本作为上线后常规运维保留 |
 | **进程** | **systemd** | 开机自启 + 崩溃重启 + journald 轮转 + cgroup 隔离 |
 | **反代** | **Nginx 单一方案** | `/aiteam/` 前缀原样转发；WebSocket 头透传；gzip + assets 长缓存 |
-| **端口绑定** | **8787 绑 `127.0.0.1`**（已合入 `AITEAM_HOST` 支持，仍需一行 `index.ts` 改动启用）**＋ 安全组 + 主机防火墙双层兜底** | 双层兜底无论是否改码都必做，是叠加项不是分支 |
+| **端口绑定** | **8787 默认绑 `127.0.0.1`**（已合入，`AITEAM_HOST` 可覆盖）**＋ 安全组 + 主机防火墙双层兜底** | 代码默认只听回环；防火墙双层作为叠加第一层，必做 |
 
 ---
 
@@ -34,7 +34,7 @@
 
 **仍需在上线窗口内闭合的 2 个配置项（实质是上线必做步骤）：**
 
-1. **8787 不可公网可达**：`server/src/index.ts:46` `server.listen(PORT, ...)` 当前无 host 参数（默认绑 `0.0.0.0`）。→ 用腾讯云安全组 + 主机防火墙（ufw/firewalld）双层挡死 8787 入站；并推荐应用 §10 的一行 `index.ts` 改动把它绑回 `127.0.0.1`（叠加更稳，未改前靠防火墙兜底同样安全）。
+1. **8787 不可公网可达**：代码已默认绑 `127.0.0.1`（`server/src/index.ts`，`HOST=AITEAM_HOST||127.0.0.1`，已合入），公网无法直连。仍需用腾讯云安全组 + 主机防火墙（ufw/firewalld）双层挡死 8787 入站作为第一层兜底（叠加，必做）。
 2. **关闭公开注册**：`AITEAM_ALLOW_SIGNUP` 默认开放注册 + 首个注册者自动成 admin（`server/src/auth-routes.ts:12/27`）。→ 部署前设 `AITEAM_ADMIN_EMAILS` 白名单，注册首个 admin 后立刻 `AITEAM_ALLOW_SIGNUP=0` 重启关闭公开注册。
 
 这两条都只需配置/一行代码即可堵住，成本极低。闭合后即为干净 GO。
@@ -47,7 +47,7 @@
 |---|---------|------|
 | P1 | VPS 内存规格（1G/2G/4G）？ | 决定 `MemoryMax` 取值；本文按 ≤2GB 保守给值，构建始终在本地做不在 VPS 跑 |
 | P2 | 另两项目当前用什么进程管理、是否已有 Nginx 在跑？ | 决定是「加入已有 Nginx」还是「新装 Nginx」（见 §2.3，一句话覆盖，无需分支） |
-| P3 | 是否接受改一行 `index.ts` 把 listen 绑 `127.0.0.1`？ | 接受最干净（§10）；不接受则纯靠安全组+防火墙双层兜底，同样安全 |
+| P3 | ~~是否接受改一行 `index.ts` 绑回环？~~ ✅ 已合入 | 默认已绑 `127.0.0.1`，无需操作；仅容器/异机反代时设 `AITEAM_HOST=0.0.0.0` |
 | P4 | 是否需要异地备份（腾讯云 COS）？备份盘是否独立于数据盘？ | 整机故障时备份是否一起丢；先本地 7-14 日轮转 |
 
 **准备物**：SSH 密钥、`openssl rand -base64 48` 生成的会话密钥、首个 admin 邮箱、内网访问网段（办公固定出口/VPN）。
@@ -162,7 +162,7 @@ ReadWritePaths=/var/lib/aiteam
 WantedBy=multi-user.target
 ```
 
-> **关于 127.0.0.1 监听**：当前 `server/src/index.ts:46` `server.listen(PORT, ...)` 没传 host。要真正绑回环，需把它改成 `server.listen(PORT, process.env.AITEAM_HOST ?? '127.0.0.1', ...)`（推荐，见 §10）。**在改码之前，systemd 无法替代——必须靠腾讯云安全组 + 主机防火墙双层挡住 8787。**
+> **关于 127.0.0.1 监听**：已合入——`server/src/index.ts` 现在 `server.listen(PORT, HOST)`，`HOST = process.env.AITEAM_HOST || "127.0.0.1"`，**默认只听回环**（见 §10）。同机 Nginx 反代照常可达，公网够不着。安全组 + 主机防火墙仍作为第一层兜底（叠加，必做）。
 >
 > **若将来要配 stdio MCP**：上面的 `ProtectSystem=strict` + `ProtectHome=true` + `PrivateTmp=true` 会让 `npx` 首次联网拉包**无可写缓存目录而失败**（写不进 `~/.npm`、受限的 `/tmp`）。届时需为 npm cache 补一条 `ReadWritePaths`（如 `/var/lib/aiteam/.npm` 并设 `Environment=npm_config_cache=/var/lib/aiteam/.npm`），或预先把 MCP server 包装好、不在运行期联网拉包。内部场景默认不配 stdio MCP 则无此问题。
 
@@ -173,7 +173,8 @@ WantedBy=multi-user.target
 # /etc/aiteam/aiteam.env  —— chmod 600, chown aiteam:aiteam
 # NODE_ENV 必设 production：缺 AITEAM_SESSION_SECRET 时由 session.ts 的 fail-fast 拒启兜底（commit 0983fb6）
 NODE_ENV=production
-# 监听：配合 §10 一行改动后绑回环；未改码前此变量无效，仍需防火墙兜底
+# 监听：默认已绑回环（index.ts HOST=AITEAM_HOST||127.0.0.1，已合入）。此处显式写明即可；
+# 仅当反代/容器在别的主机需放开时改成 0.0.0.0 或私网 IP。防火墙仍作第一层兜底。
 AITEAM_HOST=127.0.0.1
 PORT=8787
 # 数据与生成图资产目录（WAL：aiteam.db + -wal + -shm 三件套；含明文模型 key）
@@ -449,7 +450,7 @@ ssh "$VPS" 'systemctl daemon-reload && systemctl enable aiteam && systemctl rest
 
 | 项 | 现状（源码核实） | 落地动作 |
 |---|---|---|
-| **8787 绑 0.0.0.0** | `server/src/index.ts:46` 无 host 参数 | 安全组只放 80 给可信网段 + ufw/firewalld 双层（必做）；并推荐 §10 一行改绑 127.0.0.1（叠加更稳） |
+| **8787 绑回环 ✅ 已合入** | `server/src/index.ts` `HOST=AITEAM_HOST||127.0.0.1`，默认只听回环 | 安全组只放 80 给可信网段 + ufw/firewalld 双层作第一层（必做）；代码已默认不暴露公网 |
 | **会话密钥 fail-fast ✅ 已合入（commit 0983fb6）** | `server/src/session.ts:12-17` 生产未设 `AITEAM_SESSION_SECRET` 直接 `process.exit(1)` 拒启 | EnvironmentFile 里 `openssl rand -base64 48` 写入强密钥 + 确保 `NODE_ENV=production`；漏配会被拒启兜底 |
 | **开放注册 + 首注册成 admin** | `server/src/auth-routes.ts:12/27` | 部署前设 `AITEAM_ADMIN_EMAILS` 白名单 → 注册首个 admin → 立刻 `AITEAM_ALLOW_SIGNUP=0` 重启（必做） |
 | **MCP test 端点 ✅ 已合入 requireAdmin（commit 0983fb6）** | `server/src/routes.ts:208` `/mcp-servers/:id/test` 现带 `requireAdmin`，与同文件 185/201/216 的 create/toggle/delete 对齐 | 普通 member 不能再触发已存在 stdio server 子进程派生；内部场景仍建议坚决不配任何 stdio MCP（args 不放可执行命令，最稳） |
@@ -540,16 +541,18 @@ find "$DATA_DIR/assets" -type f -mtime +90 -print -delete
 
 ---
 
-## 10. 推荐的源码改动（评估项，可选）
+## 10. 源码改动状态
 
-「评估阶段不执行」，但下面这处是把 blocker 从「靠运维兜底」变成「应用层根治」的最小改动，强烈建议纳入（其余两条已在 commit 0983fb6 合入，见 §0/§7）：
+把三个 blocker 从「靠运维兜底」变成「应用层根治」的改动**均已合入主干**（commit `0983fb6` + `e4bc750` 起的绑回环），本节仅留作记录与可选项：
 
-1. **绑回环（强烈建议）**（`server/src/index.ts:46`）：
-   `server.listen(PORT, ...)` → `server.listen(PORT, process.env.AITEAM_HOST ?? '127.0.0.1', ...)`
-   默认安全，反代/同机访问不受影响，公网无法直连。**未改前靠安全组+ufw 双层兜底同样安全**（裕度更低）。
+1. **绑回环 ✅ 已合入**（`server/src/index.ts`）：
+   `server.listen(PORT, HOST, ...)`，其中 `HOST = process.env.AITEAM_HOST || "127.0.0.1"`。
+   **默认就只听回环**——同机 Nginx 反代/本地访问照常，公网无法直连（防火墙之外的第二层）。已实测：默认仅 `LISTEN 127.0.0.1:PORT`；`AITEAM_HOST=0.0.0.0`（容器/反代异机时）则听全网卡。**本场景 EnvironmentFile 里 `AITEAM_HOST` 可不设或显式设 `127.0.0.1`。**
+2. **会话密钥 fail-fast ✅ 已合入**（`server/src/session.ts:12-17`，commit 0983fb6）：生产缺 `AITEAM_SESSION_SECRET` 直接拒启。
+3. **MCP `/mcp-servers/:id/test` 补 `requireAdmin` ✅ 已合入**（`server/src/routes.ts:208`，commit 0983fb6）。
 
-可选（按需）：
-2. **请求体上限放宽**（`server/src/index.ts:26`）：若内部有粘贴长上下文需求，`express.json({limit:"1mb"})` → `"5mb"`（同时确认反代 `client_max_body_size` ≥ 此值）。
+可选（按需，未合入）：
+4. **请求体上限放宽**（`server/src/index.ts:26`）：若内部有粘贴长上下文需求，`express.json({limit:"1mb"})` → `"5mb"`（同时确认反代 `client_max_body_size` ≥ 此值）。
 3. **预算日界显式上海时区**（共用主机若被迫用 UTC 才需要）：把 `budgetExhausted` 的 `setHours(0,0,0,0)` 改成与 `shanghaiNow` 一致的显式 `Asia/Shanghai` 计算，解耦系统 TZ。
 
 ---
@@ -572,7 +575,7 @@ find "$DATA_DIR/assets" -type f -mtime +90 -print -delete
 
 | 风险 | 触发条件 | 影响 | 缓解 |
 |---|---|---|---|
-| 8787 公网/内网越权可达 | 未配防火墙 / 安全组放太宽 | 绕过反代直连，越权访问 | 安全组+ufw 双层只放可信网段；§10#1 绑回环（必做，§0/§7） |
+| 8787 公网/内网越权可达 | 安全组放太宽 / 误设 `AITEAM_HOST=0.0.0.0` | 绕过反代直连，越权访问 | 代码默认已绑回环（§10#1 已合入）；安全组+ufw 双层只放可信网段；勿随意放开 `AITEAM_HOST` |
 | 公开注册被抢注 admin | 部署后忘记关 `AITEAM_ALLOW_SIGNUP` | 外部抢注管理员 | 白名单 + 注册首个 admin 后立刻 `AITEAM_ALLOW_SIGNUP=0` 重启（必做，§0/§7） |
 | better-sqlite3 ABI 不匹配 | 跨平台拷 node_modules / 换 Node 大版本 | 启动即 `ERR_DLOPEN_FAILED`/`invalid ELF` | 锁 Node 22；目标机 `npm ci --omit=dev`；失败才 `npm rebuild`（§3.2） |
 | 误 `cp` 单 `aiteam.db` 导致数据损坏/丢失 | 直接拷运行中的 db、漏 `-wal`/`-shm` | 备份/恢复出坏库或丢未合并写入 | 备份用 VACUUM INTO 出干净单库；恢复先清脏 WAL（§5.1/§5.3/§5.4） |
@@ -598,7 +601,7 @@ find "$DATA_DIR/assets" -type f -mtime +90 -print -delete
 - [ ] Node 22 + 编译链（大陆默认装）+ npm/二进制镜像
 - [ ] `ss -ltnp 'sport = :80'` 确认 80 归属，决定加入已有 Nginx 还是新装（§2.3）
 - [ ] `/etc/aiteam/aiteam.env`：`NODE_ENV=production`、`AITEAM_SESSION_SECRET`（openssl 生成）、`AITEAM_ADMIN_EMAILS`、`AITEAM_ALLOW_SIGNUP=1`；权限 600 属主 aiteam
-- [ ] （建议）应用 §10 #1 绑回环改动并设 `AITEAM_HOST=127.0.0.1`
+- [ ] 确认绑回环生效（默认已合入）：启动日志应为 `http://127.0.0.1:8787`；勿误设 `AITEAM_HOST=0.0.0.0`
 - [ ] systemd unit 装好、`enable`、`reboot` 验证开机自启
 - [ ] 安全组 + ufw/firewalld 双层：8787/8788/8789 不入站；80 只放可信网段；22 加固
 - [ ] Nginx 配置（路径前缀，§4.3）

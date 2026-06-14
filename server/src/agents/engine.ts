@@ -44,6 +44,7 @@ import { currentOwner, withOwner } from "../ownerScope.js";
 import { parseSlides } from "../pptx.js";
 import { callMcpTool, isMcpTool, mcpToolDefs, mcpToolPrefixReady, mcpSafetyGate } from "./mcp.js";
 import { IMAGE_TOOL, generateImage, imageGenAvailable } from "./images.js";
+import { getSkillTemplate } from "../registry.js";
 
 const MAX_CHAIN_DEPTH = Number(process.env.AGENT_CHAIN_DEPTH ?? 2);
 const MAX_REVISIONS = Number(process.env.TASK_MAX_REVISIONS ?? 1);
@@ -869,7 +870,19 @@ export function buildSkillIndex(focus: string, skills?: Skill[]): string {
 export function readSkillBody(id: string): string {
   const sk = getSkill(id);
   if (!sk || !sk.enabled) return "";
-  return sk.body || sk.content || sk.desc;
+  let out = sk.body || sk.content || sk.desc;
+  // L3：resources_json 里的 `tpl:<id>` 引用 → 把内置模板正文附带返回（按需，不进常驻索引）
+  let refs: string[] = [];
+  try {
+    const parsed = JSON.parse(sk.resources_json || "[]");
+    if (Array.isArray(parsed)) refs = parsed.map(String);
+  } catch { /* 坏 JSON 忽略 */ }
+  for (const r of refs) {
+    if (!r.startsWith("tpl:")) continue;
+    const tpl = getSkillTemplate(r.slice(4));
+    if (tpl) out += `\n\n## 可复用模板：${tpl.name}\n${tpl.desc}\n\`\`\`${tpl.lang}\n${tpl.content}\n\`\`\``;
+  }
+  return out;
 }
 
 function buildDynamicContext(agent: Agent, channel: Channel, focus = ""): string {
@@ -1193,10 +1206,10 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
       return stripLoneSurrogates(`《${doc.title}》\n\n${doc.content.slice(0, 20000)}`);
     }
     case "read_skill": {
-      // 渐进式披露 L2：按需拉技能正文。只读、零计费（走 execTool 同步分支，不计 MCP_CALLS_PER_RUN）。
+      // 渐进式披露 L2/L3：按需拉技能正文 + 附带的可复用模板。只读、零计费（同步分支，不计 MCP_CALLS_PER_RUN）。
       const sk = getSkill(String(input.skill_id));
       if (!sk || !sk.enabled) return `未找到该技能或未启用（id: ${input.skill_id}）。`;
-      return stripLoneSurrogates(`【技能：${sk.name}】\n${sk.body || sk.content || sk.desc}`);
+      return stripLoneSurrogates(`【技能：${sk.name}】\n${readSkillBody(sk.id)}`);
     }
     case "request_approval": {
       const approval = createApproval({

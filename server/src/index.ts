@@ -15,6 +15,9 @@ import { assetsDir } from "./agents/images.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 8787);
+// 默认只听回环：本进程恒在反向代理（同机 Nginx → 127.0.0.1:PORT）之后，回环绑定使 8787
+// 不直接暴露公网（防火墙之外的第二层防御）。容器/反代在别的主机时用 AITEAM_HOST=0.0.0.0（或私网 IP）放开。
+const HOST = process.env.AITEAM_HOST || "127.0.0.1";
 
 seedGlobalSkills();
 const healed = finalizeStaleStreaming(); // 收口上次遗留的 streaming 中断消息，避免界面永久卡住
@@ -43,6 +46,6 @@ const server = createServer(app);
 const wss = new WebSocketServer({ server, path: "/aiteam/ws" });
 attachBus(wss);
 
-server.listen(PORT, () => {
-  console.log(`[aiteam] server on http://localhost:${PORT} ${isMock() ? "(mock mode — 未配置任何模型 key)" : ""}`);
+server.listen(PORT, HOST, () => {
+  console.log(`[aiteam] server on http://${HOST}:${PORT} ${isMock() ? "(mock mode — 未配置任何模型 key)" : ""}`);
 });
