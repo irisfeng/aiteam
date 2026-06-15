@@ -169,6 +169,7 @@ addColumnIfMissing("messages", "model", "model TEXT NOT NULL DEFAULT ''");
 addColumnIfMissing("messages", "reply_to", "reply_to TEXT");
 addColumnIfMissing("providers", "light_model", "light_model TEXT NOT NULL DEFAULT ''");
 addColumnIfMissing("tasks", "model_tier", "model_tier TEXT NOT NULL DEFAULT 'standard'");
+addColumnIfMissing("tasks", "source_doc_ids", "source_doc_ids TEXT NOT NULL DEFAULT '[]'"); // 定向润色：本任务以这些文档为"来源"做受限改写（grounding，非依赖产物）
 addColumnIfMissing("providers", "is_strong", "is_strong INTEGER NOT NULL DEFAULT 0");
 // 旧库迁移：早期 agents 是全局 UNIQUE(name)；多用户化后应为 UNIQUE(owner_id,name)。
 // CREATE TABLE IF NOT EXISTS 不会替换已存在表的约束 → 重建表，否则新用户 seed 撞全局唯一名导致 bootstrap 崩。
@@ -330,6 +331,8 @@ export interface Task {
   depends_on: string;
   /** 模型档位：standard = 全力模型；light = 轻量低成本模型（重复性/格式化/单一明确的执行） */
   model_tier: "standard" | "light";
+  /** JSON: 来源文档 id 数组——本任务是对这些文档的"定向润色/受限改写"（grounding），正文会注入工作简报。区别于 depends_on（前置产物） */
+  source_doc_ids: string;
   project_id: string | null;
   revision_count: number;
   created_at: number;
@@ -898,6 +901,7 @@ export function createTask(t: {
   acceptance_criteria?: string;
   depends_on?: string[];
   model_tier?: Task["model_tier"];
+  source_doc_ids?: string[];
   project_id?: string | null;
 }): Task {
   const task: Task = {
@@ -912,13 +916,14 @@ export function createTask(t: {
     acceptance_criteria: t.acceptance_criteria ?? "",
     depends_on: JSON.stringify(t.depends_on ?? []),
     model_tier: t.model_tier === "light" ? "light" : "standard",
+    source_doc_ids: JSON.stringify(t.source_doc_ids ?? []),
     project_id: t.project_id ?? null,
     revision_count: 0,
     created_at: now(),
     updated_at: now(),
   };
   db.prepare(
-    "INSERT INTO tasks (id, owner_id, channel_id, title, description, status, assignee_agent_id, created_by, acceptance_criteria, depends_on, model_tier, project_id, revision_count, created_at, updated_at) VALUES (@id, @owner_id, @channel_id, @title, @description, @status, @assignee_agent_id, @created_by, @acceptance_criteria, @depends_on, @model_tier, @project_id, @revision_count, @created_at, @updated_at)"
+    "INSERT INTO tasks (id, owner_id, channel_id, title, description, status, assignee_agent_id, created_by, acceptance_criteria, depends_on, model_tier, source_doc_ids, project_id, revision_count, created_at, updated_at) VALUES (@id, @owner_id, @channel_id, @title, @description, @status, @assignee_agent_id, @created_by, @acceptance_criteria, @depends_on, @model_tier, @source_doc_ids, @project_id, @revision_count, @created_at, @updated_at)"
   ).run(task);
   return task;
 }
