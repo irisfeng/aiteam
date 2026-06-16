@@ -440,6 +440,20 @@ try {
     check("REG1", "预设目录可读非空 + registry 无 token + mcp 列表 auth_token 脱敏", hasMcp && hasSkills && noTokenInRegistry && sanitized);
   }
 
+  // UP1 上传来源文档：txt 直读入库为 kind=source、含内容；不支持类型被拒（multipart 走 multer，非 markitdown 路径）
+  {
+    const fd = new FormData();
+    fd.append("file", new Blob(["这是上传的来源文本 UPLOADMARK42，供定向润色。"], { type: "text/plain" }), "src.txt");
+    const r = await fetch(`${BASE}/uploads`, { method: "POST", headers: { Cookie: sessionCookie }, body: fd });
+    const doc = await r.json().catch(() => ({}));
+    const fd2 = new FormData();
+    fd2.append("file", new Blob(["MZ..."], { type: "application/octet-stream" }), "evil.exe");
+    const bad = await fetch(`${BASE}/uploads`, { method: "POST", headers: { Cookie: sessionCookie }, body: fd2 });
+    check("UP1", "上传来源：txt 入库为 source+含内容；不支持类型(.exe)被拒",
+      r.ok && doc.kind === "source" && String(doc.content || "").includes("UPLOADMARK42") && !bad.ok,
+      `ok=${r.ok} kind=${doc.kind} badRejected=${!bad.ok}`);
+  }
+
   // G2 MCP 容错（坏 URL 测试应报错不卡死）
   {
     const bad = (await J("/mcp-servers", { method: "POST", body: JSON.stringify({ name: "bad", kind: "http", url: "https://invalid.example.com/mcp" }) })).body;

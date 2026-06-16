@@ -88,7 +88,7 @@ export interface Doc {
   agent_id: string | null;
   title: string;
   content: string;
-  kind: "report" | "slides" | "sheet" | "html";
+  kind: "report" | "slides" | "sheet" | "html" | "source";
   version: number;
   superseded_by: string | null;
   created_at: number;

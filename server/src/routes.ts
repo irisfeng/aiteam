@@ -44,8 +44,12 @@ import { requireAdmin, type AuthedRequest } from "./auth.js";
 import { fetchCoworkerMe } from "./coworker.js";
 import { seedForOwner } from "./seed.js";
 import { AGENT_TEMPLATES, getTemplate } from "./agents/templates.js";
-import { dropConnection, testMcpServer } from "./agents/mcp.js";
+import multer from "multer";
+import { withOwner, ownerFromUserId } from "./ownerScope.js";
+import { dropConnection, testMcpServer, callMcpTool, mcpToolPrefixReady } from "./agents/mcp.js";
+import { UPLOAD_MAX_BYTES, TEXT_EXTS, DOC_EXTS, extOf, withTempFile } from "./uploads.js";
 import {
+  createDocument,
   createProvider,
   deleteProvider,
   deleteRoutine,
@@ -452,6 +456,41 @@ api.post("/projects/:id/close", (req, res) => {
 });
 
 api.get("/documents", (_req, res) => res.json(listDocuments()));
+
+// 上传来源文档（定向润色用）：multipart 单文件 → 提取文本 → 存为 kind="source" 文档（owner 隔离 + 版本化）。
+// 安全：内存解析 + 临时文件即用即删（不持久化二进制）；类型/大小白名单；不挂 static；广播按 owner 定向。
+const uploadMw = multer({ storage: multer.memoryStorage(), limits: { fileSize: UPLOAD_MAX_BYTES, files: 1 } });
+api.post("/uploads", uploadMw.single("file"), async (req, res) => {
+  const f = (req as unknown as { file?: { originalname: string; buffer: Buffer } }).file;
+  if (!f) return res.status(400).json({ error: "未收到文件（表单字段名应为 file）" });
+  const ext = extOf(f.originalname);
+  const title = (f.originalname || "上传文档").slice(0, 200);
+  try {
+    let content: string;
+    if (TEXT_EXTS.has(ext) || ext === "") {
+      content = f.buffer.toString("utf-8"); // 纯文本直读，无需 markitdown
+    } else if (DOC_EXTS.has(ext)) {
+      if (!mcpToolPrefixReady("mcp__markitdown__*"))
+        return res.status(400).json({ error: `解析 ${ext} 文件需先启用 markitdown 插件（设置 → MCP → 浏览推荐 → 文档转 Markdown）。纯文本（txt/md/csv 等）可直接上传。` });
+      content = await withTempFile(f.buffer, ext, (p) => callMcpTool("mcp__markitdown__convert_to_markdown", { uri: "file://" + p }));
+    } else {
+      return res.status(400).json({ error: `不支持的文件类型「${ext || "无扩展名"}」` });
+    }
+    content = (content ?? "").trim();
+    if (!content) return res.status(400).json({ error: "未能从文件中提取到文本内容" });
+    // multer 的异步流解析会逃出 requireUser 建立的 withOwner(ALS) 上下文，故按 req.userId 重建 owner 作用域再写库/广播。
+    const userId = (req as AuthedRequest).userId;
+    if (!userId) return res.status(401).json({ error: "unauthorized" });
+    const doc = withOwner(ownerFromUserId(userId), () => {
+      const d = createDocument({ channel_id: null, agent_id: null, title, content, kind: "source" });
+      broadcast({ type: "doc:upsert", payload: d });
+      return d;
+    });
+    res.json(doc);
+  } catch (err: unknown) {
+    res.status(502).json({ error: `解析失败：${String((err as Error)?.message ?? err).slice(0, 200)}` });
+  }
+});
 
 /** 某文档的全部历史版本（含已被取代的旧版），供前端「查看历史版本」抽屉。 */
 api.get("/documents/:id/versions", (req, res) => {

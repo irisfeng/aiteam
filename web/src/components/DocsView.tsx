@@ -19,6 +19,8 @@ export function docKindMeta(kind: Doc["kind"]) {
       return { icon: "📊", label: "数据表", ext: ".csv", mime: "text/csv", hint: "CSV，可导入 Excel" };
     case "html":
       return { icon: "🌐", label: "网页", ext: ".html", mime: "text/html", hint: "单文件 HTML，沙箱预览，可下载本地打开" };
+    case "source":
+      return { icon: "📎", label: "来源", ext: ".md", mime: "text/markdown", hint: "上传的来源文档（已转 Markdown），供 AI 同事定向润色时 grounding" };
     default:
       return { icon: "📄", label: "报告", ext: ".md", mime: "text/markdown", hint: "Markdown" };
   }
@@ -463,6 +465,7 @@ const DOC_KINDS: { k: "all" | Doc["kind"]; label: string }[] = [
   { k: "slides", label: "🖥 演示" },
   { k: "sheet", label: "📊 数据表" },
   { k: "html", label: "🌐 网页" },
+  { k: "source", label: "📎 来源" },
 ];
 
 export function DocsView() {
@@ -471,6 +474,20 @@ export function DocsView() {
   const [kind, setKind] = useState<"all" | Doc["kind"]>("all");
   const [q, setQ] = useState("");
   const [showMock, setShowMock] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  async function onUpload(file: File) {
+    setUploading(true);
+    try {
+      await api.uploadDoc(file); // 成功后经 WS doc:upsert 自动进文档列表
+      setKind("source"); // 切到"来源"筛选，便于用户立刻看到刚上传的
+    } catch (err) {
+      window.alert("上传失败：" + ((err as Error)?.message ?? err));
+    } finally {
+      setUploading(false);
+    }
+  }
 
   const mockDocs = ws.documents.filter(isMockDoc);
   let visible = showMock ? ws.documents : ws.documents.filter((d) => !isMockDoc(d));
@@ -508,6 +525,21 @@ export function DocsView() {
       <header className="flex flex-wrap items-center gap-2 border-b border-line px-5 py-3">
         <h1 className="text-[15px] font-semibold">文档</h1>
         <span className="hidden text-[12px] text-ink-3 lg:inline">AI 同事交付的报告、演示文稿与数据表都沉淀在这里</span>
+        <button
+          onClick={() => fileRef.current?.click()}
+          disabled={uploading}
+          className="rounded-lg border border-line px-2.5 py-1 text-[12px] text-ink-2 hover:bg-sel disabled:opacity-50"
+          title="上传文档(PDF/Word/PPT/Excel/txt/md…)作为「来源」，供 AI 同事定向润色时 grounding"
+        >
+          {uploading ? "上传中…" : "📎 上传来源"}
+        </button>
+        <input
+          ref={fileRef}
+          type="file"
+          hidden
+          accept=".txt,.md,.markdown,.csv,.tsv,.json,.log,.yaml,.yml,.xml,.pdf,.docx,.doc,.pptx,.ppt,.xlsx,.xls,.epub,.html,.htm,.png,.jpg,.jpeg,.gif,.webp"
+          onChange={(e) => { const file = e.currentTarget.files?.[0]; e.currentTarget.value = ""; if (file) void onUpload(file); }}
+        />
         <div className="ml-auto flex flex-wrap items-center gap-1.5">
           {DOC_KINDS.map(({ k, label }) => (
             <button

@@ -131,4 +131,12 @@ export const api = {
   docVersions: (id: string) => req<Doc[]>(`/documents/${id}/versions`),
   deleteDocument: (id: string) =>
     req<{ ok: boolean; deleted: string[] }>(`/documents/${id}`, { method: "DELETE" }),
+  // 上传来源文档：用 FormData（绕过 req() 的 application/json），让浏览器自带 multipart 边界；同源 cookie 自动带上。
+  uploadDoc: async (file: File): Promise<Doc> => {
+    const fd = new FormData();
+    fd.append("file", file);
+    const res = await fetch(`${API_BASE}/uploads`, { method: "POST", body: fd });
+    if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as { error?: string })?.error ?? `HTTP ${res.status}`);
+    return res.json() as Promise<Doc>;
+  },
 };

@@ -1063,8 +1063,8 @@ export interface Doc {
   agent_id: string | null;
   title: string;
   content: string;
-  /** report = Markdown 报告；slides = Marp 风格演示文稿（--- 分页）；sheet = CSV/表格数据 */
-  kind: "report" | "slides" | "sheet";
+  /** report=Markdown 报告；slides=Marp 演示(--- 分页)；sheet=CSV/表格；html=单文件网页；source=上传来源文档(定向润色用) */
+  kind: "report" | "slides" | "sheet" | "html" | "source";
   /** 版本号（1 起）；同 (task_id,kind) 返工再写即递增 */
   version: number;
   /** 被哪条新版取代的 doc id；NULL = 当前版 */
