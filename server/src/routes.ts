@@ -400,13 +400,16 @@ api.delete("/providers/:id", requireAdmin, (req, res) => {
 api.get("/tasks", (_req, res) => res.json(listTasks()));
 
 api.post("/tasks", (req, res) => {
-  const { title, description, channel_id, assignee_agent_id } = req.body ?? {};
+  const { title, description, channel_id, assignee_agent_id, acceptance_criteria, source_doc_ids } = req.body ?? {};
   if (!title) return res.status(400).json({ error: "title required" });
   const task = createTask({
     title: String(title),
     description: String(description ?? ""),
+    acceptance_criteria: String(acceptance_criteria ?? ""),
     channel_id: channel_id ?? null,
     assignee_agent_id: assignee_agent_id ?? null,
+    // 定向润色：前端/调用方可直接把来源文档 id 挂到任务上，触发 buildWorkBrief 的受限改写引导
+    source_doc_ids: Array.isArray(source_doc_ids) ? source_doc_ids.map(String) : [],
     created_by: "user",
   });
   broadcast({ type: "task:upsert", payload: task });
