@@ -178,7 +178,7 @@ export const MCP_REGISTRY: McpPreset[] = [
     runtime_china: "yes",
     install_china: "degrade",
     safety: "exec",
-    install: `参考 github.com/hugohe3/ppt-master 本地部署（Python，依赖装清华源 ${PIP_MIRROR}）；未启用时常规演示用内置 slides(Marp→pptx) 一键导出即可`,
+    install: `可选自托管增强（非必需，默认关）：常规演示用内置 slides(Marp→pptx) 一键导出即可；仅当确需母版级保真，再自行获取社区 ppt-master 源码自托管（Python，依赖装清华源 ${PIP_MIRROR}；大陆访问 GitHub 需自备镜像/代理）`,
     phase: "P2",
   },
 ];
