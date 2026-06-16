@@ -51,7 +51,7 @@ const BUILTIN_AGENTS = [
  * 第三方方法学均为蒸馏改写（非原文照搬），来源与许可见 THIRD_PARTY_NOTICES/。
  * 扩库或改正文时整体把 BUILTIN_SKILL_PACK_VERSION +1，并把对应条目 version 设为该值。
  */
-export const BUILTIN_SKILL_PACK_VERSION = 3;
+export const BUILTIN_SKILL_PACK_VERSION = 4;
 const V = BUILTIN_SKILL_PACK_VERSION;
 
 type BuiltinSkill = Required<Pick<SkillInput, "name" | "desc" | "trigger" | "when_to_use" | "body" | "kind" | "version">> &
@@ -221,6 +221,13 @@ export const BUILTIN_SKILLS: BuiltinSkill[] = [
     trigger: "收尾,合并,merge,pr,提测,交付分支,landing,封板,上线前",
     when_to_use: "一段开发完成、准备合并/提测/交付前",
     body: "结论先行：合并前过完整检查单，用证据而非口头声称。1) 全部验收标准逐条核对；2) 测试 / 构建跑通并贴出输出证据（不口头声称『应该没问题』）；3) 清理死代码 / 调试残留 / TODO；4) 文档与变更同步；5) 在 PR 描述里附自查表 + 已知风险 + 回滚方式；6) 关单（done）由人工确认。（蒸馏自 superpowers finishing-a-development-branch 与 verification-before-completion）",
+  },
+  {
+    name: "定向润色/受限改写法", kind: "method", version: V,
+    desc: "基于来源文档做有目标、限定范围的润色/改写——grounding 在原文、不发明、不越界、附改动清单（解决『从零生成→泛泛而谈』）",
+    trigger: "润色,改写,修订,基于文档,定向修改,受限编辑,polish,在...基础上,按这份,改一下",
+    when_to_use: "用户给了来源文档（草稿/需求/材料），要在其基础上做有目标的修改/补全，而非从零写",
+    body: "结论先行：grounding 在来源文档，逐段改、不发明、不越界——产出是『修订版』不是『另写一篇』。1) 先通读来源全文（简报里已注入来源，或用 read_document 拉取），识别其结构与既有结论；2) 严格按任务限定的【目标 + 范围】改，范围外段落原样保留，不擅自扩写/删改/替换论点；3) 任何新增事实/数据必须来自来源文档、或显式调研并标来源，禁凭空补全；4) 交付物开头给『改动清单』：逐条 [改了哪段] → [怎么改] → [依据来源何处/为何]，并单列『刻意未改动』部分；5) 不确定是否越界时，用 request_approval 或在频道里问，不自作主张重写。要点：从零生成的风险是『言之无物』，定向润色把风险转成『越界』——而越界可被验收标准逐条机械检出，质量更可控。",
   },
 
   // ── 能力型技能（capability：指向工具/MCP，read_skill 给用法+降级）──

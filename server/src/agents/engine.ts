@@ -543,6 +543,16 @@ export function buildWorkBrief(task: Task, channel: Channel): string {
       ? `\n## 前置任务的交付物（你的工作以此为输入）\n` +
         depDocs.map(({ dep, doc }) => `### 来自「${dep.title}」：《${doc.title}》\n${doc.content.slice(0, 4000)}`).join("\n\n")
       : "";
+  // 定向润色 grounding：本任务若挂了 source_doc_ids，则是对这些来源文档做"有目标、限定范围的受限改写"，
+  // 把来源全文注入简报（配额 8000 字 > dep 的 4000），让产出有真实输入锚，而非从零生成泛泛而谈。
+  let srcIds: string[] = [];
+  try { const p = JSON.parse(task.source_doc_ids || "[]"); if (Array.isArray(p)) srcIds = p.map(String); } catch { /* ignore */ }
+  const sourceDocs = srcIds.map((id) => getDocument(id)).filter((d): d is NonNullable<ReturnType<typeof getDocument>> => Boolean(d));
+  const polishMode = sourceDocs.length > 0;
+  const sourceSection = polishMode
+    ? `\n## 来源文档（本任务是对以下内容做【有目标、限定范围的润色/改写】，grounding 在此——不得发明、不得越界）\n` +
+      sourceDocs.map((d) => `### 来源《${d.title}》（id: ${d.id}）\n${d.content.slice(0, 8000)}`).join("\n\n")
+    : "";
   const transcript = buildTranscript(channel.id, 20);
   // 目标链（借鉴 Paperclip）：让任务知道自己服务于什么目标
   const project = task.project_id ? getProject(task.project_id) : undefined;
@@ -555,6 +565,10 @@ export function buildWorkBrief(task: Task, channel: Channel): string {
     task.acceptance_criteria ? `验收标准（交付物将被逐条核验）：\n${task.acceptance_criteria}` : "",
     `所在频道：#${channel.name}`,
     depSection,
+    sourceSection,
+    polishMode
+      ? `⚠️ 本任务是【定向润色 / 受限改写】：产出是对上面"来源文档"的修订，不是另写一篇。① 通读来源，严格按"详情/验收标准"限定的目标与范围改，范围外原样保留；② 新增事实/数据须来自来源或显式调研并标来源，禁凭空补全；③ 交付物开头给「改动清单」：逐条 [改了哪段]→[怎么改]→[依据来源何处]，并列「刻意未改动」部分。如已启用「定向润色/受限改写法」技能，按其方法执行。`
+      : "",
     ``,
     `<transcript>（频道最近讨论，供你了解背景）`,
     transcript,
@@ -974,14 +988,19 @@ const TOOLS: Anthropic.ToolUnion[] = [
   {
     name: "create_task",
     description:
-      "在团队任务看板上创建单个任务。指派给 AI 同事后对方会自动开工；写清验收标准，交付物将被逐条核验。",
+      "在团队任务看板上创建单个任务。指派给 AI 同事后对方会自动开工；写清验收标准，交付物将被逐条核验。若是基于某份已有文档做润色/改写/补全（而非从零生成），用 source_doc_ids 指明来源文档——系统会把来源全文注入负责人的工作简报，并要求其受限改写、附改动清单，避免泛泛而谈。",
     input_schema: {
       type: "object" as const,
       properties: {
         title: { type: "string", description: "任务标题，简洁的动宾短语" },
         description: { type: "string", description: "任务详情，包含足够的背景（负责人将据此独立完成）" },
-        acceptance_criteria: { type: "string", description: "逐条可核验的验收标准" },
+        acceptance_criteria: { type: "string", description: "逐条可核验的验收标准；定向润色任务应写明范围（如：仅润色第 3 节、保留原结论、不新增原文未出现的数据）" },
         assignee: { type: "string", description: "负责人的名字（AI 同事名，或留空表示未分配）" },
+        source_doc_ids: {
+          type: "array",
+          items: { type: "string" },
+          description: "来源文档 id 数组（上下文文档列表里的 id）。填了即为『定向润色/受限改写』任务：负责人 grounding 在这些文档、限定范围改、不发明、附改动清单。",
+        },
         model_tier: {
           type: "string",
           enum: ["standard", "light"],
@@ -1157,6 +1176,7 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
         assignee_agent_id: assignee?.id ?? null,
         created_by: agent.id,
         model_tier: input.model_tier === "light" ? "light" : "standard",
+        source_doc_ids: Array.isArray(input.source_doc_ids) ? input.source_doc_ids.map(String) : [],
       });
       broadcast({ type: "task:upsert", payload: task });
       audit(channel.id, `🗂️ ${agent.name} 创建了任务「${task.title}」${assignee ? `，指派给 ${assignee.name}` : ""}`);

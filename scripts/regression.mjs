@@ -318,6 +318,19 @@ check(
   check("DEDUP1", "跨插件检索去重：同句不同插件同签名、非检索类不参与", ok, `a=${a}`);
 }
 
+// SRC1 定向润色 grounding：任务挂 source_doc_ids → buildWorkBrief 注入来源全文 + 受限改写框架（解决"从零生成泛泛而谈"）
+{
+  const src = db.createDocument({ channel_id: ch.id, agent_id: pm.id, title: "来源草稿X", kind: "report", content: "来源文档独特标记 ZZTOP123，需要被定向润色。" });
+  const t = db.createTask({ channel_id: ch.id, title: "润色来源草稿X", assignee_agent_id: eng.id, created_by: pm.id, source_doc_ids: [src.id], acceptance_criteria: "仅润色、不新增数据" });
+  const brief = engine.buildWorkBrief(t, ch);
+  const noSrc = engine.buildWorkBrief(db.createTask({ channel_id: ch.id, title: "普通任务", assignee_agent_id: eng.id, created_by: pm.id }), ch);
+  const ok =
+    brief.includes("ZZTOP123") &&                       // 来源全文已注入
+    /来源文档|定向润色|受限改写/.test(brief) &&          // 受限改写框架已注入
+    !noSrc.includes("受限改写");                          // 无 source 的任务不触发该框架
+  check("SRC1", "定向润色：source_doc_ids 把来源全文+受限改写框架注入工作简报，无来源不触发", ok, `len=${brief.length}`);
+}
+
 // ---------------------------------------------------------------------------
 // Phase 2：拉起服务，走 HTTP API（聊天/引用/文档/技能/MCP/用量/导出/模板/频道）
 // ---------------------------------------------------------------------------
