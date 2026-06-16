@@ -51,7 +51,7 @@ const BUILTIN_AGENTS = [
  * 第三方方法学均为蒸馏改写（非原文照搬），来源与许可见 THIRD_PARTY_NOTICES/。
  * 扩库或改正文时整体把 BUILTIN_SKILL_PACK_VERSION +1，并把对应条目 version 设为该值。
  */
-export const BUILTIN_SKILL_PACK_VERSION = 4;
+export const BUILTIN_SKILL_PACK_VERSION = 7;
 const V = BUILTIN_SKILL_PACK_VERSION;
 
 type BuiltinSkill = Required<Pick<SkillInput, "name" | "desc" | "trigger" | "when_to_use" | "body" | "kind" | "version">> &
@@ -125,7 +125,7 @@ export const BUILTIN_SKILLS: BuiltinSkill[] = [
     trigger: "ppt,演示,幻灯片,slides,presentation,演讲稿,路演,deck",
     when_to_use: "制作演示/幻灯片，需要确定信息密度与节奏时",
     resources_json: JSON.stringify(["tpl:html-deck-horizontal"]),
-    body: "结论先行：先问『讲者驱动 vs 读物优先』再定密度。1) 讲者驱动：每页 1-2 个观点、大字号、≤3 个要点，宁可多分页；2) 读物优先：更紧凑、4-6 个信息单元、每页自包含；3) 防溢出：估算单页元素数对照密度上限，超了就拆续页；4) 交 HTML 演示时锁定 16:9 舞台（整体 scale 缩放、不重排，letterbox 可接受），可直接套用本技能附带的『横向翻页网页 PPT』模板（走 html 交付物）；5) 主题节奏：避免连续 3 页同色调；6) 落点：slides(Marp，可导出 pptx) 或 html(网页 deck) 按需选。（蒸馏自 frontend-slides / guizang-ppt）",
+    body: "结论先行：先问『讲者驱动 vs 读物优先』再定密度，并善用 slides(Marp→内置 pptx) 的结构化原语（slides 正文用纯 Markdown，禁原始 HTML——HTML 只属 html 交付物）。1) 讲者驱动：每页 1-2 个观点、≤3 要点、宁可多分页；读物优先：4-6 个信息单元、每页自包含。2) **大数字用数字卡**：把关键指标写成单独成行的 `值 :: 标签`（如 `268亿元 :: 市场规模`、`↓80% :: 人力成本`），连续多行会自动渲成一排数字卡（最多 4 个），比埋进正文有力得多——方案/路演页标配。3) **章节幕页**：只含一个 `# 标题`（无其它内容）的页渲成章节分隔页，用于分段。4) **对比/选型用 Markdown 表格**（渲成原生可编辑 pptx 表格，不要压成要点）。5) 讲者备注写 `<!-- note: … -->`。6) 防溢出：渲染器已按高度预算自动分续页（标题带『（续）』）并均衡分配，但仍要主动控密度、别硬塞。7) 关键数字无可靠来源就写『示意值，待核实』，绝不编造。8) HTML 网页 deck 锁 16:9、可套本技能附带模板。落点：对外演示首选 slides（用户在文档面板一键 ⬇ .pptx，可编辑、无需 MCP）；纯网页交互才用 html。（蒸馏自 frontend-slides / guizang-ppt）",
   },
   {
     name: "反 AI-slop 设计审美守则", kind: "method", version: V,
@@ -230,6 +230,15 @@ export const BUILTIN_SKILLS: BuiltinSkill[] = [
     body: "结论先行：grounding 在来源文档，逐段改、不发明、不越界——产出是『修订版』不是『另写一篇』。1) 先通读来源全文（简报里已注入来源，或用 read_document 拉取），识别其结构与既有结论；2) 严格按任务限定的【目标 + 范围】改，范围外段落原样保留，不擅自扩写/删改/替换论点；3) 任何新增事实/数据必须来自来源文档、或显式调研并标来源，禁凭空补全；4) 交付物开头给『改动清单』：逐条 [改了哪段] → [怎么改] → [依据来源何处/为何]，并单列『刻意未改动』部分；5) 不确定是否越界时，用 request_approval 或在频道里问，不自作主张重写。要点：从零生成的风险是『言之无物』，定向润色把风险转成『越界』——而越界可被验收标准逐条机械检出，质量更可控。",
   },
 
+  {
+    name: "解决方案/售前方案法", kind: "method", version: V,
+    desc: "把需求做成可落地、可信、能讲的解决方案：结构(痛点→方案→架构→选型→ROI→实施→案例→CTA) + 数字接地 + 配套可导出演示",
+    trigger: "解决方案,方案,售前,提案,投标,标书,客户方案,技术方案,介绍ppt,产品介绍,商业计划,商业方案",
+    when_to_use: "在解决方案频道、或为客户产出整套解决方案/对外介绍演示时",
+    resources_json: JSON.stringify(["tpl:html-deck-horizontal"]),
+    body: "结论先行：对外解决方案要『结构清、数字实、能直接讲』。1) 叙事主线（金字塔、结论先行）：客户痛点/现状 → 方案概览(一句话价值主张) → 总体架构 → 关键能力 → 选型/对比(表格+推荐理由) → 量化价值/ROI → 实施路线图(分阶段+周期) → 风险与保障 → 标杆案例 → 下一步 CTA。2) 数字接地（最关键）：市场规模/降本/提效/ROI 等关键数字必须有来源（链接/出处/『据 X 报告』）或显式标『示意值，待核实』，绝不编造看似精确的数字——对外假数据最损可信度；动笔前先 read_document 查工作区有无现成材料/调研结论，没有再检索。3) 交付组合：详版用 report；对外讲用 slides——关键指标走 `值 :: 标签` 数字卡、分段用『只含 # 标题』的章节幕页、对比用 Markdown 表格、附讲者备注 `<!-- note: … -->`（内容写注释里）、正文禁原始 HTML；用户在文档面板一键 ⬇ .pptx（可编辑、无需 MCP/命令行，别让用户跑命令行）。4) 选型必给对比表 + 推荐理由 + 取舍说明，不回避约束。5) 交付附自查表，但只声称渲染真能产出的要素。配合『金字塔写作法』『深度调研法』『演示设计与防溢出法』。",
+  },
+
   // ── 能力型技能（capability：指向工具/MCP，read_skill 给用法+降级）──
   {
     name: "文档解析能力", kind: "capability", version: V,
@@ -241,11 +250,11 @@ export const BUILTIN_SKILLS: BuiltinSkill[] = [
   },
   {
     name: "可编辑 PPTX 能力", kind: "capability", version: V,
-    desc: "高保真可编辑 PPTX 优先用 MCP，不可达则降级 Marp（依赖 pptx MCP，默认未就绪）",
-    trigger: "可编辑ppt,高保真pptx,母版,模板ppt,精美演示",
-    when_to_use: "需要高保真、可在 PowerPoint 里继续编辑的 PPTX 时",
+    desc: "做 PPT 直接用 slides 交付物，用户在文档面板一键导出可编辑真 .pptx（内置、无需 MCP）；母版级保真才用自托管 MCP（默认关）",
+    trigger: "可编辑ppt,高保真pptx,母版,模板ppt,精美演示,导出ppt,导出pptx,pptx",
+    when_to_use: "需要做 PPT / 可在 PowerPoint 继续编辑的演示文稿、或被问到如何导出 pptx 时",
     resources_json: JSON.stringify(["mcp__pptx-native__*", "generate_image"]),
-    body: "需要高保真可编辑 PPTX 时：1) 优先用 ppt-master/pptx MCP（真 DrawingML，可在 PowerPoint 编辑）；2) 该 MCP 不可达时（一期默认未就绪），降级用 write_document(slides)（Marp→pptxgenjs 真 .pptx，已可导出）。该类 MCP 在宿主本地执行、属高危(exec)，受引擎审批门约束、默认关闭。",
+    body: "结论先行：做 PPT 直接用 write_document(kind=slides)（Marp 分页）。交付后用户在「文档」面板打开该文档、点标题栏「⬇ .pptx」即可导出**可编辑的真 .pptx**（pptxgenjs 渲染，PowerPoint/WPS/Keynote 直接打开，文本/表格/讲者备注均可编辑）——这是默认且唯一需要的路径，**完全内置、无需任何 MCP / 插件 / 命令行**。1) 绝不要告诉用户『导出不可用 / 依赖未就绪 / 需要 pptxgenjs 等服务』，也绝不要让用户自己去跑 marp-cli 等命令；2) 用户问『在哪看 / 怎么导出』→ 指引去「文档」面板打开、点 ⬇ .pptx，不要把整篇正文倒进聊天；3) 仅当确需母版级 DrawingML 高保真、且管理员已自托管启用 pptx-native(ppt-master) MCP 时，才走该 MCP，否则一律用内置 slides→pptx。该 MCP 在宿主本地执行、属高危(exec)、默认关闭。",
   },
   {
     name: "国产联网检索能力", kind: "capability", version: V,

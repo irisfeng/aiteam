@@ -185,6 +185,35 @@ check(
     `表格=${tbl ? `${tbl.header.length}列${tbl.rows.length}行` : "无"}`);
 }
 
+// PPTX3 渲染升级：`值 :: 标签`→数字卡解析；长页按高度预算自动分续页（实渲幻灯片数 > 源页数）
+{
+  const { parseSlides, slidesManifest } = await import(join(root, "server/dist/pptx.js"));
+  const longPage = Array.from({ length: 14 }, (_, i) => `- 要点 ${i + 1}：这是一条较长的要点用于撑高页面高度从而触发自动续页分页逻辑`).join("\n");
+  const md = `# 封面\n\n---\n\n# 关键数字\n\n268亿元 :: 市场规模\n↓80% :: 人力成本\n\n---\n\n# 密集页\n\n${longPage}`;
+  const pages = parseSlides(md);
+  const statsPage = pages.find((p) => p.stats.length > 0);
+  const m = slidesManifest(md);
+  const ok =
+    Boolean(statsPage) && statsPage.stats.length === 2 && statsPage.stats[0].value === "268亿元" &&
+    m.statCards === 2 && m.renderedSlides > m.sourcePages && m.continuationSlides >= 1;
+  check("PPTX3", "渲染升级：值::标签→数字卡 + 长页自动续页（实渲>源页）", ok,
+    `源页=${m.sourcePages} 实渲=${m.renderedSlides} 续页=${m.continuationSlides} 数字卡=${m.statCards}`);
+}
+
+// PPTX4 解析健壮性：块状 <!-- note -->…<!-- end note --> 入备注不漏正文 + 剥离 slides 里的原始 HTML（跨行）
+{
+  const { parseSlides } = await import(join(root, "server/dist/pptx.js"));
+  const md = "# 封面\n\n副标题\n\n<!-- note -->\n这是讲者备注内容不应出现在正文\n<!-- end note -->\n\n---\n\n# 能力\n\n<div style=\"display:flex;\ngap:16px\">\n实际要点A\n</div>\n\n- 正常要点";
+  const pages = parseSlides(md);
+  const cover = pages[0], cap = pages[1];
+  const noteCaptured = cover.notes.includes("讲者备注内容");
+  const noteNotLeaked = !cover.bullets.concat(cover.paragraphs).join("").includes("讲者备注内容");
+  const capJson = JSON.stringify(cap);
+  const htmlStripped = !capJson.includes("<div") && !capJson.includes("style=") && !capJson.includes("</div>") && capJson.includes("实际要点A");
+  check("PPTX4", "解析健壮性：块状讲者备注入 notes 不漏正文 + slides 原始 HTML(跨行)被剥离", noteCaptured && noteNotLeaked && htmlStripped,
+    `noteCaptured=${noteCaptured} noteNotLeaked=${noteNotLeaked} htmlStripped=${htmlStripped}`);
+}
+
 // WD1 write_document kind 契约校验：坏格式被拒（返回行号/分页提示），合法格式放行
 {
   const v = engine.validateDocContent;
@@ -272,6 +301,23 @@ check(
     typeof v("html", "<svg/onload=alert(1)>") === "string" &&             // 内联事件(/ 分隔，HTML5 绕过) 拒
     typeof v("html", '<a href="javascript:alert(1)">x</a>') === "string";  // javascript: URI 拒
   check("DOC-HTML", "html 交付物：合法放行 + 外链script/内联事件(含 /onload 绕过)/js:URI 全拒（防存储型 XSS）", ok);
+}
+
+// DOC-SRC 无源数字软门：report/slides 多处量化且零来源/零示意标注 → 退回自纠；有来源/示意/少量/sheet/html → 放行
+{
+  const v = engine.validateDocContent;
+  const manyNums = "市场规模 268亿元，渗透率 60%，成本下降 80%，ROI 提升 3 倍，年省 500 万元。";
+  const withSrc = manyNums + "（来源：https://example.com/report）";
+  const withMark = "市场规模 268亿元，渗透率 60%，成本下降 80%，ROI 提升 3 倍，年省 500 万元（示意值，待核实）。";
+  const few = "本季度营收 100 万元，同比增长 20%。";
+  const sheetNums = "指标,数值\n市场规模,268亿元\n渗透率,60%\n成本下降,80%\nROI,3倍\n年省,500万元"; // 合法 CSV，数字多但 sheet 不受 C2 约束
+  const ok =
+    typeof v("report", manyNums) === "string" &&   // 多处无源 → 退回自纠
+    v("report", withSrc) === null &&               // 有来源标注 → 放行
+    v("report", withMark) === null &&              // 示意值标注 → 放行
+    v("report", few) === null &&                   // 量化数量少(<5) → 不误伤
+    v("sheet", sheetNums) === null;                // sheet 豁免（数据表本就是数字，格式合法即放行）
+  check("DOC-SRC", "无源数字软门：report 多处量化零来源退回；有来源/示意/少量/sheet 放行", ok);
 }
 
 // SK5 L3 模板资源：技能用 tpl: 引用内置模板，read_skill 附带模板正文返回
