@@ -948,6 +948,11 @@ const DELIVERY_RULES = `## 交付与导出（平台已内置，按此回答用�
 - 绝不要声称"导出不可用 / 依赖未就绪 / 需要 pptxgenjs 等服务"，也绝不要让用户自己去跑命令行（如 marp-cli）来导出——这些说法都是错的。
 - 用户问"在哪看 / 怎么导出"时，直接指引他到「文档」面板打开该文档、点标题栏的导出按钮（slides 点 ⬇ .pptx），不要把整篇正文倒进聊天。`;
 
+// 输入/上传途径红线（与交付红线同理）：纠正 agent 别承诺平台做不到的输入方式，尤其"贴图看图"。
+const INPUT_RULES = `## 用户给资料的途径（按此引导，别承诺做不到的）
+- 文件资料（PDF/Word/PPT/Excel/txt/md/csv 等）：用户可在**聊天输入框的 📎** 或「文档 → 📎 上传来源」上传；系统会**抽取其文本**存为「来源」文档，你用 read_document 读全文（解析非纯文本需管理员已启用 markitdown 插件）。
+- **截图 / 图片无法被读取**：系统只抽文本、不解析图像，模型也收不到图像像素——遇到界面/截图，请让用户**用文字描述**画面布局、字段、流程；不要让用户贴图、也不要声称你能看图。`;
+
 function buildDynamicContext(agent: Agent, channel: Channel, focus = ""): string {
   const teammates = channelAgents(channel)
     .filter((a) => a.id !== agent.id)
@@ -979,6 +984,7 @@ function buildDynamicContext(agent: Agent, channel: Channel, focus = ""): string
     tasks ? `频道任务看板：\n${tasks}` : `任务看板目前为空。`,
     docs ? `工作区文档（可用 read_document 阅读全文）：\n${docs}` : "",
     DELIVERY_RULES,
+    INPUT_RULES,
     memory ? `## 你的长期记忆（先查阅，"核实过的事实/通用规则"优先遵循）\n${memory}` : "",
     skillsBlock ? `## 已启用的技能（索引——需要某条的具体方法/步骤时用 read_skill(id) 取正文再遵循）\n${skillsBlock}` : "",
   ]
