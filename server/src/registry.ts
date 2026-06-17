@@ -169,16 +169,16 @@ export const MCP_REGISTRY: McpPreset[] = [
   },
   {
     key: "pptx-native",
-    name: "高保真可编辑 PPTX",
+    name: "可编辑 PPTX · 母版级增强（自托管，可选）",
     kind: "stdio",
     command: "python",
     args: ["-m", "ppt_master"],
-    desc: "生成真 DrawingML、可在 PowerPoint 继续编辑的 PPTX（社区 ppt-master，本地 Python）。office-doc 场景。本地执行=高危，默认关、不建议共用主机直接启用。",
+    desc: "母版级 DrawingML 高保真 PPTX（社区 ppt-master，本地 Python）。注意：常规演示用内置 slides(Marp→pptx) 一键导出即可，本预设仅为需要母版级保真时的可选自托管增强。本地执行=高危，默认关、不建议共用主机直接启用。",
     scenario: "office-doc",
     runtime_china: "yes",
     install_china: "degrade",
     safety: "exec",
-    install: `参考 github.com/hugohe3/ppt-master 本地部署（Python，依赖装清华源 ${PIP_MIRROR}）；不可用时降级用 slides(Marp→pptx)`,
+    install: `可选自托管增强（非必需，默认关）：常规演示用内置 slides(Marp→pptx) 一键导出即可；仅当确需母版级保真，再自行获取社区 ppt-master 源码自托管（Python，依赖装清华源 ${PIP_MIRROR}；大陆访问 GitHub 需自备镜像/代理）`,
     phase: "P2",
   },
 ];
@@ -224,7 +224,7 @@ const HTML_DECK_HORIZONTAL = `<!doctype html>
 <style>
   :root{ --bg:#0f1115; --ink:#f4f1ea; --dim:#9aa0a6; --accent:#ffd84d; }
   *{box-sizing:border-box;margin:0;padding:0}
-  html,body{height:100%;background:var(--bg);color:var(--ink);font-family:"PingFang SC","Helvetica Neue",Arial,sans-serif;overflow:hidden}
+  html,body{height:100%;background:var(--bg);color:var(--ink);font-family:-apple-system,"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Segoe UI",sans-serif;overflow:hidden}
   #stage{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
   .deck{aspect-ratio:16/9;width:min(100vw,calc(100vh*16/9));height:min(100vh,calc(100vw*9/16));position:relative;overflow:hidden}
   .slide{position:absolute;inset:0;padding:7% 9%;display:flex;flex-direction:column;justify-content:center;gap:.6em;opacity:0;transition:opacity .35s;pointer-events:none}

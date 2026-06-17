@@ -41,7 +41,7 @@ import {
 } from "../db.js";
 import { broadcast } from "../bus.js";
 import { currentOwner, withOwner } from "../ownerScope.js";
-import { parseSlides } from "../pptx.js";
+import { parseSlides, slidesManifest } from "../pptx.js";
 import { callMcpTool, isMcpTool, mcpToolDefs, mcpToolPrefixReady, mcpSafetyGate, searchQuerySignature } from "./mcp.js";
 import { IMAGE_TOOL, generateImage, imageGenAvailable } from "./images.js";
 import { getSkillTemplate } from "../registry.js";
@@ -109,7 +109,7 @@ export function validateDocContent(kind: "report" | "slides" | "sheet" | "html",
     const pages = parseSlides(content);
     if (pages.length < 1) return "slides 没有解析出任何有效页面。";
     if (pages.every((p) => !p.title)) return "slides 每页应有标题（以 # 开头），当前未检测到任何页标题。";
-    return null;
+    return unsourcedNumbersHint(content);
   }
   if (kind === "sheet") {
     if (c.startsWith("|")) return null; // Markdown 表格是另一种合法形式，放行
@@ -124,7 +124,21 @@ export function validateDocContent(kind: "report" | "slides" | "sheet" | "html",
     }
     return null;
   }
-  return null; // report 仅要求非空
+  return unsourcedNumbersHint(c); // report：格式无要求，但多处量化数据需有来源（防对外交付物编造数字）
+}
+
+/**
+ * 内容质量软门（C2）：交付物含多处量化数据（市场规模/占比/金额等）却零来源标注 → 返回自纠提示。
+ * 阈值保守（≥5 处且全文无任何来源/示意标注才触发）以免误伤；接受"示意值/待核实/估算"等显式标注豁免。
+ * 仅 report/slides 适用（sheet/html 由各自分支放行）。这是"有标注"而非"为真"的下限，须配 verifier/接地（后续批次）。
+ */
+function unsourcedNumbersHint(c: string): string | null {
+  const quant = (c.match(/\d[\d.,]*\s*(?:亿元|万元|亿|万|％|%|倍|元|美元|美金|\$|￥|¥)/g) || []).length;
+  if (quant < 5) return null;
+  const hasSource = /(https?:\/\/|来源|出处|资料来源|引用自|参见|据[^。；\n]{0,12}(报告|数据|统计|调研|测算|官方|官网|披露|年报|季报|白皮书|研究院|咨询)|\[\d+\])/.test(c);
+  const exempt = /(示意值|示意数据|示例数据|仅供示意|占位数据|待核实|粗略估算|假设场景)/.test(c);
+  if (hasSource || exempt) return null;
+  return `检测到约 ${quant} 处量化数据（市场规模 / 占比 / 金额等）但全文无任何来源标注。请为关键数字补来源（链接 / 出处 /“据 X 报告”），无法核实的改写为“示意值，待核实”或删去——对外交付物里的无源数字会损害可信度。`;
 }
 
 const envKey = process.env.ANTHROPIC_API_KEY;
@@ -575,8 +589,8 @@ export function buildWorkBrief(task: Task, channel: Channel): string {
     `</transcript>`,
     ``,
     `工作要求：`,
-    `1. 开工前先查阅你的长期记忆（见系统上下文），其中"核实过的事实/通用规则"优先遵循；`,
-    `2. 如需要事实、数据或最新外部信息，先用 web_search / web_fetch 或可用插件调研，不要凭空编造；外部检索按次计费——先想清楚要查什么、合并关键词，单任务尽量不超过 3 次；能从已有文档（read_document）获得的不要重复检索。研究/写作类任务按"多视角列问题 → 搭大纲 → 成文"推进，重要事实注明来源；`,
+    `1. 开工前先查阅你的长期记忆（见系统上下文，"核实过的事实/通用规则"优先遵循），并扫一遍工作区文档库（见上下文文档列表），有相关材料先用 read_document 复用，不要从零臆造；`,
+    `2. 如需要事实、数据或最新外部信息，先用 web_search / web_fetch 或可用插件调研，不要凭空编造；外部检索按次计费——先想清楚要查什么、合并关键词，单任务尽量不超过 3 次；能从已有文档（read_document）获得的不要重复检索。研究/写作类任务按"多视角列问题 → 搭大纲 → 成文"推进，重要事实注明来源；找不到可靠来源的关键数字，宁可写"示意值，待核实"或不写，绝不编造看似精确的数字（市场规模/占比/ROI 等）；仅国内模型部署下服务端 web_search 可能不可用且其结果不被多轮保留——若已配检索类插件（如 web-search-prime / 博查），优先用插件检索（结果可留存、可引用）；`,
     `3. 用 write_document 产出完整、可直接使用的交付物，按任务性质选格式 kind：报告/方案用 report，需要演示就交 slides（Marp 分页），数据/报表交 sheet（CSV），网页/落地页/前端原型/HTML 演示(横向翻页 deck)/可交互可视化交 html（单文件、样式与脚本内联、禁外链 script 与内联事件处理器，可在预览区实时查看）——必要时可以多份组合（如 report + slides）；正文要详尽，逐条覆盖验收标准；${imageGenAvailable() ? "需要视觉表达（封面/概念示意/PPT 配图/图文混排）时可用 generate_image 生成 1-2 张点睛配图，把返回的 Markdown 图片行原样放进 report 或 html 正文（数据图表交 sheet 即可，不要用文生图画图表）；" : ""}`,
     `4. 交付前用 save_memory 记录至多 1 条本次任务沉淀的「核实过的事实」或「通用规则」（不要记流水账）；`,
     `5. 交付物正文一律结论先行（开头给核心结论 / TL;DR）、要点 MECE，关键事实与数据注明来源和检索日期；并在回复正文附「交付自查表」：逐条列出验收标准 → 满足 / 不满足 → 证据位置（章节或文档内定位），最后一句说明需要谁跟进什么；`,
@@ -626,11 +640,16 @@ async function runVerification(
   if (isMock()) return { result: "pass", reasons: "" }; // 全局 Mock 跳过验收
 
   const others = channelAgents(channel).filter((a) => a.id !== worker.id);
-  if (others.length === 0) return { result: "pass", reasons: "" };
+  // SOLO/DM（无其他同事）不再无条件放行（V1）：由本人在净上下文里做 fail-closed 自校验。
+  // 弱于独立校验，但严格优于"others.length===0 → pass"那条免检漏口（截图全绿自查即源于此）。
+  const soloSelfCheck = others.length === 0;
+  // V3：校验者选择去人名化——按"像评审/审核/质检的角色"软偏好，而非死磕"评审"二字；团队永不自评（worker 已排除）。
+  const reviewerLike = (a: Agent) => /评审|审核|校对|质检|复核|review|qa/i.test(`${a.name} ${a.role}`);
   const verifier =
-    others.find((a) => a.name.includes("评审")) ??
+    others.find(reviewerLike) ??
     others.find((a) => a.id === task.created_by) ??
-    others[0];
+    others[0] ??
+    worker;
 
   // 锚定该任务的「当前版」交付物（listDocuments 已只返当前版）：DeepSeek 乱序/多写时也验对版本，
   // 优先 report，否则取最新当前版；兜底用本轮 createdDocIds 末位。
@@ -641,11 +660,21 @@ async function runVerification(
     (docIds.length > 0 ? getDocument(docIds[docIds.length - 1]) : undefined);
   if (!doc) return { result: "revise", reasons: "没有找到交付物文档：必须用 write_document 提交正式交付物。" };
 
-  audit(channel.id, `🔎 ${verifier.name} 开始验收任务「${task.title}」的交付物`);
+  audit(channel.id, `🔎 ${verifier.name} 开始${soloSelfCheck ? "自检" : "验收"}任务「${task.title}」的交付物`);
+
+  // V2：slides 交付物附"渲染清单"（机器读出的页数/要素），让验收对照"声称 vs 实产"、抓静默丢页与表演性自查。
+  const renderInfo =
+    doc.kind === "slides"
+      ? (() => {
+          const m = slidesManifest(doc.content);
+          return `渲染清单（机器读出，用于核对"声称 vs 实产"）：源页 ${m.sourcePages}、实渲幻灯片 ${m.renderedSlides}（含续页 ${m.continuationSlides}）、数字卡 ${m.statCards}、表格 ${m.tables}、配图 ${m.images}、带讲者备注页 ${m.pagesWithNotes}/${m.sourcePages}。`;
+        })()
+      : "";
 
   // 关键：干净上下文 —— 只给 rubric + 交付物，不带频道闲聊，避免被讨论氛围带偏
   const prompt = [
     `你是本次交付的校验者。请独立、严格地核验以下交付物是否满足任务要求。`,
+    soloSelfCheck ? `（本次无其他同事可担任校验者，由你对自己的交付做自检：请切换到挑剔的第三方视角，宁严勿松——这是交付前的唯一质量闸。）` : ``,
     ``,
     `任务：${task.title}`,
     `详情：${task.description || "（无）"}`,
@@ -657,6 +686,13 @@ async function runVerification(
     `<deliverable>`,
     stripLoneSurrogates(doc.content.slice(0, 16000)),
     `</deliverable>`,
+    renderInfo,
+    ``,
+    `核验时另须执行（不可放水）：`,
+    `· 量化主张须有来源：正文中市场规模 / 占比 / 金额 / ROI 等关键数字，若无来源标注且未标"示意值/待核实"，判 revise 并逐条点名（C3）；`,
+    doc.kind === "slides"
+      ? `· 对照上面的渲染清单：若交付或自查表声称的页数 / 要素（页数、表格、数字卡、讲者备注覆盖）与渲染清单明显不符，判 revise；slides→pptx 不支持自定义字号 / CSS 变量，自查表不得声称这类渲染器产不出的属性（V2）。`
+      : ``,
     ``,
     `请逐条给出核验结论（满足/不满足及理由），随后必须调用 submit_verdict 提交最终裁决：`,
     `- 全部关键标准满足 → result: "pass"`,
@@ -904,6 +940,14 @@ export function readSkillBody(id: string): string {
   return out;
 }
 
+// 交付与导出红线：注入每一轮动态上下文（覆盖所有现存/新建同事、聊天与任务两条路径），
+// 因为 agent.system_prompt 是建号时烘焙进 DB 的、改 SHARED_RULES 不影响存量同事。
+// 根除截图里"导出不可用 / 甩 CLI 给用户"那类臆造阻塞。
+const DELIVERY_RULES = `## 交付与导出（平台已内置，按此回答用户，不要臆造限制）
+- 交付物用 write_document 写入文档库后，用户在「文档」面板打开即可查看；其中 **slides 文档在查看页有一键「⬇ .pptx」按钮，导出的是可编辑的真 .pptx（PowerPoint/WPS/Keynote 直接打开，文本/表格/讲者备注均可编辑），完全内置、无需任何 MCP / 插件 / 命令行**。report/sheet 可导出 Markdown / CSV / Word，html 在预览区沙箱渲染。
+- 绝不要声称"导出不可用 / 依赖未就绪 / 需要 pptxgenjs 等服务"，也绝不要让用户自己去跑命令行（如 marp-cli）来导出——这些说法都是错的。
+- 用户问"在哪看 / 怎么导出"时，直接指引他到「文档」面板打开该文档、点标题栏的导出按钮（slides 点 ⬇ .pptx），不要把整篇正文倒进聊天。`;
+
 function buildDynamicContext(agent: Agent, channel: Channel, focus = ""): string {
   const teammates = channelAgents(channel)
     .filter((a) => a.id !== agent.id)
@@ -934,6 +978,7 @@ function buildDynamicContext(agent: Agent, channel: Channel, focus = ""): string
     teammates ? `频道内其他 AI 同事：\n${teammates}` : `频道内没有其他 AI 同事。`,
     tasks ? `频道任务看板：\n${tasks}` : `任务看板目前为空。`,
     docs ? `工作区文档（可用 read_document 阅读全文）：\n${docs}` : "",
+    DELIVERY_RULES,
     memory ? `## 你的长期记忆（先查阅，"核实过的事实/通用规则"优先遵循）\n${memory}` : "",
     skillsBlock ? `## 已启用的技能（索引——需要某条的具体方法/步骤时用 read_skill(id) 取正文再遵循）\n${skillsBlock}` : "",
   ]
@@ -1030,12 +1075,12 @@ const TOOLS: Anthropic.ToolUnion[] = [
   {
     name: "write_document",
     description:
-      "把一份正式交付物写入工作区文档库。文档应当完整、可直接使用，而不是片段。按交付物性质选择 kind：report=报告/PRD/方案（Markdown）；slides=演示文稿（Marp 约定：每页之间用单独一行 --- 分隔，首页为标题页，每页一个要点群，可直接生成 PPT）；sheet=表格/报表（标准 CSV：首行表头，逗号分隔，含逗号的字段用双引号包裹，可直接导入 Excel）；html=网页/落地页/前端原型/HTML 演示(横向翻页 deck)/可交互可视化（单文件 HTML，样式与脚本内联，可在预览区实时查看）。注意：返工时对同一任务、同一 kind 再次调用本工具，会作为该交付物的新版本覆盖旧版（旧版进历史、列表只显最新），所以请提交完整新版而非补丁；若确需在同一任务下保留多份并列文档，请用不同 kind 或开新任务。",
+      "把一份正式交付物写入工作区文档库。文档应当完整、可直接使用，而不是片段。按交付物性质选择 kind：report=报告/PRD/方案（Markdown）；slides=演示文稿（Marp：单独一行 --- 分页，首页标题页；**正文用 Markdown、不要写原始 HTML**；关键数字单独成行写 `值 :: 标签`（如 `268亿元 :: 市场规模`）→ 自动渲成数字卡；对比/选型用 Markdown 表格；只含一个 # 标题的页=章节幕页；讲者备注用 `<!-- note: 备注内容 -->`（内容写在注释里）；交付后用户在「文档」面板一键导出可编辑 .pptx，内置、无需 MCP/插件/命令行）；sheet=表格/报表（标准 CSV：首行表头，逗号分隔，含逗号的字段用双引号包裹，可直接导入 Excel）；html=网页/落地页/前端原型/HTML 演示(横向翻页 deck)/可交互可视化（单文件 HTML，样式与脚本内联，可在预览区实时查看）。注意：返工时对同一任务、同一 kind 再次调用本工具，会作为该交付物的新版本覆盖旧版（旧版进历史、列表只显最新），所以请提交完整新版而非补丁；若确需在同一任务下保留多份并列文档，请用不同 kind 或开新任务。",
     input_schema: {
       type: "object" as const,
       properties: {
         title: { type: "string", description: "文档标题" },
-        content: { type: "string", description: "完整正文：report 为 Markdown；slides 为 --- 分页的 Marp Markdown；sheet 为 CSV；html 为单文件 HTML（样式/脚本内联，禁外链 <script src> 与内联事件处理器 onload/onclick 等）" },
+        content: { type: "string", description: "完整正文：report 为 Markdown；slides 为 --- 分页的 Marp Markdown（纯 Markdown、禁原始 HTML；数字卡用 `值 :: 标签` 行、对比用表格、讲者备注用 `<!-- note: … -->`）；sheet 为 CSV；html 为单文件 HTML（样式/脚本内联，禁外链 <script src> 与内联事件处理器 onload/onclick 等）" },
         kind: { type: "string", enum: ["report", "slides", "sheet", "html"], description: "交付物格式，默认 report" },
       },
       required: ["title", "content"],
