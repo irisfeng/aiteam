@@ -214,6 +214,17 @@ check(
     `noteCaptured=${noteCaptured} noteNotLeaked=${noteNotLeaked} htmlStripped=${htmlStripped}`);
 }
 
+// PPTX5 解析：Marp frontmatter（含 `style: |` 多行 CSS 块标量）应被跳过，不渲染成幻灯片
+{
+  const { parseSlides } = await import(join(root, "server/dist/pptx.js"));
+  const md = "---\nmarp: true\ntheme: default\npaginate: true\nstyle: |\n  :root { --x: #0B1D3A; }\n  section { color: var(--x); }\n---\n\n# 真封面\n\n副标题\n\n---\n\n# 第二页\n\n- 要点";
+  const pages = parseSlides(md);
+  const dump = JSON.stringify(pages);
+  const ok = pages.length === 2 && pages[0].title === "真封面" && !dump.includes("marp: true") && !dump.includes(":root");
+  check("PPTX5", "解析：Marp frontmatter(含 style:| 块标量) 被跳过、不渲染成幻灯片", ok,
+    `pages=${pages.length} title0=${pages[0] && pages[0].title}`);
+}
+
 // WD1 write_document kind 契约校验：坏格式被拒（返回行号/分页提示），合法格式放行
 {
   const v = engine.validateDocContent;

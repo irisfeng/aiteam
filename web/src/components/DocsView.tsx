@@ -3,7 +3,7 @@ import * as echarts from "echarts";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useWorkspace } from "../store";
-import { api } from "../api";
+import { api, API_BASE } from "../api";
 import type { Doc } from "../types";
 import { AgentAvatar } from "./Avatar";
 
@@ -316,7 +316,7 @@ export function DocViewerModal({ doc, onClose }: { doc: Doc; onClose: () => void
           </button>
           {doc.kind === "slides" && (
             <a
-              href={`/api/documents/${doc.id}/pptx`}
+              href={`${API_BASE}/documents/${doc.id}/pptx`}
               className="rounded-lg border border-accent/50 px-2.5 py-1 text-[12px] font-medium text-accent hover:bg-accent-soft"
               title="导出真 .pptx：可编辑文本、主题配色、讲者备注、嵌入配图，PowerPoint/WPS/Keynote 直接打开"
             >

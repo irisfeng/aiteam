@@ -93,8 +93,13 @@ export function parseSlides(content: string): SlidePage[] {
     .split(/\n\s*---\s*\n/)
     .map((p) => p.trim())
     .filter(Boolean);
-  const isFrontmatter = (s: string) =>
-    s.split("\n").every((line) => line.trim() === "" || /^[\w-]+\s*:/.test(line.trim()));
+  const isFrontmatter = (s: string) => {
+    const lines = s.split("\n");
+    const firstNonEmpty = (lines.find((l) => l.trim() !== "") ?? "").trim();
+    if (!/^[\w-]+\s*:/.test(firstNonEmpty)) return false; // 首行非 `key:` → 不是 frontmatter（正文/标题页放行）
+    // 允许 `key:` 行、空行、以及缩进续行（YAML 块标量，如 Marp 的 `style: |` 下的多行 CSS）
+    return lines.every((line) => line.trim() === "" || /^[\w-]+\s*:/.test(line.trim()) || /^[ \t]/.test(line));
+  };
 
   const pages: SlidePage[] = [];
   for (let i = 0; i < raw.length; i++) {
