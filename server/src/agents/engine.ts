@@ -491,10 +491,15 @@ async function runTaskWork(agent: Agent, taskId: string) {
     return;
   }
 
-  // 任务必须有可见的工作频道；没有则落到首个频道
+  // 任务必须有可见的工作频道。channel_id 丢失 / 指向已删频道时，按优先级兜底——
+  // 绝不盲目落到"首个频道(#general)"，否则项目任务会把过程消息窜到无关频道（实测的"窜台"）。
   let channel = task.channel_id ? getChannel(task.channel_id) : undefined;
   if (!channel) {
-    channel = listChannels().find((c) => c.kind === "channel");
+    const proj = task.project_id ? getProject(task.project_id) : undefined;
+    channel =
+      (proj?.channel_id ? getChannel(proj.channel_id) : undefined) ?? // 1) 项目立项所在频道（最贴合）
+      listChannels().find((c) => c.kind === "channel" && channelAgents(c).some((a) => a.id === agent.id)) ?? // 2) 负责人所在频道
+      listChannels().find((c) => c.kind === "channel"); // 3) 最后兜底
     if (!channel) return;
     task = updateTask(task.id, { channel_id: channel.id }) ?? task;
     broadcast({ type: "task:upsert", payload: task });
@@ -953,6 +958,12 @@ const INPUT_RULES = `## 用户给资料的途径（按此引导，别承诺做�
 - 文件资料（PDF/Word/PPT/Excel/txt/md/csv 等）：用户可在**聊天输入框的 📎** 或「文档 → 📎 上传来源」上传；系统会**抽取其文本**存为「来源」文档，你用 read_document 读全文（解析非纯文本需管理员已启用 markitdown 插件）。
 - **截图 / 图片无法被读取**：系统只抽文本、不解析图像，模型也收不到图像像素——遇到界面/截图，请让用户**用文字描述**画面布局、字段、流程；不要让用户贴图、也不要声称你能看图。`;
 
+// 多人协作红线（团队频道）：目标级请求优先 start_project 拆解给多角色协作，而非一人包办——这是产品核心，别退化成单人。
+const COLLAB_RULES = `## 多人协作（团队频道的"目标级"请求，优先立项而非一人包办）
+- 当用户提出"完整解决方案 / 整套方案 / 对外演示 / 系统性多环节产出"这类**目标**（不是单点问答/小改）时，作为 Lead **优先用 start_project** 拆成带依赖的任务、分派给对口同事协作，不要自己从头做到尾。典型拆法：调研员查市场/竞品(带源) → 工程师做技术选型与架构 → 产品经理/解决方案助手整合方案(report) → PPT 助手做演示 slides → 校对审核/代码评审验收 → 你(Lead)汇总。
+- 判据：目标需要 ≥2 种专长、或含"调研+撰写+演示+把关"多环节 → **立项**；闲聊/答疑/小改 → 直接回复，别滥用立项。
+- 价值：每个环节由对口专家产出、并经独立验收，质量高于一人包办（也才会触发验收闭环）。`;
+
 function buildDynamicContext(agent: Agent, channel: Channel, focus = ""): string {
   const teammates = channelAgents(channel)
     .filter((a) => a.id !== agent.id)
@@ -985,6 +996,7 @@ function buildDynamicContext(agent: Agent, channel: Channel, focus = ""): string
     docs ? `工作区文档（可用 read_document 阅读全文）：\n${docs}` : "",
     DELIVERY_RULES,
     INPUT_RULES,
+    channel.kind !== "dm" ? COLLAB_RULES : "",
     memory ? `## 你的长期记忆（先查阅，"核实过的事实/通用规则"优先遵循）\n${memory}` : "",
     skillsBlock ? `## 已启用的技能（索引——需要某条的具体方法/步骤时用 read_skill(id) 取正文再遵循）\n${skillsBlock}` : "",
   ]
