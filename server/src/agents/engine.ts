@@ -634,6 +634,26 @@ export const NO_VERDICT_FALLBACK: { result: "revise"; reasons: string } = {
   reasons: "校验者未产出结构化裁决，按未通过处理。请补全交付内容与逐条自查表后重新提交。",
 };
 
+/** 按交付物类型选对口校验者（V3·按 kind 路由）：
+ *  视觉物(slides/html)→设计审核优先；内容物(report/sheet)→校对审核优先；代码类→代码评审。
+ *  ——避免把 PPT/方案的验收默认丢给"代码评审"（不对口）。都不在则回退 创建者 / 任意他人 / 本人(solo 自检)。
+ *  纯函数，导出供回归测试。 */
+export function pickVerifier(
+  others: Agent[],
+  kind: string | null | undefined,
+  createdBy: string | null,
+  worker: Agent
+): Agent {
+  const sig = (a: Agent) => `${a.name} ${a.role}`;
+  const design = (a: Agent) => /设计审核|视觉|design/i.test(sig(a));
+  const content = (a: Agent) => /校对|审核|质检|复核|事实|proofread|qa/i.test(sig(a)) && !/代码评审|code/i.test(a.name);
+  const code = (a: Agent) => /代码评审|code.?review/i.test(sig(a));
+  const visual = kind === "slides" || kind === "html";
+  const order = visual ? [design, content, code] : [content, design, code];
+  for (const pred of order) { const v = others.find(pred); if (v) return v; }
+  return others.find((a) => a.id === createdBy) ?? others[0] ?? worker;
+}
+
 async function runVerification(
   worker: Agent,
   channel: Channel,
@@ -646,17 +666,9 @@ async function runVerification(
 
   const others = channelAgents(channel).filter((a) => a.id !== worker.id);
   // SOLO/DM（无其他同事）不再无条件放行（V1）：由本人在净上下文里做 fail-closed 自校验。
-  // 弱于独立校验，但严格优于"others.length===0 → pass"那条免检漏口（截图全绿自查即源于此）。
   const soloSelfCheck = others.length === 0;
-  // V3：校验者选择去人名化——按"像评审/审核/质检的角色"软偏好，而非死磕"评审"二字；团队永不自评（worker 已排除）。
-  const reviewerLike = (a: Agent) => /评审|审核|校对|质检|复核|review|qa/i.test(`${a.name} ${a.role}`);
-  const verifier =
-    others.find(reviewerLike) ??
-    others.find((a) => a.id === task.created_by) ??
-    others[0] ??
-    worker;
 
-  // 锚定该任务的「当前版」交付物（listDocuments 已只返当前版）：DeepSeek 乱序/多写时也验对版本，
+  // 先锚定该任务的「当前版」交付物（listDocuments 已只返当前版），再按其 kind 选对口校验者。
   // 优先 report，否则取最新当前版；兜底用本轮 createdDocIds 末位。
   const taskDocs = listDocuments().filter((d) => d.task_id === taskId);
   const doc =
@@ -664,6 +676,9 @@ async function runVerification(
     taskDocs[0] ??
     (docIds.length > 0 ? getDocument(docIds[docIds.length - 1]) : undefined);
   if (!doc) return { result: "revise", reasons: "没有找到交付物文档：必须用 write_document 提交正式交付物。" };
+
+  // V3：按交付物类型选对口校验者（视觉物→设计审核 / 内容物→校对审核 / 代码类→代码评审），团队永不自评。
+  const verifier = pickVerifier(others, doc.kind, task.created_by, worker);
 
   audit(channel.id, `🔎 ${verifier.name} 开始${soloSelfCheck ? "自检" : "验收"}任务「${task.title}」的交付物`);
 

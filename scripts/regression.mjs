@@ -44,6 +44,7 @@ async function waitFor(fn, timeout = 20000, interval = 400) {
 // ---------------------------------------------------------------------------
 const db = await import(join(root, "server/dist/db.js"));
 const { seedGlobalSkills, seedForOwner, BUILTIN_SKILLS } = await import(join(root, "server/dist/seed.js"));
+const { AGENT_TEMPLATES } = await import(join(root, "server/dist/agents/templates.js"));
 const { enterOwner, ownerFromUserId } = await import(join(root, "server/dist/ownerScope.js"));
 const { hashPassword } = await import(join(root, "server/dist/password.js"));
 const engine = await import(join(root, "server/dist/agents/engine.js"));
@@ -331,6 +332,24 @@ check(
   check("DOC-SRC", "无源数字软门：report 多处量化零来源退回；有来源/示意/少量/sheet 放行", ok);
 }
 
+// VER-ROUTE 验收者按交付物类型路由：视觉物→设计审核 / 内容物→校对审核 / 退代码评审 / 兜底创建者·本人
+{
+  const pick = engine.pickVerifier;
+  const A = (id, name, role) => ({ id, name, role });
+  const design = A("d", "设计审核", "视觉与版式把关");
+  const content = A("c", "校对审核", "文字校对与事实核查");
+  const code = A("k", "代码评审", "代码审查与质量把关");
+  const pm = A("p", "产品经理", "产品规划");
+  const worker = A("w", "PPT 助手", "演示文稿制作");
+  const ok =
+    pick([pm, code, content, design], "slides", null, worker).id === "d" && // 视觉物→设计审核
+    pick([pm, code, content, design], "report", null, worker).id === "c" && // 内容物→校对审核
+    pick([pm, code], "slides", null, worker).id === "k" &&                  // 无设计/校对→退代码评审
+    pick([pm], "slides", "p", worker).id === "p" &&                         // 都没有→任务创建者
+    pick([], "slides", null, worker).id === "w";                           // 空→本人(solo 自检)
+  check("VER-ROUTE", "验收者按交付物类型路由：视觉→设计审核 / 内容→校对审核 / 退代码评审 / 兜底创建者·本人", ok);
+}
+
 // SK5 L3 模板资源：技能用 tpl: 引用内置模板，read_skill 附带模板正文返回
 {
   const sk = db.listSkills().find((s) => s.name === "演示设计与防溢出法");
@@ -600,8 +619,8 @@ try {
     check("U2", "工作区快照导出", exp.ok && (await exp.text()).includes("# AITeam 工作区快照"));
     const a1 = (await J("/agents/from-template", { method: "POST", body: JSON.stringify({ template_id: "analyst" }) })).body;
     const a2 = (await J("/agents/from-template", { method: "POST", body: JSON.stringify({ template_id: "analyst" }) })).body;
-    check("T1", "角色模板：12 个目录 + 实例化幂等",
-      (await J("/agent-templates")).body.length === 12 && a1.id === a2.id);
+    check("T1", `角色模板：${AGENT_TEMPLATES.length} 个目录 + 实例化幂等`,
+      (await J("/agent-templates")).body.length === AGENT_TEMPLATES.length && a1.id === a2.id);
     const nc = (await J("/channels", { method: "POST", body: JSON.stringify({ name: "回归tmp", agent_ids: [] }) })).body;
     const renamed = (await J(`/channels/${nc.id}`, { method: "PATCH", body: JSON.stringify({ name: "回归renamed" }) })).body;
     const deleted = (await J(`/channels/${nc.id}`, { method: "DELETE" })).ok;
