@@ -226,6 +226,29 @@ check(
     `pages=${pages.length} title0=${pages[0] && pages[0].title}`);
 }
 
+// PPTX6 架构图：```arch 围栏 → 解析 4 节点/3 边 + 入 manifest + 悬空边计 droppedLinks + 端到端出 pptx buffer
+{
+  const { parseSlides, slidesManifest, slidesToPptx } = await import(join(root, "server/dist/pptx.js"));
+  const md = [
+    "# 系统架构", "", "---", "",
+    "# 数据管线", "",
+    "```arch", "type: layered", "dir: down",
+    "[接入] 网关", "[接入] 鉴权", "[核心] 调度器", "[存储] 主库",
+    "网关 -> 调度器", "鉴权 -> 调度器", "调度器 -> 主库",
+    "调度器 -. 异步 .-> 缓存",   // 缓存未定义 → droppedLinks=1
+    "```",
+  ].join("\n");
+  const pages = parseSlides(md);
+  const d = pages[1].diagrams[0];
+  const m = slidesManifest(md);
+  const buf = await slidesToPptx({ id: "x", title: "架构图", kind: "slides", content: md });
+  const ok =
+    Boolean(d) && d.type === "layered" && d.nodes.length === 4 && d.edges.length === 3 &&
+    m.diagrams === 1 && m.droppedLinks === 1 && buf.length > 5000;
+  check("PPTX6", "架构图：```arch 解析 4 节点/3 边、悬空边计 droppedLinks、端到端出 pptx", ok,
+    `nodes=${d && d.nodes.length} edges=${d && d.edges.length} dropped=${m.droppedLinks} bytes=${buf.length}`);
+}
+
 // WD1 write_document kind 契约校验：坏格式被拒（返回行号/分页提示），合法格式放行
 {
   const v = engine.validateDocContent;
@@ -366,6 +389,10 @@ check(
   const { SKILL_TEMPLATES } = await import(join(root, "server/dist/registry.js"));
   const allValid = SKILL_TEMPLATES.length > 0 && SKILL_TEMPLATES.every((t) => engine.validateDocContent("html", t.content) === null);
   check("TPL1", "内置模板自洽：全部 SKILL_TEMPLATES 通过 html 交付物校验", allValid, `模板数=${SKILL_TEMPLATES.length}`);
+  // TPL-SOFF 脚本关闭可渲染：禁 opacity:0 门控的 .slide（除非有 scroll-snap / :first-of-type / :not(.js) 兜底）
+  const soffOk = SKILL_TEMPLATES.every((t) =>
+    !/\.slide\s*\{[^}]*opacity\s*:\s*0/.test(t.content) || /scroll-snap|:first-of-type|:not\(\.js\)/.test(t.content));
+  check("TPL-SOFF", "模板脚本关闭可渲染：无裸 opacity:0 门控（预览 iframe sandbox 空、脚本不跑）", soffOk);
 }
 
 // ENV1 stdio MCP 环境变量：值入库（仅服务端），sanitize 只回 key 名、绝不下发值（博查 BOCHA_API_KEY 用例）

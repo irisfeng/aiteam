@@ -40,6 +40,17 @@ interface SlideTable {
   header: string[];
   rows: string[][];
 }
+interface DiagramNode { id: string; group: string; label: string; }
+interface DiagramEdge { from: string; to: string; label: string; dashed: boolean; }
+/** ```arch / ```diagram 围栏 → 原生形状架构图（分层/流程/中心辐射，三种确定式布局）。 */
+interface SlideDiagram {
+  type: "layered" | "flow" | "hub";
+  dir: "down" | "right";
+  title: string;
+  nodes: DiagramNode[];
+  edges: DiagramEdge[];
+  droppedLinks: number; // 引用缺失节点而被丢弃的边数（manifest 暴露）
+}
 interface SlidePage {
   title: string;
   bullets: string[];
@@ -50,6 +61,8 @@ interface SlidePage {
   tables: SlideTable[];
   /** 围栏代码块（``` … ```）→ 等宽文本框 */
   code: string[];
+  /** ```arch / ```diagram 架构图 → 原生形状 */
+  diagrams: SlideDiagram[];
   /** 本地生成图（/assets/xxx.png）的磁盘路径 */
   images: string[];
   notes: string;
@@ -86,6 +99,56 @@ function matchStat(line: string): Stat | null {
   return { value, label };
 }
 
+/** 解析 ```arch / ```diagram 围栏块 → 结构化架构图（两遍：先收节点、再解析边，悬空边计入 droppedLinks）。 */
+function parseDiagram(buf: string[]): SlideDiagram | null {
+  let type: SlideDiagram["type"] = "layered";
+  let dir: SlideDiagram["dir"] = "down";
+  let title = "";
+  const nodes: DiagramNode[] = [];
+  const nodeIds = new Set<string>();
+  const edgeLines: string[] = [];
+  const idOf = (s: string) => s.replace(/\s+/g, "");
+  // pass 1：头部 + 节点（边行先攒着）
+  for (const rawLine of buf) {
+    const t = rawLine.trim();
+    if (!t || t.startsWith("#")) continue;
+    const hdr = t.match(/^(type|dir|title)\s*:\s*(.+)$/i);
+    if (hdr) {
+      const k = hdr[1].toLowerCase(), v = hdr[2].trim();
+      if (k === "type") { const vv = v.toLowerCase(); type = vv === "flow" || vv === "hub" ? vv : "layered"; }
+      else if (k === "dir") { dir = v.toLowerCase() === "right" ? "right" : "down"; }
+      else if (k === "title") { title = plain(v); }
+      continue;
+    }
+    if (/->/.test(t)) { edgeLines.push(t); continue; } // 含箭头 → 边
+    const ng = t.match(/^\[(.+?)\]\s*(.+)$/);
+    const group = ng ? plain(ng[1]) : "";
+    const label = plain(ng ? ng[2] : t);
+    const id = idOf(label);
+    if (!id || nodeIds.has(id)) continue; // 空 / 重复节点：跳过
+    nodeIds.add(id);
+    nodes.push({ id, group, label });
+  }
+  if (!nodes.length) return null;
+  // pass 2：边（from/to 必须命中已定义节点，否则丢弃并计数）
+  const edges: DiagramEdge[] = [];
+  let droppedLinks = 0;
+  for (const line of edgeLines) {
+    const dashed = /-\.|\.-/.test(line);
+    const gi = line.lastIndexOf(">");
+    if (gi < 0) continue;
+    const to = idOf(line.slice(gi + 1).trim());
+    const left = line.slice(0, gi);
+    let from = "", label = "";
+    const withLabel = left.match(/^(.+?)\s+-{1,2}\.?\s+(.+?)\s+\.?-{1,2}\s*$/); // from -- 标签 -- / from -. 标签 .-
+    if (withLabel) { from = idOf(withLabel[1].trim()); label = plain(withLabel[2].trim()); }
+    else from = idOf(left.replace(/[-.\s>]+$/, "").trim());
+    if (!nodeIds.has(from) || !nodeIds.has(to)) { droppedLinks++; continue; }
+    edges.push({ from, to, label, dashed });
+  }
+  return { type, dir, title, nodes, edges, droppedLinks };
+}
+
 /** 解析 Marp 风格 slides Markdown → 结构化页面 */
 export function parseSlides(content: string): SlidePage[] {
   const raw = content
@@ -104,7 +167,7 @@ export function parseSlides(content: string): SlidePage[] {
   const pages: SlidePage[] = [];
   for (let i = 0; i < raw.length; i++) {
     if (i === 0 && isFrontmatter(raw[i])) continue;
-    const page: SlidePage = { title: "", bullets: [], paragraphs: [], stats: [], tables: [], code: [], images: [], notes: "" };
+    const page: SlidePage = { title: "", bullets: [], paragraphs: [], stats: [], tables: [], code: [], diagrams: [], images: [], notes: "" };
     // 先在整块上剥离 HTML 注释（含跨行块）：`<!-- note: … -->` 转讲者备注，
     // 其余注释整块丢弃。按行解析做不到这点——多行注释的中间行不以 `-->` 收尾，
     // 会漏成正文渲染进幻灯片（实测出现在标题页 <a:t> 文本里）。
@@ -132,13 +195,20 @@ export function parseSlides(content: string): SlidePage[] {
     const lines = block.split("\n");
     let inCode = false;
     let codeBuf: string[] = [];
+    let inDiagram = false;
+    let diagramBuf: string[] = [];
     for (let li = 0; li < lines.length; li++) {
       const t = lines[li].trim();
-      if (/^```/.test(t)) {
-        if (inCode) { if (codeBuf.length) page.code.push(codeBuf.join("\n")); codeBuf = []; inCode = false; }
+      const fence = t.match(/^```(\w+)?/); // 捕获语言标签：arch/diagram → 架构图，其余 → 代码
+      if (fence) {
+        if (inCode) { if (codeBuf.length) page.code.push(codeBuf.join("\n")); codeBuf = []; inCode = false; continue; }
+        if (inDiagram) { const d = parseDiagram(diagramBuf); if (d) page.diagrams.push(d); diagramBuf = []; inDiagram = false; continue; }
+        const lang = (fence[1] || "").toLowerCase();
+        if (lang === "arch" || lang === "diagram") inDiagram = true;
         else inCode = true;
         continue;
       }
+      if (inDiagram) { diagramBuf.push(lines[li]); continue; }
       if (inCode) { codeBuf.push(lines[li]); continue; }
       // 表格块：连续 `|…|` 行；第二行是分隔行（含 -）才认作真表格
       if (/^\|/.test(t)) {
@@ -172,6 +242,7 @@ export function parseSlides(content: string): SlidePage[] {
       }
     }
     if (inCode && codeBuf.length) page.code.push(codeBuf.join("\n"));
+    if (inDiagram && diagramBuf.length) { const d = parseDiagram(diagramBuf); if (d) page.diagrams.push(d); }
     pages.push(page);
   }
   return pages;
@@ -185,6 +256,8 @@ export interface SlidesManifest {
   pagesWithNotes: number;
   tables: number;
   statCards: number;
+  diagrams: number;
+  droppedLinks: number;
   images: number;
 }
 
@@ -195,6 +268,125 @@ function estLines(s: string, perLine: number): number {
 }
 
 type Block = { h: number; draw: (slide: any, y: number) => void };
+
+// ── 架构图渲染（原生形状；pptxgenjs 不支持 shape 渐变填充→静默丢成透明框，故全程禁用，主节点用实色+阴影）──
+const NODE_MAIN = { fill: { color: THEME.accent }, color: "FFFFFF", line: { color: THEME.accent, width: 1 },
+  shadow: { type: "outer", color: "808080", blur: 4, offset: 2, angle: 90, opacity: 0.35 } };
+const NODE_CHILD = { fill: { color: THEME.panel }, color: THEME.ink, line: { color: THEME.accent, width: 1.5 } };
+
+function drawNodeBox(slide: any, x: number, y: number, w: number, h: number, label: string, style: any, fontPt: number) {
+  slide.addShape("roundRect", { x, y, w, h, rectRadius: 0.06, fill: style.fill, line: style.line, ...(style.shadow ? { shadow: style.shadow } : {}) });
+  const perLine = Math.max(2, Math.floor((w - 0.16) / 0.2)); // CJK 约每 0.2in 一字
+  let txt = label;
+  if (cp(label) > perLine * 2) txt = [...label].slice(0, perLine * 2 - 1).join("") + "…"; // 最多两行，超则省略
+  slide.addText(txt, { x: x + 0.06, y, w: w - 0.12, h, align: "center", valign: "middle", fontSize: fontPt, color: style.color, bold: !!style.shadow, fontFace: CJK_FONT, wrap: true });
+}
+function drawEdgeLabel(slide: any, x1: number, y1: number, x2: number, y2: number, label: string) {
+  if (!label) return;
+  slide.addText(label, { x: (x1 + x2) / 2 - 0.7, y: (y1 + y2) / 2 - 0.13, w: 1.4, h: 0.26, fontSize: 9, color: THEME.dim, align: "center", valign: "middle", fontFace: CJK_FONT });
+}
+function drawEdgeLine(slide: any, x1: number, y1: number, x2: number, y2: number, dashed: boolean, label: string) {
+  slide.addShape("line", {
+    x: Math.min(x1, x2), y: Math.min(y1, y2), w: Math.abs(x2 - x1) || 0.01, h: Math.abs(y2 - y1) || 0.01,
+    line: { color: THEME.dim, width: 1.25, endArrowType: "triangle", ...(dashed ? { dashType: "dash" } : {}) },
+    flipH: x2 < x1, flipV: y2 < y1,
+  });
+  drawEdgeLabel(slide, x1, y1, x2, y2, label);
+}
+function drawEdgeElbow(slide: any, x1: number, y1: number, x2: number, y2: number, dashed: boolean, label: string) {
+  const midY = (y1 + y2) / 2;
+  const bx = Math.min(x1, x2), by = Math.min(y1, y2);
+  const bw = Math.abs(x2 - x1) || 0.01, bh = Math.abs(y2 - y1) || 0.01;
+  const P = (px: number, py: number, mv?: boolean) => ({ x: px - bx, y: py - by, ...(mv ? { moveTo: true } : {}) });
+  slide.addShape("custGeom", {
+    x: bx, y: by, w: bw, h: bh,
+    line: { color: THEME.dim, width: 1.25, endArrowType: "triangle", ...(dashed ? { dashType: "dash" } : {}) },
+    points: [P(x1, y1, true), P(x1, midY), P(x2, midY), P(x2, y2)],
+  });
+  if (label) slide.addText(label, { x: (x1 + x2) / 2 - 0.7, y: midY - 0.13, w: 1.4, h: 0.26, fontSize: 9, color: THEME.dim, align: "center", valign: "middle", fontFace: CJK_FONT });
+}
+
+/** 渲染一张架构图（layered/flow/hub 三种确定式布局）到 (y0..y0+H) 区域。 */
+function drawDiagram(slide: any, y0: number, H: number, dg: SlideDiagram) {
+  if (dg.title) {
+    slide.addText(dg.title, { x: MARGIN, y: y0, w: CONTENT_W, h: 0.3, fontSize: 13, bold: true, color: THEME.ink, align: "center", fontFace: CJK_FONT });
+    y0 += 0.36; H -= 0.36;
+  }
+  const pos = new Map<string, { x: number; y: number; w: number; h: number }>();
+  const ctr = (id: string) => { const p = pos.get(id)!; return { cx: p.x + p.w / 2, cy: p.y + p.h / 2 }; };
+
+  if (dg.type === "hub") {
+    const cx = MARGIN + CONTENT_W / 2, cyC = y0 + H / 2;
+    const cW = 1.9, cH = 0.74, oW = 1.8, oH = 0.66;
+    const outer = dg.nodes.slice(1);
+    // 椭圆布局：横向用满舞台、纵向受图高约束——避免外节点与中心重叠
+    const Rx = Math.max(2.4, CONTENT_W / 2 - oW / 2 - 0.3);
+    const Ry = Math.max(1.2, H / 2 - oH / 2 - 0.2);
+    pos.set(dg.nodes[0].id, { x: cx - cW / 2, y: cyC - cH / 2, w: cW, h: cH });
+    outer.forEach((n, i) => {
+      const ang = -Math.PI / 2 + (i * 2 * Math.PI) / Math.max(1, outer.length);
+      pos.set(n.id, { x: cx + Rx * Math.cos(ang) - oW / 2, y: cyC + Ry * Math.sin(ang) - oH / 2, w: oW, h: oH });
+    });
+    const edges = dg.edges.length ? dg.edges : outer.map((n) => ({ from: dg.nodes[0].id, to: n.id, label: "", dashed: false }));
+    for (const e of edges) { if (!pos.has(e.from) || !pos.has(e.to)) continue; const a = ctr(e.from), b = ctr(e.to); drawEdgeLine(slide, a.cx, a.cy, b.cx, b.cy, e.dashed, e.label); }
+    dg.nodes.forEach((n, i) => { const p = pos.get(n.id)!; drawNodeBox(slide, p.x, p.y, p.w, p.h, n.label, i === 0 ? NODE_MAIN : NODE_CHILD, i === 0 ? 14 : 12); });
+    return;
+  }
+
+  if (dg.type === "flow") {
+    const horiz = dg.dir !== "down";
+    const n = dg.nodes.length, gap = 0.45;
+    if (horiz) {
+      const nodeW = Math.min(2.4, (CONTENT_W - gap * (n - 1)) / n), nodeH = Math.min(1.0, H * 0.5);
+      const total = n * nodeW + (n - 1) * gap, sx = MARGIN + (CONTENT_W - total) / 2, cy = y0 + (H - nodeH) / 2;
+      dg.nodes.forEach((nd, i) => pos.set(nd.id, { x: sx + i * (nodeW + gap), y: cy, w: nodeW, h: nodeH }));
+    } else {
+      const nodeW = Math.min(4.2, CONTENT_W * 0.5), nodeH = Math.min(0.7, (H - gap * (n - 1)) / n);
+      const total = n * nodeH + (n - 1) * gap, sx = MARGIN + (CONTENT_W - nodeW) / 2, sy = y0 + (H - total) / 2;
+      dg.nodes.forEach((nd, i) => pos.set(nd.id, { x: sx, y: sy + i * (nodeH + gap), w: nodeW, h: nodeH }));
+    }
+    const edges = dg.edges.length ? dg.edges : dg.nodes.slice(1).map((nd, i) => ({ from: dg.nodes[i].id, to: nd.id, label: "", dashed: false }));
+    for (const e of edges) {
+      const a = pos.get(e.from), b = pos.get(e.to); if (!a || !b) continue;
+      if (horiz) drawEdgeLine(slide, a.x + a.w, a.y + a.h / 2, b.x, b.y + b.h / 2, e.dashed, e.label);
+      else drawEdgeLine(slide, a.x + a.w / 2, a.y + a.h, b.x + b.w / 2, b.y, e.dashed, e.label);
+    }
+    dg.nodes.forEach((nd, i) => { const p = pos.get(nd.id)!; drawNodeBox(slide, p.x, p.y, p.w, p.h, nd.label, i === 0 ? NODE_MAIN : NODE_CHILD, 12); });
+    return;
+  }
+
+  // layered
+  const down = dg.dir !== "right";
+  const groups: string[] = [];
+  for (const nd of dg.nodes) if (!groups.includes(nd.group)) groups.push(nd.group);
+  const layers = groups.map((g) => dg.nodes.filter((nd) => nd.group === g));
+  const k = Math.max(1, layers.length);
+  if (down) {
+    const rowH = H / k, nodeH = Math.min(0.66, rowH * 0.5);
+    layers.forEach((layer, li) => {
+      const m = layer.length, gap = 0.3, nodeW = Math.min(2.6, (CONTENT_W - gap * (m + 1)) / m);
+      const total = m * nodeW + (m - 1) * gap, sx = MARGIN + (CONTENT_W - total) / 2, cy = y0 + li * rowH + (rowH - nodeH) / 2;
+      layer.forEach((nd, ni) => pos.set(nd.id, { x: sx + ni * (nodeW + gap), y: cy, w: nodeW, h: nodeH }));
+    });
+  } else {
+    const colW = CONTENT_W / k, nodeW = Math.min(2.4, colW * 0.78);
+    layers.forEach((layer, li) => {
+      const m = layer.length, gap = 0.3, nodeH = Math.min(0.7, (H - gap * (m + 1)) / m);
+      const total = m * nodeH + (m - 1) * gap, sy = y0 + (H - total) / 2, cx = MARGIN + li * colW + (colW - nodeW) / 2;
+      layer.forEach((nd, ni) => pos.set(nd.id, { x: cx, y: sy + ni * (nodeH + gap), w: nodeW, h: nodeH }));
+    });
+  }
+  const layerOf = new Map<string, number>();
+  layers.forEach((layer, li) => layer.forEach((nd) => layerOf.set(nd.id, li)));
+  for (const e of dg.edges) {
+    const a = pos.get(e.from), b = pos.get(e.to); if (!a || !b) continue;
+    const la = layerOf.get(e.from) ?? 0, lb = layerOf.get(e.to) ?? 0;
+    if (down && lb > la) drawEdgeElbow(slide, a.x + a.w / 2, a.y + a.h, b.x + b.w / 2, b.y, e.dashed, e.label);
+    else if (!down && lb > la) drawEdgeLine(slide, a.x + a.w, a.y + a.h / 2, b.x, b.y + b.h / 2, e.dashed, e.label);
+    else drawEdgeLine(slide, a.x + a.w / 2, a.y + a.h / 2, b.x + b.w / 2, b.y + b.h / 2, e.dashed, e.label);
+  }
+  dg.nodes.forEach((nd) => { const p = pos.get(nd.id)!; drawNodeBox(slide, p.x, p.y, p.w, p.h, nd.label, /核心|中心|中枢|中台|大脑|引擎|平台|底座/.test(nd.group) ? NODE_MAIN : NODE_CHILD, 12); });
+}
 
 function buildBlocks(page: SlidePage): Block[] {
   const blocks: Block[] = [];
@@ -315,6 +507,16 @@ function buildBlocks(page: SlidePage): Block[] {
     });
   }
 
+  // 架构图（原生形状：分层/流程/中心辐射），单图高度上限 4.6in，超高由 packBlocks 独占一页
+  for (const dg of page.diagrams) {
+    const groups = new Set(dg.nodes.map((n) => n.group)).size;
+    const H =
+      dg.type === "hub" ? 4.4
+      : dg.type === "flow" ? (dg.dir === "down" ? Math.min(4.4, dg.nodes.length * 0.9 + 0.4) : 2.2)
+      : Math.min(4.6, groups * 1.15 + 0.6);
+    blocks.push({ h: H + 0.2, draw: (slide, y) => drawDiagram(slide, y, H, dg) });
+  }
+
   return blocks;
 }
 
@@ -345,7 +547,7 @@ function packBlocks(blocks: Block[]): Block[][] {
 }
 
 const isDivider = (p: SlidePage) =>
-  Boolean(p.title) && !p.bullets.length && !p.paragraphs.length && !p.stats.length && !p.tables.length && !p.code.length && !p.images.length;
+  Boolean(p.title) && !p.bullets.length && !p.paragraphs.length && !p.stats.length && !p.tables.length && !p.code.length && !p.diagrams.length && !p.images.length;
 
 function drawHeader(slide: any, title: string) {
   slide.addText(title, {
@@ -442,6 +644,8 @@ export function slidesManifest(content: string): SlidesManifest {
     pagesWithNotes: pages.filter((p) => p.notes).length,
     tables: pages.reduce((a, p) => a + p.tables.length, 0),
     statCards: pages.reduce((a, p) => a + p.stats.length, 0),
+    diagrams: pages.reduce((a, p) => a + p.diagrams.length, 0),
+    droppedLinks: pages.reduce((a, p) => a + p.diagrams.reduce((b, d) => b + d.droppedLinks, 0), 0),
     images: pages.reduce((a, p) => a + p.images.length, 0),
   };
 }

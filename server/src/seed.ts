@@ -51,7 +51,7 @@ const BUILTIN_AGENTS = [
  * 第三方方法学均为蒸馏改写（非原文照搬），来源与许可见 THIRD_PARTY_NOTICES/。
  * 扩库或改正文时整体把 BUILTIN_SKILL_PACK_VERSION +1，并把对应条目 version 设为该值。
  */
-export const BUILTIN_SKILL_PACK_VERSION = 9;
+export const BUILTIN_SKILL_PACK_VERSION = 10;
 const V = BUILTIN_SKILL_PACK_VERSION;
 
 type BuiltinSkill = Required<Pick<SkillInput, "name" | "desc" | "trigger" | "when_to_use" | "body" | "kind" | "version">> &
@@ -124,8 +124,8 @@ export const BUILTIN_SKILLS: BuiltinSkill[] = [
     desc: "先定『讲者驱动 vs 读物优先』再控密度与节奏，单页防溢出（蒸馏 frontend-slides, MIT）",
     trigger: "ppt,演示,幻灯片,slides,presentation,演讲稿,路演,deck",
     when_to_use: "制作演示/幻灯片，需要确定信息密度与节奏时",
-    resources_json: JSON.stringify(["tpl:html-deck-horizontal"]),
-    body: "结论先行：先问『讲者驱动 vs 读物优先』再定密度，并善用 slides(Marp→内置 pptx) 的结构化原语（slides 正文用纯 Markdown，禁原始 HTML——HTML 只属 html 交付物）。1) 讲者驱动：每页 1-2 个观点、≤3 要点、宁可多分页；读物优先：4-6 个信息单元、每页自包含。2) **大数字用数字卡**：把关键指标写成单独成行的 `值 :: 标签`（如 `268亿元 :: 市场规模`、`↓80% :: 人力成本`），连续多行会自动渲成一排数字卡（最多 4 个），比埋进正文有力得多——方案/路演页标配。3) **章节幕页**：只含一个 `# 标题`（无其它内容）的页渲成章节分隔页，用于分段。4) **对比/选型用 Markdown 表格**（渲成原生可编辑 pptx 表格，不要压成要点）。5) 讲者备注写 `<!-- note: … -->`。6) 防溢出：渲染器已按高度预算自动分续页（标题带『（续）』）并均衡分配，但仍要主动控密度、别硬塞。7) 关键数字无可靠来源就写『示意值，待核实』，绝不编造。8) HTML 网页 deck 锁 16:9、可套本技能附带模板。落点：对外演示首选 slides（用户在文档面板一键 ⬇ .pptx，可编辑、无需 MCP）；纯网页交互才用 html。（蒸馏自 frontend-slides / guizang-ppt）",
+    resources_json: JSON.stringify(["tpl:html-deck-horizontal", "tpl:html-deck-broadside", "tpl:html-deck-signal", "tpl:html-deck-monochrome"]),
+    body: "结论先行：先问『讲者驱动 vs 读物优先』再定密度，并善用 slides(Marp→内置 pptx) 的结构化原语（slides 正文用纯 Markdown，禁原始 HTML——HTML 只属 html 交付物）。1) 讲者驱动：每页 1-2 个观点、≤3 要点、宁可多分页；读物优先：4-6 个信息单元、每页自包含。2) **大数字用数字卡**：把关键指标写成单独成行的 `值 :: 标签`（如 `268亿元 :: 市场规模`、`↓80% :: 人力成本`），连续多行会自动渲成一排数字卡（最多 4 个），比埋进正文有力得多——方案/路演页标配。3) **章节幕页**：只含一个 `# 标题`（无其它内容）的页渲成章节分隔页，用于分段。4) **对比/选型用 Markdown 表格**（渲成原生可编辑 pptx 表格，不要压成要点）。5) 讲者备注写 `<!-- note: … -->`。6) 防溢出：渲染器已按高度预算自动分续页（标题带『（续）』）并均衡分配，但仍要主动控密度、别硬塞。7) 关键数字无可靠来源就写『示意值，待核实』，绝不编造。8) **架构/流程图用 ```arch 围栏**（首行 type: layered|flow|hub；节点写 `[组] 名`、边写 `A -> B`、虚线带标签 `A -. 标签 .-> B`）→ 渲成原生可编辑的框+箭头，**别用 ASCII 画框、也别用文生图（会糊中文标签）**。9) HTML 网页 deck：可从本技能附带的 4 套模板（横向翻页 / 满版大字 / 编辑杂志 / 极简单色）挑一套套用。落点：对外演示首选 slides（用户在文档面板一键 ⬇ .pptx，可编辑、无需 MCP）；纯网页交互才用 html。（蒸馏自 frontend-slides / guizang-ppt + ppt-master 图形法）",
   },
   {
     name: "反 AI-slop 设计审美守则", kind: "method", version: V,
@@ -235,8 +235,8 @@ export const BUILTIN_SKILLS: BuiltinSkill[] = [
     desc: "整套对外方案优先立项、多角色协作（调研→选型→整合→演示→验收→汇总），单环节才自己做；含数字接地与配图规范",
     trigger: "解决方案,方案,售前,提案,投标,标书,客户方案,技术方案,介绍ppt,产品介绍,商业计划,商业方案",
     when_to_use: "在团队频道做整套对外解决方案/演示时（多环节、需多角色）",
-    resources_json: JSON.stringify(["tpl:html-deck-horizontal"]),
-    body: "结论先行：**完整对外方案优先用 start_project 立项、多角色协作**，不要一个人从头做到尾（一人包办既慢又不过验收）。1) 标准任务 DAG（带 depends_on）：① 调研员/产品经理——需求澄清 + 市场/竞品调研（关键数字带源、注明检索日期）；② 工程师——技术选型与架构（依赖①，给对比表 + 推荐理由）；③ 产品经理/解决方案助手——整合为完整方案 report/PRD（依赖①②）；④ PPT 助手——做对外演示 slides（依赖③）；⑤ 校对审核——内容验收（事实/数字一致/接地，依赖③）+ 设计审核——视觉验收（版式/数字卡/CJK 不破版，依赖④）；⑥ 你(Lead)——汇总。注意：PPT/方案的验收**别丢给代码评审**（不对口）——团队需含「校对审核」（内容）与「设计审核」（视觉），缺则去『团队/招新』添加。2) 叙事主线（金字塔）：痛点/现状 → 方案概览(一句话价值) → 总体架构 → 关键能力 → 选型对比 → 量化价值/ROI → 实施路线 → 风险保障 → 标杆案例 → CTA。3) slides 质量：关键指标用 `值 :: 标签` 数字卡、对比/选型用 Markdown 表格、分段用『只含 # 标题』章节幕页、每页配 `<!-- note: … -->` 备注、正文纯 Markdown 禁原始 HTML；用户在文档面板一键 ⬇ .pptx。4) 配图：封面/章节/概念页可用 generate_image 出 1-2 张点睛图（Seedream 已就位）；**架构图/流程图不要用文生图（会糊中文标签）**，用结构化表格 / 清晰文字层级表达。5) 数字接地：市场/降本/ROI 等无可靠来源就标『示意值，待核实』，绝不编造；先 read_document 查工作区有无现成材料。6) 只改一页/只写一段这类单环节小活才不立项、直接做。配合『金字塔写作法』『深度调研法』『演示设计与防溢出法』。",
+    resources_json: JSON.stringify(["tpl:html-deck-horizontal", "tpl:html-deck-broadside", "tpl:html-deck-signal", "tpl:html-deck-monochrome"]),
+    body: "结论先行：**完整对外方案优先用 start_project 立项、多角色协作**，不要一个人从头做到尾（一人包办既慢又不过验收）。1) 标准任务 DAG（带 depends_on）：① 调研员/产品经理——需求澄清 + 市场/竞品调研（关键数字带源、注明检索日期）；② 工程师——技术选型与架构（依赖①，给对比表 + 推荐理由）；③ 产品经理/解决方案助手——整合为完整方案 report/PRD（依赖①②）；④ PPT 助手——做对外演示 slides（依赖③）；⑤ 校对审核——内容验收（事实/数字一致/接地，依赖③）+ 设计审核——视觉验收（版式/数字卡/CJK 不破版，依赖④）；⑥ 你(Lead)——汇总。注意：PPT/方案的验收**别丢给代码评审**（不对口）——团队需含「校对审核」（内容）与「设计审核」（视觉），缺则去『团队/招新』添加。2) 叙事主线（金字塔）：痛点/现状 → 方案概览(一句话价值) → 总体架构 → 关键能力 → 选型对比 → 量化价值/ROI → 实施路线 → 风险保障 → 标杆案例 → CTA。3) slides 质量：关键指标用 `值 :: 标签` 数字卡、对比/选型用 Markdown 表格、分段用『只含 # 标题』章节幕页、每页配 `<!-- note: … -->` 备注、正文纯 Markdown 禁原始 HTML；用户在文档面板一键 ⬇ .pptx。4) 配图：封面/章节/概念页可用 generate_image 出 1-2 张点睛图（Seedream 已就位）；**架构/流程图用 ```arch 围栏**（type: layered|flow|hub）渲成原生可编辑的框+箭头，别用文生图（会糊中文标签）、也别用 ASCII。5) 数字接地：市场/降本/ROI 等无可靠来源就标『示意值，待核实』，绝不编造；先 read_document 查工作区有无现成材料。6) 只改一页/只写一段这类单环节小活才不立项、直接做。配合『金字塔写作法』『深度调研法』『演示设计与防溢出法』。",
   },
 
   // ── 能力型技能（capability：指向工具/MCP，read_skill 给用法+降级）──

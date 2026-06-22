@@ -229,6 +229,7 @@ const HTML_DECK_HORIZONTAL = `<!doctype html>
   .deck{aspect-ratio:16/9;width:min(100vw,calc(100vh*16/9));height:min(100vh,calc(100vw*9/16));position:relative;overflow:hidden}
   .slide{position:absolute;inset:0;padding:7% 9%;display:flex;flex-direction:column;justify-content:center;gap:.6em;opacity:0;transition:opacity .35s;pointer-events:none}
   .slide.active{opacity:1;pointer-events:auto}
+  html:not(.js) .slide:first-of-type{opacity:1;pointer-events:auto}
   h1{font-size:5.2vmin;font-weight:800;letter-spacing:-.01em}
   h2{font-size:3.4vmin;font-weight:700;color:var(--accent)}
   p,li{font-size:2.4vmin;line-height:1.5;color:var(--dim)}
@@ -248,6 +249,7 @@ const HTML_DECK_HORIZONTAL = `<!doctype html>
 </div></div>
 <div id="bar"></div><div id="hint">← / → 翻页</div>
 <script>
+  document.documentElement.classList.add('js');
   const slides=[...document.querySelectorAll('.slide')];
   const bar=document.getElementById('bar');
   let i=0;
@@ -261,13 +263,168 @@ const HTML_DECK_HORIZONTAL = `<!doctype html>
 </body>
 </html>`;
 
+// 三套移植自 frontend-slides 的风格（CJK 友好、脚本关闭可渲染 scroll-snap、过 validateDocContent）。
+const HTML_DECK_BROADSIDE = `<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>演示</title>
+<style>
+  :root{ --bg:#0c0d10; --ink:#f5f3ee; --dim:#8b9099; --accent:#e8b53a; --line:#23262d; }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-snap-type:y mandatory;scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--ink);font-family:-apple-system,"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
+  .slide{min-height:100vh;scroll-snap-align:start;display:flex;flex-direction:column;justify-content:center;padding:8vh 9vw;gap:.6em;position:relative}
+  .slide+.slide{border-top:1px solid var(--line)}
+  .kicker{font-size:.8rem;letter-spacing:.34em;text-transform:uppercase;color:var(--accent)}
+  h1{font-size:clamp(2.4rem,7vw,6rem);font-weight:800;line-height:1.02;letter-spacing:-.02em}
+  h2{font-size:clamp(1.6rem,4vw,3rem);font-weight:700}
+  p,li{font-size:clamp(1rem,1.7vw,1.4rem);line-height:1.55;color:var(--dim);max-width:48ch}
+  ul{padding-left:1.1em;display:flex;flex-direction:column;gap:.5em}
+  .big{font-size:clamp(3rem,12vw,9rem);font-weight:800;color:var(--accent);line-height:.95}
+  .stat-row{display:flex;flex-wrap:wrap;gap:5vw;margin-top:.4em}
+  .stat .n{font-size:clamp(2.2rem,6vw,4.5rem);font-weight:800;color:var(--accent)}
+  .stat .l{font-size:.95rem;color:var(--dim);letter-spacing:.04em}
+  #bar{position:fixed;right:2vw;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;gap:.7vh;z-index:9}
+  .dot{width:.55vh;height:.55vh;border-radius:50%;background:#3a3f47}
+  .dot.on{background:var(--accent);transform:scale(1.6)}
+  @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+</style>
+</head>
+<body>
+<main>
+  <section class="slide"><div class="kicker">封面</div><h1>在此填主标题</h1><p>副标题 / 一句话主张</p></section>
+  <section class="slide"><div class="kicker">关键指标</div><div class="stat-row">
+    <div class="stat"><div class="n">268亿</div><div class="l">市场规模</div></div>
+    <div class="stat"><div class="n">↓80%</div><div class="l">人力成本</div></div>
+    <div class="stat"><div class="n">3.2×</div><div class="l">效率提升</div></div>
+  </div></section>
+  <section class="slide"><h2>核心主张</h2><p class="big">一句压舱石</p></section>
+  <section class="slide"><h2>要点</h2><ul><li>每页一个观点群</li><li>宁可多分页，别堆密</li></ul></section>
+  <section class="slide"><h2>结尾</h2><p>行动建议 / 联系方式</p></section>
+</main>
+<nav id="bar" aria-hidden="true"></nav>
+<script>
+  const slides=[...document.querySelectorAll('.slide')];
+  const bar=document.getElementById('bar');
+  slides.forEach(()=>{const d=document.createElement('div');d.className='dot';bar.appendChild(d);});
+  const dots=[...bar.children];
+  const io=new IntersectionObserver((es)=>{es.forEach(e=>{if(e.isIntersecting){const i=slides.indexOf(e.target);dots.forEach((d,k)=>d.classList.toggle('on',k===i));}});},{threshold:.6});
+  slides.forEach(s=>io.observe(s));
+  let cur=0;function go(n){cur=Math.max(0,Math.min(slides.length-1,n));slides[cur].scrollIntoView();}
+  document.addEventListener('keydown',e=>{if(e.key==='ArrowDown'||e.key==='ArrowRight'||e.key===' '){go(cur+1);}if(e.key==='ArrowUp'||e.key==='ArrowLeft'){go(cur-1);}});
+</script>
+</body>
+</html>`;
+
+const HTML_DECK_SIGNAL = `<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>演示</title>
+<style>
+  :root{ --bg:#f4f1ea; --ink:#1c1a16; --dim:#6b675e; --accent:#b5471f; --line:#ddd6c8; }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-snap-type:y mandatory;scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--ink);font-family:-apple-system,"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Segoe UI",sans-serif}
+  .slide{min-height:100vh;scroll-snap-align:start;display:grid;grid-template-columns:1fr 1fr;gap:4vw;align-content:center;padding:9vh 8vw;position:relative;background-image:radial-gradient(var(--line) 1px,transparent 1px);background-size:26px 26px}
+  .full{grid-column:1/-1}
+  .num{font-variant-numeric:tabular-nums;font-size:.8rem;letter-spacing:.3em;color:var(--accent)}
+  h1{font-family:Georgia,"Songti SC","Noto Serif CJK SC",serif;font-size:clamp(2.4rem,6vw,5rem);font-weight:700;line-height:1.05;letter-spacing:-.01em}
+  h2{font-family:Georgia,"Songti SC","Noto Serif CJK SC",serif;font-size:clamp(1.5rem,3.4vw,2.6rem);font-weight:700;color:var(--accent)}
+  p,li{font-size:clamp(1rem,1.5vw,1.25rem);line-height:1.6;color:var(--dim)}
+  ul{padding-left:1.1em;display:flex;flex-direction:column;gap:.5em}
+  .rule{height:3px;width:3.5rem;background:var(--accent);margin:.2em 0 .6em}
+  @media(max-width:760px){.slide{grid-template-columns:1fr}}
+  @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+</style>
+</head>
+<body>
+<main>
+  <section class="slide"><div class="full"><div class="num">01 — 封面</div><div class="rule"></div><h1>在此填主标题</h1><p>副标题 / 一句话主张</p></div></section>
+  <section class="slide"><div><div class="num">02</div><h2>论点</h2><div class="rule"></div><p>左栏放主张，右栏放展开或证据。</p></div>
+    <div><ul><li>支撑点一</li><li>支撑点二</li><li>支撑点三</li></ul></div></section>
+  <section class="slide"><div class="full"><div class="num">03</div><h2>引述 / 重点</h2><div class="rule"></div><h1>一句金句压版</h1></div></section>
+  <section class="slide"><div class="full"><div class="num">04 — 结尾</div><div class="rule"></div><h2>行动建议</h2><p>联系方式 / 下一步</p></div></section>
+</main>
+<script>
+  const slides=[...document.querySelectorAll('.slide')];let cur=0;
+  function go(n){cur=Math.max(0,Math.min(slides.length-1,n));slides[cur].scrollIntoView();}
+  document.addEventListener('keydown',e=>{if(['ArrowDown','ArrowRight',' '].includes(e.key))go(cur+1);if(['ArrowUp','ArrowLeft'].includes(e.key))go(cur-1);});
+</script>
+</body>
+</html>`;
+
+const HTML_DECK_MONOCHROME = `<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>演示</title>
+<style>
+  :root{ --bg:#ffffff; --ink:#111316; --dim:#6a6f76; --accent:#111316; --line:#e6e8ea; }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-snap-type:y mandatory;scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--ink);font-family:-apple-system,"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Segoe UI",sans-serif}
+  .slide{min-height:100vh;scroll-snap-align:start;display:flex;flex-direction:column;justify-content:center;padding:10vh 9vw;gap:.7em;border-bottom:1px solid var(--line)}
+  .tag{font-size:.78rem;letter-spacing:.32em;text-transform:uppercase;color:var(--dim)}
+  h1{font-size:clamp(2.2rem,6vw,5rem);font-weight:800;line-height:1.04;letter-spacing:-.02em}
+  h2{font-size:clamp(1.4rem,3.4vw,2.4rem);font-weight:700}
+  p,li{font-size:clamp(1rem,1.6vw,1.25rem);line-height:1.6;color:var(--dim)}
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:4vw;margin-top:.4em}
+  ul{padding-left:1.1em;display:flex;flex-direction:column;gap:.45em}
+  .line{height:2px;width:100%;background:var(--ink);margin:.3em 0}
+  @media(max-width:640px){.cols{grid-template-columns:1fr}}
+  @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+</style>
+</head>
+<body>
+<main>
+  <section class="slide"><div class="tag">封面</div><div class="line"></div><h1>在此填主标题</h1><p>副标题 / 一句话主张</p></section>
+  <section class="slide"><div class="tag">对比</div><h2>两栏并列</h2><div class="cols">
+    <div><h2>方案 A</h2><ul><li>优点</li><li>代价</li></ul></div>
+    <div><h2>方案 B</h2><ul><li>优点</li><li>代价</li></ul></div></div></section>
+  <section class="slide"><div class="tag">主张</div><div class="line"></div><h1>一句压舱石</h1></section>
+  <section class="slide"><div class="tag">结尾</div><div class="line"></div><h2>行动建议</h2><p>联系方式 / 下一步</p></section>
+</main>
+<script>
+  const s=[...document.querySelectorAll('.slide')];let c=0;
+  const go=n=>{c=Math.max(0,Math.min(s.length-1,n));s[c].scrollIntoView();};
+  document.addEventListener('keydown',e=>{if(['ArrowDown','ArrowRight',' '].includes(e.key))go(c+1);if(['ArrowUp','ArrowLeft'].includes(e.key))go(c-1);});
+</script>
+</body>
+</html>`;
+
 export const SKILL_TEMPLATES: SkillTemplate[] = [
   {
     id: "html-deck-horizontal",
     name: "横向翻页网页 PPT（单文件 HTML）",
-    desc: "16:9 锁定舞台、← / → 或点击翻页、进度点；瑞士国际主义骨架。替换 .slide 内容即用，可作为 html 交付物直接预览。",
+    desc: "16:9 锁定舞台、← / → 或点击翻页、进度点；瑞士国际主义骨架。脚本关闭也显首页。替换 .slide 内容即用。",
     lang: "html",
     content: HTML_DECK_HORIZONTAL,
+  },
+  {
+    id: "html-deck-broadside",
+    name: "满版大字网页 PPT（单文件 HTML）",
+    desc: "纵向 scroll-snap、满版大标题与数字大字报、右侧进度点；脚本关闭可滚动浏览全部。深色暖金。",
+    lang: "html",
+    content: HTML_DECK_BROADSIDE,
+  },
+  {
+    id: "html-deck-signal",
+    name: "编辑杂志风网页 PPT（单文件 HTML）",
+    desc: "网格点阵底、衬线主标题、双栏论点/证据；窄屏自动单栏；脚本关闭可渲染。米底砖红。",
+    lang: "html",
+    content: HTML_DECK_SIGNAL,
+  },
+  {
+    id: "html-deck-monochrome",
+    name: "极简单色网页 PPT（单文件 HTML）",
+    desc: "黑白极简、双栏对比、640px 断点单栏；脚本关闭可滚动浏览。最克制。",
+    lang: "html",
+    content: HTML_DECK_MONOCHROME,
   },
 ];
 
