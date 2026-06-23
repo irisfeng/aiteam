@@ -4,8 +4,10 @@ import { useWorkspace } from "../store";
 import type { Doc } from "../types";
 
 interface Slot { slideIdx: number; shapeIdx: number; paraIdx: number; text: string; kind: "ph" | "sp"; phType?: string }
-interface Meta { slideCount: number; slots: Slot[]; warnings: string[] }
+interface ImgSlot { slideIdx: number; imageIdx: number; type: "pic" | "ph"; label: string; cx?: number; cy?: number; fillable: boolean }
+interface Meta { slideCount: number; slots: Slot[]; images?: ImgSlot[]; warnings: string[] }
 interface Row { value: string; checked: boolean }
+interface ImgPick { dataBase64: string; ext: string; preview: string }
 
 /** 上传 .pptx 模板「就地改图文」编辑器（方案① MVP）：逐槽确认 + AI 按来源建议 + 导出保真 pptx。
  *  只改文本、保留母版/版式/配色；表格/图表/SmartArt 列入告警、不就地改。 */
@@ -20,6 +22,9 @@ export function TemplateEditor({ doc }: { doc: Doc }) {
   const [brief, setBrief] = useState("");
   const [busy, setBusy] = useState<"" | "propose" | "export">("");
   const [note, setNote] = useState<string>("");
+  const [imgPicks, setImgPicks] = useState<Record<string, ImgPick>>({}); // key=slideIdx:imageIdx → 选定图片
+  const [imgPrompts, setImgPrompts] = useState<Record<string, string>>({});
+  const [imgBusy, setImgBusy] = useState<string>(""); // 正在生成的 key
 
   const sourceDocs = ws.documents.filter((d) => d.kind === "source");
   if (!meta) return <div className="p-6 text-[13px] text-ink-3">无法解析该模板的槽位信息（template_meta 缺失或损坏）。请重新上传 .pptx。</div>;
@@ -42,20 +47,50 @@ export function TemplateEditor({ doc }: { doc: Doc }) {
     finally { setBusy(""); }
   }
 
+  const imgKey = (s: ImgSlot) => `${s.slideIdx}:${s.imageIdx}`;
+
+  async function genImage(s: ImgSlot) {
+    const key = imgKey(s);
+    const prompt = (imgPrompts[key] || "").trim();
+    if (!prompt) { setNote("先填配图描述，再点生成。"); return; }
+    setImgBusy(key); setNote("");
+    try {
+      const r = await api.generateTemplateImage(doc.id, prompt, (s.cx && s.cy && s.cy > s.cx) ? "1152x2048" : "2048x1152");
+      setImgPicks((m) => ({ ...m, [key]: { dataBase64: r.dataBase64, ext: r.ext, preview: r.assetUrl } }));
+      setNote("配图已生成（已选中，导出时嵌入）。");
+    } catch (e) { setNote("配图生成失败：" + ((e as Error)?.message ?? e)); }
+    finally { setImgBusy(""); }
+  }
+
+  function onUploadImage(s: ImgSlot, file: File) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const url = String(reader.result || "");
+      const base64 = url.replace(/^data:[^,]*,/, "");
+      const ext = (file.name.match(/\.([a-z0-9]+)$/i)?.[1] || "png").toLowerCase();
+      setImgPicks((m) => ({ ...m, [imgKey(s)]: { dataBase64: base64, ext, preview: url } }));
+    };
+    reader.readAsDataURL(file);
+  }
+
   async function exportPptx() {
     const edits = (meta!.slots).map((s, i) => ({ s, i }))
       .filter(({ i }) => rows[i].checked && rows[i].value.trim() && rows[i].value !== meta!.slots[i].text)
       .map(({ s, i }) => ({ slideIdx: s.slideIdx, shapeIdx: s.shapeIdx, paraIdx: s.paraIdx, newText: rows[i].value }));
-    if (!edits.length) { setNote("没有勾选并改动的槽位——勾选要替换的槽、改好文案再导出。"); return; }
+    const imageEdits = Object.entries(imgPicks).map(([key, v]) => {
+      const [slideIdx, imageIdx] = key.split(":").map(Number);
+      return { slideIdx, imageIdx, dataBase64: v.dataBase64, ext: v.ext };
+    });
+    if (!edits.length && !imageEdits.length) { setNote("没有可导出的改动——勾选并改好文字槽、或为图片位选/生成配图，再导出。"); return; }
     setBusy("export"); setNote("");
     try {
-      const blob = await api.templateExport(doc.id, edits);
+      const blob = await api.templateExport(doc.id, edits, imageEdits);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url; a.download = doc.title.replace(/\.pptx$/i, "") + "-已编辑.pptx";
       document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 4000);
-      setNote(`已导出：替换 ${edits.length} 处，其余 ${meta!.slots.length - edits.length} 处保留原样。母版/版式/配色未改。`);
+      setNote(`已导出：替换文字 ${edits.length} 处、换/填图 ${imageEdits.length} 处，其余保留原样。母版/版式/配色未改。`);
     } catch (e) { setNote("导出失败：" + ((e as Error)?.message ?? e)); }
     finally { setBusy(""); }
   }
@@ -141,6 +176,39 @@ export function TemplateEditor({ doc }: { doc: Doc }) {
           </div>
         ))}
       </div>
+
+      {/* 配图（替换已有图 / 填入空图片占位） */}
+      {(meta.images?.filter((s) => s.fillable).length ?? 0) > 0 && (
+        <div className="flex flex-col gap-2">
+          <div className="text-[12.5px] font-medium text-ink-2">配图（替换已有图 / 填入空图片占位 · 选填，生成或上传后随导出嵌入）</div>
+          {meta.images!.filter((s) => s.fillable).map((s) => {
+            const key = `${s.slideIdx}:${s.imageIdx}`;
+            const pick = imgPicks[key];
+            return (
+              <div key={key} className="rounded-lg border border-line p-2.5">
+                <div className="mb-1.5 flex items-center gap-2 text-[12px] text-ink-2">
+                  <span className="rounded bg-sel px-1.5 py-px text-[11px]">第 {s.slideIdx + 1} 页</span>
+                  <span>{s.type === "pic" ? "替换图片" : "填入空图片占位"}</span>
+                  {pick && <span className="text-accent">✓ 已选（导出时嵌入）</span>}
+                </div>
+                <div className="flex items-start gap-2">
+                  {pick && <img src={pick.preview} alt="" className="h-12 w-20 shrink-0 rounded border border-line object-cover" />}
+                  <input value={imgPrompts[key] || ""} onChange={(e) => setImgPrompts((m) => ({ ...m, [key]: e.target.value }))}
+                    placeholder="配图描述（如：明亮温暖的连锁餐厅门店、写实摄影）"
+                    className="min-w-0 flex-1 rounded-lg border border-line bg-sel px-3 py-1.5 text-[12px] outline-none focus:border-accent/50" />
+                  <button onClick={() => genImage(s)} disabled={imgBusy !== ""}
+                    className="shrink-0 rounded-lg border border-accent/50 px-2.5 py-1.5 text-[12px] font-medium text-accent hover:bg-accent-soft disabled:opacity-50">
+                    {imgBusy === key ? "生成中…" : "✨ 生成"}
+                  </button>
+                  <label className="shrink-0 cursor-pointer rounded-lg border border-line px-2.5 py-1.5 text-[12px] text-ink-2 hover:bg-sel">
+                    📁 上传<input type="file" accept="image/*" hidden onChange={(e) => { const f = e.currentTarget.files?.[0]; e.currentTarget.value = ""; if (f) onUploadImage(s, f); }} />
+                  </label>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* 导出 */}
       <div className="sticky bottom-0 flex items-center gap-2 border-t border-line bg-panel py-2">

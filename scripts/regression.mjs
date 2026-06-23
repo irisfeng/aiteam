@@ -504,6 +504,26 @@ check(
   check("PTPL-EMPTY", "空模板生成图文：空占位符列成可填槽(text=''+phType) + 填字入位 + 母版/版式/主题不变",
     !!emptySlot && !!metaF.slots.find((s) => s.text.includes("填入标题ZULU")) && masterE.length === 0,
     `空槽=${!!emptySlot} phType=${emptySlot?.phType} 填入=${!!metaF.slots.find((s) => s.text.includes("填入标题ZULU"))} master改=${masterE.length}`);
+
+  // PTPL-IMG 模板换图：夹具嵌图 → 解析出图片位 → 换图(base64) → 新 media + Content_Types png + 重解析仍在 + 母版不变
+  const { assetsDir } = await import(join(root, "server/dist/agents/images.js"));
+  const PNGa = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+  const PNGb = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  writeFileSync(join(assetsDir, "ptpl-img.png"), Buffer.from(PNGa, "base64"));
+  const imgDeck = await slidesToPptx({ ...fixtureDoc, content: "# 封面\n副\n---\n## 配图\n![x](/aiteam/assets/ptpl-img.png)\n要点" });
+  const metaI = await parseTemplate(imgDeck);
+  const picSlot = (metaI.images || []).find((s) => s.type === "pic" && s.fillable);
+  const beforeMI = await innerMap(imgDeck);
+  const editedI = picSlot ? await applyTemplateEdits(imgDeck, [], [{ slideIdx: picSlot.slideIdx, imageIdx: picSlot.imageIdx, dataBase64: PNGb, ext: "png" }]) : imgDeck;
+  const zI = await JSZip.loadAsync(editedI);
+  const mediaN = Object.keys(zI.files).filter((p) => /^ppt\/media\/.+\.(png|jpg|jpeg)$/i.test(p)).length;
+  const ctI = await zI.file("[Content_Types].xml").async("string");
+  const metaI2 = await parseTemplate(editedI);
+  const afterMI = await innerMap(editedI);
+  const masterMI = Object.keys(beforeMI).filter((p) => !/slides\/slide\d+\.xml$/.test(p) && beforeMI[p] !== afterMI[p]);
+  check("PTPL-IMG", "模板换图：解析出图片位 + 换图(新 media + Content_Types png) + 重解析仍在 + 母版/版式/主题不变",
+    !!picSlot && mediaN >= 2 && /Extension="png"/i.test(ctI) && (metaI2.images || []).some((s) => s.type === "pic") && masterMI.length === 0,
+    `图片位=${!!picSlot} media=${mediaN} ct=${/Extension="png"/i.test(ctI)} master改=${masterMI.length}`);
 }
 
 // ENV1 stdio MCP 环境变量：值入库（仅服务端），sanitize 只回 key 名、绝不下发值（博查 BOCHA_API_KEY 用例）

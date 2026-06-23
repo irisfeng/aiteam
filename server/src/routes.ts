@@ -48,7 +48,7 @@ import multer from "multer";
 import { withOwner, ownerFromUserId } from "./ownerScope.js";
 import { dropConnection, testMcpServer, callMcpTool, mcpToolPrefixReady } from "./agents/mcp.js";
 import { UPLOAD_MAX_BYTES, TEXT_EXTS, DOC_EXTS, extOf, withTempFile, persistTemplateBinary, readTemplateBinary, removeTemplateBinary } from "./uploads.js";
-import { parseTemplate, applyTemplateEdits, type TemplateEdit } from "./pptx-template.js";
+import { parseTemplate, applyTemplateEdits, type TemplateEdit, type ImageEdit } from "./pptx-template.js";
 import {
   createDocument,
   createProvider,
@@ -69,7 +69,7 @@ import {
 } from "./db.js";
 import { slidesToPptx } from "./pptx.js";
 import { MCP_REGISTRY, SKILL_PACK_REGISTRY } from "./registry.js";
-import { DEFAULT_IMAGE_BASE_URL } from "./agents/images.js";
+import { DEFAULT_IMAGE_BASE_URL, generateImageBytes } from "./agents/images.js";
 import {
   isMock,
   onMessage,
@@ -542,9 +542,18 @@ api.post("/documents/:id/template-export", async (req, res) => {
         newText: String((e as TemplateEdit).newText ?? ""),
       })).filter((e) => Number.isInteger(e.slideIdx) && Number.isInteger(e.shapeIdx) && Number.isInteger(e.paraIdx))
     : [];
+  const imgRaw = (req.body?.imageEdits ?? []) as unknown;
+  const imageEdits: ImageEdit[] = Array.isArray(imgRaw)
+    ? imgRaw.map((e) => ({
+        slideIdx: Number((e as ImageEdit).slideIdx),
+        imageIdx: Number((e as ImageEdit).imageIdx),
+        dataBase64: String((e as ImageEdit).dataBase64 ?? "").replace(/^data:[^,]*,/, ""), // 容忍 data:URL 前缀
+        ext: String((e as ImageEdit).ext ?? "png"),
+      })).filter((e) => Number.isInteger(e.slideIdx) && Number.isInteger(e.imageIdx) && e.dataBase64)
+    : [];
   try {
     const original = readTemplateBinary(doc.original_blob_path);
-    const out = await applyTemplateEdits(original, edits);
+    const out = await applyTemplateEdits(original, edits, imageEdits);
     const filename = encodeURIComponent(doc.title.replace(/\.pptx$/i, "").replace(/[\\/:*?"<>|]/g, "_") + "-已编辑.pptx");
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.presentationml.presentation");
     res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${filename}`);
@@ -595,6 +604,19 @@ api.post("/documents/:id/template-propose", async (req, res) => {
   } catch (err: unknown) {
     res.status(502).json({ error: `AI 建议失败：${String((err as Error)?.message ?? err).slice(0, 200)}` });
   }
+});
+
+// 为模板某图片位生成配图（Seedream）：返回 base64，前端预览并随 template-export 的 imageEdits 一起嵌入。
+api.post("/documents/:id/template-image-generate", async (req, res) => {
+  const doc = getDocument(req.params.id);
+  if (!doc) return res.status(404).json({ error: "document not found" });
+  if (doc.kind !== "template") return res.status(400).json({ error: "该文档不是 .pptx 模板" });
+  const prompt = String(req.body?.prompt ?? "").trim();
+  if (!prompt) return res.status(400).json({ error: "请填写配图描述（prompt）" });
+  const size = String(req.body?.size ?? "");
+  const r = await generateImageBytes(prompt, size);
+  if ("error" in r) return res.status(502).json({ error: r.error });
+  res.json(r); // { dataBase64, ext, assetUrl }
 });
 
 /** 某文档的全部历史版本（含已被取代的旧版），供前端「查看历史版本」抽屉。 */

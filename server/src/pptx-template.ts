@@ -27,9 +27,26 @@ export interface TemplateSlot {
   phType?: string;
 }
 
+/** 图片槽：模板里已有的图片(p:pic) 或带 xfrm 的空图片占位(p:sp ph=pic/obj)。可替换/填入生成或上传的图。 */
+export interface ImageSlot {
+  slideIdx: number;
+  /** 该页所有"图片位"(p:pic + 空图片占位)在文档序中的下标；解析/回写共用，定位稳定 */
+  imageIdx: number;
+  /** pic=已有图片可替换；ph=空图片占位（需有 xfrm 才可填入，否则 fillable=false） */
+  type: "pic" | "ph";
+  label: string;
+  /** 显示宽高(EMU)，供提示比例；可空 */
+  cx?: number;
+  cy?: number;
+  /** 是否可被本迭代填/换（pic 恒可；空占位需自身带 xfrm 几何） */
+  fillable: boolean;
+}
+
 export interface TemplateMeta {
   slideCount: number;
   slots: TemplateSlot[];
+  /** 图片位清单（替换已有图 / 填入空图片占位） */
+  images: ImageSlot[];
   /** 高风险结构告警（表格/图表/SmartArt/组合形状）——本 MVP 不就地改，提示用户「保留原样/建议降级」 */
   warnings: string[];
 }
@@ -39,6 +56,16 @@ export interface TemplateEdit {
   shapeIdx: number;
   paraIdx: number;
   newText: string;
+}
+
+/** 图片编辑：把某图片位替换/填入为 base64 图片字节（png/jpeg）。 */
+export interface ImageEdit {
+  slideIdx: number;
+  imageIdx: number;
+  /** base64（不含 data: 前缀）图片数据 */
+  dataBase64: string;
+  /** 扩展名：png / jpg / jpeg（决定 media 文件名与 Content_Types） */
+  ext: string;
 }
 
 // ── DOM 小工具（@xmldom/xmldom 的 nodeName 即带前缀的限定名，如 "p:sp"/"a:t"）──
@@ -144,11 +171,112 @@ function phTypeOf(sp: XmlElement): string {
   return PH_TYPE_LABEL[t] || (t ? t : "内容");
 }
 
+// ── 图片位（替换已有图 / 填入空图片占位）──
+function getXfrm(el: XmlElement): { x: string; y: string; cx: string; cy: string } | null {
+  const spPr = firstChild(el, "p:spPr");
+  const xf = spPr ? firstChild(spPr, "a:xfrm") : null;
+  if (!xf) return null;
+  const off = firstChild(xf, "a:off"), ext = firstChild(xf, "a:ext");
+  if (!off || !ext) return null;
+  return { x: off.getAttribute("x") || "0", y: off.getAttribute("y") || "0", cx: ext.getAttribute("cx") || "0", cy: ext.getAttribute("cy") || "0" };
+}
+/** 一页内所有"图片位"(文档序)：已有图片 p:pic + 空图片占位 p:sp(ph type=pic/obj/clipArt)。解析/回写共用，下标稳定。 */
+function imageElements(spTree: XmlElement): { el: XmlElement; type: "pic" | "ph" }[] {
+  const out: { el: XmlElement; type: "pic" | "ph" }[] = [];
+  for (const el of childElements(spTree)) {
+    if (el.nodeName === "p:pic") out.push({ el, type: "pic" });
+    else if (el.nodeName === "p:sp") {
+      const ph = placeholderEl(el);
+      const t = ph?.getAttribute("type") || "";
+      if (ph && (t === "pic" || t === "obj" || t === "clipArt")) out.push({ el, type: "ph" });
+    }
+  }
+  return out;
+}
+function safeImgExt(ext: string): string {
+  return /^(png|jpg|jpeg|gif|webp)$/i.test(ext) ? ext.toLowerCase() : "png";
+}
+function mimeOf(ext: string): string {
+  return ext === "jpg" || ext === "jpeg" ? "image/jpeg" : ext === "gif" ? "image/gif" : ext === "webp" ? "image/webp" : "image/png";
+}
+const REL_NS = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
+/** 往 zip 加一张图：写 ppt/media、在该 slide 的 .rels 注册新 rId、确保 [Content_Types] 有该扩展名 Default。返回 rId。 */
+async function addImageMedia(zip: Zip, slidePath: string, dataBase64: string, ext: string): Promise<string> {
+  const e = safeImgExt(ext);
+  const mediaNames = Object.keys(zip.files).filter((p) => /^ppt\/media\/[^/]+$/.test(p));
+  let maxN = 0;
+  for (const p of mediaNames) { const m = p.match(/image(\d+)\./i); if (m) maxN = Math.max(maxN, Number(m[1])); }
+  let n = maxN + 1;
+  while (zip.file(`ppt/media/image${n}.${e}`)) n++; // 防与既有命名(如 pptxgenjs 的怪名)撞车
+  const fileName = `image${n}.${e}`;
+  zip.file(`ppt/media/${fileName}`, Buffer.from(dataBase64, "base64"));
+  // rels：ppt/slides/slideN.xml → ppt/slides/_rels/slideN.xml.rels
+  const relsPath = slidePath.replace(/(.*\/)([^/]+)$/, "$1_rels/$2.rels");
+  const relsXml = (await zip.file(relsPath)?.async("string")) ||
+    REL_NS + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
+  const relsDoc = new DOMParser().parseFromString(relsXml, "text/xml");
+  const relsRoot = relsDoc.getElementsByTagName("Relationships")[0];
+  let maxRid = 0;
+  const rels = relsRoot.getElementsByTagName("Relationship");
+  for (let i = 0; i < rels.length; i++) { const m = (rels[i].getAttribute("Id") || "").match(/rId(\d+)/); if (m) maxRid = Math.max(maxRid, Number(m[1])); }
+  const rId = `rId${maxRid + 1}`;
+  const rel = relsDoc.createElement("Relationship");
+  rel.setAttribute("Id", rId);
+  rel.setAttribute("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image");
+  rel.setAttribute("Target", `../media/${fileName}`);
+  relsRoot.appendChild(rel);
+  let relsOut = new XMLSerializer().serializeToString(relsDoc);
+  if (!relsOut.startsWith("<?xml")) relsOut = REL_NS + relsOut;
+  zip.file(relsPath, relsOut);
+  // Content_Types：缺该扩展名 Default 就补
+  const ctPath = "[Content_Types].xml";
+  const ctXml = await zip.file(ctPath)?.async("string");
+  if (ctXml && !new RegExp(`Extension="${e}"`, "i").test(ctXml)) {
+    const ctDoc = new DOMParser().parseFromString(ctXml, "text/xml");
+    const ctRoot = ctDoc.getElementsByTagName("Types")[0];
+    const d = ctDoc.createElement("Default");
+    d.setAttribute("Extension", e);
+    d.setAttribute("ContentType", mimeOf(e));
+    ctRoot.insertBefore(d, ctRoot.firstChild); // Default 应在 Override 之前
+    let ctOut = new XMLSerializer().serializeToString(ctDoc);
+    if (!ctOut.startsWith("<?xml")) ctOut = REL_NS + ctOut;
+    zip.file(ctPath, ctOut);
+  }
+  return rId;
+}
+/** 用占位符几何新建一个 p:pic（填入空图片占位）。无 xfrm 返回 null（不乱猜位置）。 */
+function buildPicFromPlaceholder(doc: any, sp: XmlElement, rId: string, picId: number): XmlElement | null {
+  const xf = getXfrm(sp);
+  if (!xf) return null;
+  const ph = placeholderEl(sp);
+  const E = (tag: string) => doc.createElement(tag) as XmlElement;
+  const pic = E("p:pic");
+  const nvPicPr = E("p:nvPicPr");
+  const cNvPr = E("p:cNvPr"); cNvPr.setAttribute("id", String(picId)); cNvPr.setAttribute("name", "Picture " + picId);
+  const cNvPicPr = E("p:cNvPicPr");
+  const nvPr = E("p:nvPr"); if (ph) nvPr.appendChild(ph.cloneNode(true));
+  nvPicPr.appendChild(cNvPr); nvPicPr.appendChild(cNvPicPr); nvPicPr.appendChild(nvPr);
+  const blipFill = E("p:blipFill");
+  const blip = E("a:blip"); blip.setAttribute("r:embed", rId);
+  const stretch = E("a:stretch"); stretch.appendChild(E("a:fillRect"));
+  blipFill.appendChild(blip); blipFill.appendChild(stretch);
+  const spPr = E("p:spPr");
+  const xfrm = E("a:xfrm");
+  const off = E("a:off"); off.setAttribute("x", xf.x); off.setAttribute("y", xf.y);
+  const ext = E("a:ext"); ext.setAttribute("cx", xf.cx); ext.setAttribute("cy", xf.cy);
+  xfrm.appendChild(off); xfrm.appendChild(ext);
+  const geom = E("a:prstGeom"); geom.setAttribute("prst", "rect"); geom.appendChild(E("a:avLst"));
+  spPr.appendChild(xfrm); spPr.appendChild(geom);
+  pic.appendChild(nvPicPr); pic.appendChild(blipFill); pic.appendChild(spPr);
+  return pic;
+}
+
 /** 只读解析：产出槽位清单 + 高风险结构告警。不修改任何内容。 */
 export async function parseTemplate(buf: Buffer): Promise<TemplateMeta> {
   const zip = await JSZip.loadAsync(buf);
   const paths = await orderedSlidePaths(zip);
   const slots: TemplateSlot[] = [];
+  const images: ImageSlot[] = [];
   const warnings: string[] = [];
   for (let slideIdx = 0; slideIdx < paths.length; slideIdx++) {
     const xml = await zip.file(paths[slideIdx])!.async("string");
@@ -156,6 +284,16 @@ export async function parseTemplate(buf: Buffer): Promise<TemplateMeta> {
     const spTree = doc.getElementsByTagName("p:spTree")[0];
     if (!spTree) continue;
     warnings.push(...detectWarnings(spTree, slideIdx));
+    // 图片位：已有图片(可换) + 空图片占位(有 xfrm 才可填)
+    imageElements(spTree).forEach((im, imageIdx) => {
+      const xf = getXfrm(im.el);
+      images.push({
+        slideIdx, imageIdx, type: im.type,
+        label: im.type === "pic" ? "图片" : "空图片占位",
+        cx: xf ? Number(xf.cx) : undefined, cy: xf ? Number(xf.cy) : undefined,
+        fillable: im.type === "pic" || !!xf, // 已有图恒可换；空占位需自带几何
+      });
+    });
     const shapes = textShapes(spTree);
     for (let shapeIdx = 0; shapeIdx < shapes.length; shapeIdx++) {
       const sp = shapes[shapeIdx];
@@ -172,7 +310,7 @@ export async function parseTemplate(buf: Buffer): Promise<TemplateMeta> {
       if (!anyText && kind === "ph") slots.push({ slideIdx, shapeIdx, paraIdx: 0, text: "", kind, phType: phTypeOf(sp) });
     }
   }
-  return { slideCount: paths.length, slots, warnings };
+  return { slideCount: paths.length, slots, images, warnings };
 }
 
 /**
@@ -180,23 +318,50 @@ export async function parseTemplate(buf: Buffer): Promise<TemplateMeta> {
  * 其余 a:r 的 a:t 清空（保留首 run 的 rPr 字体/颜色，整段沿用首 run 样式）。
  * 只重写有改动的 slide xml，其余 zip 条目（含母版/版式/主题/图片）原样回写。
  */
-export async function applyTemplateEdits(buf: Buffer, edits: TemplateEdit[]): Promise<Buffer> {
+export async function applyTemplateEdits(buf: Buffer, edits: TemplateEdit[], imageEdits: ImageEdit[] = []): Promise<Buffer> {
   const zip = await JSZip.loadAsync(buf);
   const paths = await orderedSlidePaths(zip);
+  const affected = new Set<number>();
   const bySlide = new Map<number, TemplateEdit[]>();
   for (const e of edits) {
     if (e.slideIdx < 0 || e.slideIdx >= paths.length) continue;
     let arr = bySlide.get(e.slideIdx);
     if (!arr) { arr = []; bySlide.set(e.slideIdx, arr); }
     arr.push(e);
+    affected.add(e.slideIdx);
   }
-  for (const [slideIdx, slideEdits] of bySlide) {
+  const imgBySlide = new Map<number, ImageEdit[]>();
+  for (const e of imageEdits) {
+    if (e.slideIdx < 0 || e.slideIdx >= paths.length || !e.dataBase64) continue;
+    let arr = imgBySlide.get(e.slideIdx);
+    if (!arr) { arr = []; imgBySlide.set(e.slideIdx, arr); }
+    arr.push(e);
+    affected.add(e.slideIdx);
+  }
+  let picSeq = 9000; // 新建 p:pic 的 cNvPr id（避开既有，唯一即可）
+  for (const slideIdx of affected) {
+    const slideEdits = bySlide.get(slideIdx) ?? [];
     const path = paths[slideIdx];
     const raw = await zip.file(path)!.async("string");
     const decl = raw.match(/^<\?xml[^>]*\?>/)?.[0] ?? '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
     const doc = new DOMParser().parseFromString(raw, "text/xml");
     const spTree = doc.getElementsByTagName("p:spTree")[0];
     if (!spTree) continue;
+    // 图片编辑（解析时同一 imageElements 枚举，下标稳定；replaceChild 保位置不改下标）
+    const imgs = imageElements(spTree);
+    for (const ie of imgBySlide.get(slideIdx) ?? []) {
+      const slot = imgs[ie.imageIdx];
+      if (!slot) continue;
+      const rId = await addImageMedia(zip, path, ie.dataBase64, ie.ext);
+      if (slot.type === "pic") {
+        const blipFill = firstChild(slot.el, "p:blipFill");
+        const blip = blipFill ? firstChild(blipFill, "a:blip") : null;
+        if (blip) blip.setAttribute("r:embed", rId);
+      } else {
+        const pic = buildPicFromPlaceholder(doc, slot.el, rId, ++picSeq);
+        if (pic && slot.el.parentNode) slot.el.parentNode.replaceChild(pic, slot.el);
+      }
+    }
     const shapes = textShapes(spTree);
     for (const e of slideEdits) {
       const sp = shapes[e.shapeIdx];
