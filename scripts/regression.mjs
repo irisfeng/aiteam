@@ -249,6 +249,35 @@ check(
     `nodes=${d && d.nodes.length} edges=${d && d.edges.length} dropped=${m.droppedLinks} bytes=${buf.length}`);
 }
 
+// PPTX7 架构图新语法（节点|子项→框内模块 + 自动分层 + 目标可带子项）+ 数字卡整行反引号容错（修复实测 deck 的两个渲染 bug）
+{
+  const { parseSlides } = await import(join(root, "server/dist/pptx.js"));
+  const md = [
+    "# 架构", "",
+    "```arch", "type: layered",
+    "接入层 | [小程序] [外卖平台]",
+    "接入层 -> 编排 | 引擎 | 路由",
+    "编排 -. 未命中 .-> 兜底 | 坐席",
+    "```", "",
+    "---", "",
+    "# 指标",
+    "`↓30% :: 人力成本`",   // 整行被 markdown 行内代码反引号包裹（模型常见产出）
+    "`<5秒 :: 响应`",
+  ].join("\n");
+  const pages = parseSlides(md);
+  const dg = pages[0].diagrams[0];
+  const byLabel = Object.fromEntries((dg?.nodes || []).map((n) => [n.label, n]));
+  const archOk = dg && dg.nodes.length === 3 && dg.edges.length === 2 && dg.droppedLinks === 0 &&
+    byLabel["接入层"]?.items?.length === 2 && byLabel["编排"]?.items?.length === 2 &&
+    dg.edges.some((e) => e.dashed && e.label === "未命中") && dg.nodes.every((n) => n.group);
+  const stats = pages[1].stats;
+  const statOk = stats.length === 2 && stats.every((s) => !/`/.test(s.value + s.label)) &&
+    stats[0].value === "↓30%" && stats[0].label === "人力成本";
+  check("PPTX7", "架构图新语法(节点|子项+自动分层+目标带子项+虚线标签) + 数字卡整行反引号容错",
+    !!archOk && statOk,
+    `节点=${dg?.nodes.length} 边=${dg?.edges.length} dropped=${dg?.droppedLinks} 接入层子项=${byLabel["接入层"]?.items?.length} stat0=${stats[0]?.value}/${stats[0]?.label}`);
+}
+
 // WD1 write_document kind 契约校验：坏格式被拒（返回行号/分页提示），合法格式放行
 {
   const v = engine.validateDocContent;

@@ -40,7 +40,7 @@ interface SlideTable {
   header: string[];
   rows: string[][];
 }
-interface DiagramNode { id: string; group: string; label: string; }
+interface DiagramNode { id: string; group: string; label: string; items?: string[]; }
 interface DiagramEdge { from: string; to: string; label: string; dashed: boolean; }
 /** ```arch / ```diagram 围栏 → 原生形状架构图（分层/流程/中心辐射，三种确定式布局）。 */
 interface SlideDiagram {
@@ -90,25 +90,57 @@ function plain(s: string): string {
 
 /** `值 :: 标签` 大数字卡约定：值含数字/百分号/升降号、且较短才认作 stat（避免误伤普通含 :: 的句子）。 */
 function matchStat(line: string): Stat | null {
-  const m = line.match(/^(.{1,16}?)\s*::\s*(.{1,24})$/);
+  // 容错：模型常把整行用 markdown 行内代码反引号包起来（`值 :: 标签`），split 后反引号会粘在值/标签两端——先去掉整行包裹再匹配。
+  const cleaned = line.trim().replace(/^`+/, "").replace(/`+$/, "").trim();
+  const m = cleaned.match(/^(.{1,16}?)\s*::\s*(.{1,24})$/);
   if (!m) return null;
-  const value = plain(m[1]);
-  const label = plain(m[2]);
+  const value = plain(m[1]).replace(/`/g, "").trim();
+  const label = plain(m[2]).replace(/`/g, "").trim();
   if (!/[\d％%↑↓+＋]/.test(value)) return null; // 值必须像个指标
   if (!label) return null;
   return { value, label };
 }
 
-/** 解析 ```arch / ```diagram 围栏块 → 结构化架构图（两遍：先收节点、再解析边，悬空边计入 droppedLinks）。 */
+const idOfNode = (s: string) => plain(s).replace(/\s+/g, "");
+/** 单个 `[x]` 包裹 → 去括号；否则原样。 */
+function stripBrackets(s: string): string {
+  const m = s.trim().match(/^\[(.+)\]$/);
+  return (m ? m[1] : s).trim();
+}
+/** 把 `名 | 子 | [a] [b] [c]` 解析成 {label, items}：items 既支持 `| a | b`，也支持一段里多个 `[a] [b]`。 */
+function parseNodeSpec(spec: string): { label: string; items: string[] } {
+  const parts = spec.split("|").map((p) => plain(p).trim()).filter(Boolean);
+  const label = stripBrackets(parts[0] || "");
+  const items: string[] = [];
+  for (const part of parts.slice(1)) {
+    const brs = part.match(/\[([^\]]+)\]/g);
+    if (brs && brs.length) brs.forEach((b) => items.push(b.slice(1, -1).trim()));
+    else items.push(stripBrackets(part));
+  }
+  return { label, items: items.filter(Boolean) };
+}
+
+/**
+ * 解析 ```arch / ```diagram 围栏块 → 结构化架构图。容错两种写法：
+ *  - 旧：节点 `[组] 名`，边 `A -> B`，虚线 `A -. 标签 .-> B`；
+ *  - 新（模型自然产出）：节点 `名 | 子项 | 子项`（子项渲进框内），边目标可带子项 `A -> B | 子项`。
+ * 无显式 group 时按边的最长路径自动分层。边端点：已声明或带子项→建节点；裸名未声明→丢弃并计 droppedLinks（兼容旧严格语义）。
+ */
 function parseDiagram(buf: string[]): SlideDiagram | null {
   let type: SlideDiagram["type"] = "layered";
   let dir: SlideDiagram["dir"] = "down";
   let title = "";
-  const nodes: DiagramNode[] = [];
-  const nodeIds = new Set<string>();
-  const edgeLines: string[] = [];
-  const idOf = (s: string) => s.replace(/\s+/g, "");
-  // pass 1：头部 + 节点（边行先攒着）
+  const nodesMap = new Map<string, DiagramNode>();
+  const order: string[] = [];
+  const declare = (label: string, group: string, items: string[]): string => {
+    const id = idOfNode(label);
+    if (!id) return "";
+    let n = nodesMap.get(id);
+    if (!n) { n = { id, group, label: plain(label), items: items.length ? items : undefined }; nodesMap.set(id, n); order.push(id); }
+    else { if (group && !n.group) n.group = group; if (items.length && !(n.items && n.items.length)) n.items = items; }
+    return id;
+  };
+  const edgeSpecs: { from: string; to: string; label: string; dashed: boolean }[] = [];
   for (const rawLine of buf) {
     const t = rawLine.trim();
     if (!t || t.startsWith("#")) continue;
@@ -120,31 +152,48 @@ function parseDiagram(buf: string[]): SlideDiagram | null {
       else if (k === "title") { title = plain(v); }
       continue;
     }
-    if (/->/.test(t)) { edgeLines.push(t); continue; } // 含箭头 → 边
-    const ng = t.match(/^\[(.+?)\]\s*(.+)$/);
-    const group = ng ? plain(ng[1]) : "";
-    const label = plain(ng ? ng[2] : t);
-    const id = idOf(label);
-    if (!id || nodeIds.has(id)) continue; // 空 / 重复节点：跳过
-    nodeIds.add(id);
-    nodes.push({ id, group, label });
+    if (/->/.test(t)) {
+      // 边：兼容 `A -> B` 与 `A -. 标签 .-> B`；目标可带 `| 子项`（单正则切分，避免哨兵字符问题）
+      const m = t.match(/^(.*?)\s*(?:-\.\s*(.+?)\s*\.-*>|-+>)\s*(.*)$/);
+      if (m) {
+        const leftSpec = parseNodeSpec(m[1]);
+        const rightSpec = parseNodeSpec(m[3]);
+        const label = m[2] ? plain(m[2]) : "";
+        const dashed = /-\.|\.-/.test(t);
+        if (leftSpec.items.length) declare(leftSpec.label, "", leftSpec.items);
+        if (rightSpec.items.length) declare(rightSpec.label, "", rightSpec.items);
+        if (leftSpec.label && rightSpec.label) edgeSpecs.push({ from: leftSpec.label, to: rightSpec.label, label, dashed });
+      }
+      continue;
+    }
+    // 节点行：旧 `[组] 名`（无 |）或 新 `名 | 子项…`
+    const old = t.match(/^\[(.+?)\]\s+(.+)$/);
+    if (old && !t.includes("|")) { declare(old[2], plain(old[1]), []); continue; }
+    const spec = parseNodeSpec(t);
+    declare(spec.label, "", spec.items);
   }
+  const nodes = order.map((id) => nodesMap.get(id)!);
   if (!nodes.length) return null;
-  // pass 2：边（from/to 必须命中已定义节点，否则丢弃并计数）
+  // 边：端点须在 map 中（带子项的在上面已声明；裸名未声明→丢弃计数，兼容旧语义）
   const edges: DiagramEdge[] = [];
   let droppedLinks = 0;
-  for (const line of edgeLines) {
-    const dashed = /-\.|\.-/.test(line);
-    const gi = line.lastIndexOf(">");
-    if (gi < 0) continue;
-    const to = idOf(line.slice(gi + 1).trim());
-    const left = line.slice(0, gi);
-    let from = "", label = "";
-    const withLabel = left.match(/^(.+?)\s+-{1,2}\.?\s+(.+?)\s+\.?-{1,2}\s*$/); // from -- 标签 -- / from -. 标签 .-
-    if (withLabel) { from = idOf(withLabel[1].trim()); label = plain(withLabel[2].trim()); }
-    else from = idOf(left.replace(/[-.\s>]+$/, "").trim());
-    if (!nodeIds.has(from) || !nodeIds.has(to)) { droppedLinks++; continue; }
-    edges.push({ from, to, label, dashed });
+  for (const es of edgeSpecs) {
+    const from = idOfNode(es.from), to = idOfNode(es.to);
+    if (!from || !to || !nodesMap.has(from) || !nodesMap.has(to)) { droppedLinks++; continue; }
+    edges.push({ from, to, label: es.label, dashed: es.dashed });
+  }
+  // 无显式分组（新语法）→ 按边最长路径自动分层，供 layered 布局排行
+  if (!nodes.some((n) => n.group) && edges.length) {
+    const layer = new Map<string, number>(nodes.map((n) => [n.id, 0]));
+    for (let it = 0; it < nodes.length; it++) {
+      let changed = false;
+      for (const e of edges) {
+        const want = (layer.get(e.from) ?? 0) + 1;
+        if ((layer.get(e.to) ?? 0) < want) { layer.set(e.to, want); changed = true; }
+      }
+      if (!changed) break;
+    }
+    nodes.forEach((n) => { n.group = "L" + (layer.get(n.id) ?? 0); });
   }
   return { type, dir, title, nodes, edges, droppedLinks };
 }
@@ -274,8 +323,21 @@ const NODE_MAIN = { fill: { color: THEME.accent }, color: "FFFFFF", line: { colo
   shadow: { type: "outer", color: "808080", blur: 4, offset: 2, angle: 90, opacity: 0.35 } };
 const NODE_CHILD = { fill: { color: THEME.panel }, color: THEME.ink, line: { color: THEME.accent, width: 1.5 } };
 
-function drawNodeBox(slide: any, x: number, y: number, w: number, h: number, label: string, style: any, fontPt: number) {
+function drawNodeBox(slide: any, x: number, y: number, w: number, h: number, label: string, style: any, fontPt: number, items?: string[]) {
   slide.addShape("roundRect", { x, y, w, h, rectRadius: 0.06, fill: style.fill, line: style.line, ...(style.shadow ? { shadow: style.shadow } : {}) });
+  if (items && items.length) {
+    // 标题(粗) + 子项("·"连接、稍小、弱色) 同框：架构层/组件框列出其模块。
+    const sub = items.join(" · ");
+    const subColor = style.shadow ? "F3ECD2" : THEME.dim; // 主节点(深底)用浅金，子节点用弱灰
+    slide.addText(
+      [
+        { text: label, options: { fontSize: fontPt, bold: true, color: style.color, breakLine: true } },
+        { text: sub, options: { fontSize: Math.max(8, fontPt - 3), color: subColor, breakLine: false } },
+      ],
+      { x: x + 0.08, y: y + 0.04, w: w - 0.16, h: h - 0.08, align: "center", valign: "middle", fontFace: CJK_FONT, wrap: true, lineSpacingMultiple: 1.05 }
+    );
+    return;
+  }
   const perLine = Math.max(2, Math.floor((w - 0.16) / 0.2)); // CJK 约每 0.2in 一字
   let txt = label;
   if (cp(label) > perLine * 2) txt = [...label].slice(0, perLine * 2 - 1).join("") + "…"; // 最多两行，超则省略
@@ -329,7 +391,7 @@ function drawDiagram(slide: any, y0: number, H: number, dg: SlideDiagram) {
     });
     const edges = dg.edges.length ? dg.edges : outer.map((n) => ({ from: dg.nodes[0].id, to: n.id, label: "", dashed: false }));
     for (const e of edges) { if (!pos.has(e.from) || !pos.has(e.to)) continue; const a = ctr(e.from), b = ctr(e.to); drawEdgeLine(slide, a.cx, a.cy, b.cx, b.cy, e.dashed, e.label); }
-    dg.nodes.forEach((n, i) => { const p = pos.get(n.id)!; drawNodeBox(slide, p.x, p.y, p.w, p.h, n.label, i === 0 ? NODE_MAIN : NODE_CHILD, i === 0 ? 14 : 12); });
+    dg.nodes.forEach((n, i) => { const p = pos.get(n.id)!; drawNodeBox(slide, p.x, p.y, p.w, p.h, n.label, i === 0 ? NODE_MAIN : NODE_CHILD, i === 0 ? 14 : 12, n.items); });
     return;
   }
 
@@ -351,7 +413,7 @@ function drawDiagram(slide: any, y0: number, H: number, dg: SlideDiagram) {
       if (horiz) drawEdgeLine(slide, a.x + a.w, a.y + a.h / 2, b.x, b.y + b.h / 2, e.dashed, e.label);
       else drawEdgeLine(slide, a.x + a.w / 2, a.y + a.h, b.x + b.w / 2, b.y, e.dashed, e.label);
     }
-    dg.nodes.forEach((nd, i) => { const p = pos.get(nd.id)!; drawNodeBox(slide, p.x, p.y, p.w, p.h, nd.label, i === 0 ? NODE_MAIN : NODE_CHILD, 12); });
+    dg.nodes.forEach((nd, i) => { const p = pos.get(nd.id)!; drawNodeBox(slide, p.x, p.y, p.w, p.h, nd.label, i === 0 ? NODE_MAIN : NODE_CHILD, 12, nd.items); });
     return;
   }
 
@@ -361,17 +423,18 @@ function drawDiagram(slide: any, y0: number, H: number, dg: SlideDiagram) {
   for (const nd of dg.nodes) if (!groups.includes(nd.group)) groups.push(nd.group);
   const layers = groups.map((g) => dg.nodes.filter((nd) => nd.group === g));
   const k = Math.max(1, layers.length);
+  const hasItems = dg.nodes.some((n) => n.items && n.items.length); // 有子项 → 框更高更宽，容下模块清单
   if (down) {
-    const rowH = H / k, nodeH = Math.min(0.66, rowH * 0.5);
+    const rowH = H / k, nodeH = Math.min(rowH * 0.82, hasItems ? 1.2 : 0.66);
     layers.forEach((layer, li) => {
-      const m = layer.length, gap = 0.3, nodeW = Math.min(2.6, (CONTENT_W - gap * (m + 1)) / m);
+      const m = layer.length, gap = 0.3, nodeW = Math.min(hasItems ? 4.9 : 2.6, (CONTENT_W - gap * (m + 1)) / m);
       const total = m * nodeW + (m - 1) * gap, sx = MARGIN + (CONTENT_W - total) / 2, cy = y0 + li * rowH + (rowH - nodeH) / 2;
       layer.forEach((nd, ni) => pos.set(nd.id, { x: sx + ni * (nodeW + gap), y: cy, w: nodeW, h: nodeH }));
     });
   } else {
-    const colW = CONTENT_W / k, nodeW = Math.min(2.4, colW * 0.78);
+    const colW = CONTENT_W / k, nodeW = Math.min(hasItems ? 3.0 : 2.4, colW * 0.82);
     layers.forEach((layer, li) => {
-      const m = layer.length, gap = 0.3, nodeH = Math.min(0.7, (H - gap * (m + 1)) / m);
+      const m = layer.length, gap = 0.3, nodeH = Math.min(hasItems ? 1.3 : 0.7, (H - gap * (m + 1)) / m);
       const total = m * nodeH + (m - 1) * gap, sy = y0 + (H - total) / 2, cx = MARGIN + li * colW + (colW - nodeW) / 2;
       layer.forEach((nd, ni) => pos.set(nd.id, { x: cx, y: sy + ni * (nodeH + gap), w: nodeW, h: nodeH }));
     });
@@ -385,7 +448,8 @@ function drawDiagram(slide: any, y0: number, H: number, dg: SlideDiagram) {
     else if (!down && lb > la) drawEdgeLine(slide, a.x + a.w, a.y + a.h / 2, b.x, b.y + b.h / 2, e.dashed, e.label);
     else drawEdgeLine(slide, a.x + a.w / 2, a.y + a.h / 2, b.x + b.w / 2, b.y + b.h / 2, e.dashed, e.label);
   }
-  dg.nodes.forEach((nd) => { const p = pos.get(nd.id)!; drawNodeBox(slide, p.x, p.y, p.w, p.h, nd.label, /核心|中心|中枢|中台|大脑|引擎|平台|底座/.test(nd.group) ? NODE_MAIN : NODE_CHILD, 12); });
+  // 主节点：旧语法用关键词命中的组，新语法(自动分层)用第 0 层（根）作强调
+  dg.nodes.forEach((nd) => { const p = pos.get(nd.id)!; const main = /核心|中心|中枢|中台|大脑|引擎|平台|底座/.test(nd.group) || (layerOf.get(nd.id) === 0); drawNodeBox(slide, p.x, p.y, p.w, p.h, nd.label, main ? NODE_MAIN : NODE_CHILD, 13, nd.items); });
 }
 
 function buildBlocks(page: SlidePage): Block[] {
