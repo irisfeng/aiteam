@@ -306,8 +306,11 @@ export async function parseTemplate(buf: Buffer): Promise<TemplateMeta> {
         if (text.trim()) { anyText = true; slots.push({ slideIdx, shapeIdx, paraIdx, text, kind }); }
       }
       // 空占位符（设计师留的空标题/正文框，无任何文字）：也列成一个可填槽，paraIdx=0，供「空模板生成图文」。
-      // 仅占位符(p:ph)如此处理；空的自由文本框多为装饰，不打扰。
-      if (!anyText && kind === "ph") slots.push({ slideIdx, shapeIdx, paraIdx: 0, text: "", kind, phType: phTypeOf(sp) });
+      // 仅文本类占位(p:ph)如此处理；图片/对象类占位(pic/obj/clipArt)归图片位、不在此重复列；空自由文本框多为装饰不打扰。
+      if (!anyText && kind === "ph") {
+        const pt = placeholderEl(sp)?.getAttribute("type") || "";
+        if (pt !== "pic" && pt !== "obj" && pt !== "clipArt") slots.push({ slideIdx, shapeIdx, paraIdx: 0, text: "", kind, phType: phTypeOf(sp) });
+      }
     }
   }
   return { slideCount: paths.length, slots, images, warnings };
