@@ -446,6 +446,35 @@ check(
   check("PTPL-EDIT", "就地改文本：命中段替换成功 + 母版/版式/主题 inner XML 逐字不变 + 只动被编辑页 + zip 条目零增减",
     deltaIn && alphaGone && bravoKept && masterChanged.length === 0 && slidesChanged.length === 1 && setA === setB && meta2.slideCount === 3,
     `delta=${deltaIn} alphaGone=${alphaGone} bravoKept=${bravoKept} master改=${masterChanged.length} slide改=${slidesChanged.length} 条目同=${setA === setB}`);
+
+  // PTPL-EMPTY 空模板生成图文：把夹具首个文本形状改成「空 title 占位符」→ 解析应列出空占位槽(text=''、phType) → 填字导出 → 重解析有该字、母版不变
+  const { DOMParser, XMLSerializer } = await import("@xmldom/xmldom");
+  const baseEmpty = await slidesToPptx({ ...fixtureDoc, content: "# 占位\n副\n---\n## 二\n- x" });
+  const zE = await JSZip.loadAsync(baseEmpty);
+  const rawE = await zE.file("ppt/slides/slide1.xml").async("string");
+  const declE = (rawE.match(/^<\?xml[^>]*\?>/) || [""])[0];
+  const docE = new DOMParser().parseFromString(rawE, "text/xml");
+  const kidsOf = (p, tag) => { const o = []; for (let i = 0; i < p.childNodes.length; i++) { const n = p.childNodes[i]; if (n.nodeType === 1 && (!tag || n.nodeName === tag)) o.push(n); } return o; };
+  const tree = docE.getElementsByTagName("p:spTree")[0];
+  const sp0 = kidsOf(tree, "p:sp").find((sp) => kidsOf(sp, "p:txBody")[0]);
+  const nvSpPr = kidsOf(sp0, "p:nvSpPr")[0];
+  let nvPr = kidsOf(nvSpPr, "p:nvPr")[0]; if (!nvPr) { nvPr = docE.createElement("p:nvPr"); nvSpPr.appendChild(nvPr); }
+  const phEl = docE.createElement("p:ph"); phEl.setAttribute("type", "title"); nvPr.appendChild(phEl);
+  const firstP = kidsOf(kidsOf(sp0, "p:txBody")[0], "a:p")[0];
+  kidsOf(firstP, "a:r").forEach((r) => firstP.removeChild(r));
+  let outE = new XMLSerializer().serializeToString(docE); if (!outE.startsWith("<?xml")) outE = declE + "\n" + outE;
+  zE.file("ppt/slides/slide1.xml", outE);
+  const emptyTpl = Buffer.from(await zE.generateAsync({ type: "uint8array", compression: "DEFLATE" }));
+  const metaE = await parseTemplate(emptyTpl);
+  const emptySlot = metaE.slots.find((s) => s.text === "" && s.kind === "ph" && s.phType);
+  const beforeM = await innerMap(emptyTpl);
+  const filled = emptySlot ? await applyTemplateEdits(emptyTpl, [{ slideIdx: emptySlot.slideIdx, shapeIdx: emptySlot.shapeIdx, paraIdx: emptySlot.paraIdx, newText: "填入标题ZULU" }]) : emptyTpl;
+  const metaF = await parseTemplate(filled);
+  const afterM = await innerMap(filled);
+  const masterE = Object.keys(beforeM).filter((p) => !/slides\/slide\d+\.xml$/.test(p) && beforeM[p] !== afterM[p]);
+  check("PTPL-EMPTY", "空模板生成图文：空占位符列成可填槽(text=''+phType) + 填字入位 + 母版/版式/主题不变",
+    !!emptySlot && !!metaF.slots.find((s) => s.text.includes("填入标题ZULU")) && masterE.length === 0,
+    `空槽=${!!emptySlot} phType=${emptySlot?.phType} 填入=${!!metaF.slots.find((s) => s.text.includes("填入标题ZULU"))} master改=${masterE.length}`);
 }
 
 // ENV1 stdio MCP 环境变量：值入库（仅服务端），sanitize 只回 key 名、绝不下发值（博查 BOCHA_API_KEY 用例）

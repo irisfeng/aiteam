@@ -19,10 +19,12 @@ export interface TemplateSlot {
   shapeIdx: number;
   /** 形状 txBody 内段落(a:p)下标 */
   paraIdx: number;
-  /** 合并后的段落文本（来自各 a:r/a:t） */
+  /** 合并后的段落文本（来自各 a:r/a:t）；空占位符为 "" */
   text: string;
   /** ph=占位符（继承母版版式），sp=自由文本框 */
   kind: "ph" | "sp";
+  /** 空占位符的类型友好名（标题/正文/副标题…），供 UI/AI 提示该往里填什么；非空槽不带 */
+  phType?: string;
 }
 
 export interface TemplateMeta {
@@ -123,11 +125,23 @@ function textShapes(spTree: XmlElement): XmlElement[] {
   return childElements(spTree, "p:sp").filter((sp) => firstChild(sp, "p:txBody"));
 }
 
-function shapeKind(sp: XmlElement): "ph" | "sp" {
-  // p:sp/p:nvSpPr/p:nvPr/p:ph 存在即占位符
+function placeholderEl(sp: XmlElement): XmlElement | null {
   const nv = firstChild(sp, "p:nvSpPr");
   const nvPr = nv ? firstChild(nv, "p:nvPr") : null;
-  return nvPr && firstChild(nvPr, "p:ph") ? "ph" : "sp";
+  return nvPr ? firstChild(nvPr, "p:ph") : null;
+}
+function shapeKind(sp: XmlElement): "ph" | "sp" {
+  return placeholderEl(sp) ? "ph" : "sp";
+}
+const PH_TYPE_LABEL: Record<string, string> = {
+  title: "标题", ctrTitle: "主标题", subTitle: "副标题", body: "正文", tx: "文本",
+  ftr: "页脚", dt: "日期", sldNum: "页码", hdr: "页眉",
+};
+/** 空占位符的友好类型名（供提示该填什么）。p:ph 无 type 属性时多为正文，按 idx 兜底为「内容」。 */
+function phTypeOf(sp: XmlElement): string {
+  const ph = placeholderEl(sp);
+  const t = ph?.getAttribute("type") || "";
+  return PH_TYPE_LABEL[t] || (t ? t : "内容");
 }
 
 /** 只读解析：产出槽位清单 + 高风险结构告警。不修改任何内容。 */
@@ -145,12 +159,17 @@ export async function parseTemplate(buf: Buffer): Promise<TemplateMeta> {
     const shapes = textShapes(spTree);
     for (let shapeIdx = 0; shapeIdx < shapes.length; shapeIdx++) {
       const sp = shapes[shapeIdx];
+      const kind = shapeKind(sp);
       const txBody = firstChild(sp, "p:txBody")!;
       const paras = childElements(txBody, "a:p");
+      let anyText = false;
       for (let paraIdx = 0; paraIdx < paras.length; paraIdx++) {
         const text = runTexts(paras[paraIdx]).map((t) => t.textContent ?? "").join("");
-        if (text.trim()) slots.push({ slideIdx, shapeIdx, paraIdx, text, kind: shapeKind(sp) });
+        if (text.trim()) { anyText = true; slots.push({ slideIdx, shapeIdx, paraIdx, text, kind }); }
       }
+      // 空占位符（设计师留的空标题/正文框，无任何文字）：也列成一个可填槽，paraIdx=0，供「空模板生成图文」。
+      // 仅占位符(p:ph)如此处理；空的自由文本框多为装饰，不打扰。
+      if (!anyText && kind === "ph") slots.push({ slideIdx, shapeIdx, paraIdx: 0, text: "", kind, phType: phTypeOf(sp) });
     }
   }
   return { slideCount: paths.length, slots, warnings };
@@ -184,12 +203,29 @@ export async function applyTemplateEdits(buf: Buffer, edits: TemplateEdit[]): Pr
       if (!sp) continue;
       const txBody = firstChild(sp, "p:txBody");
       if (!txBody) continue;
-      const para = childElements(txBody, "a:p")[e.paraIdx];
-      if (!para) continue;
+      let para = childElements(txBody, "a:p")[e.paraIdx];
+      if (!para) {
+        // 空占位符可能 txBody 无 a:p：补一个，让文本能落进去
+        para = doc.createElement("a:p");
+        txBody.appendChild(para);
+      }
       const ts = runTexts(para);
-      if (!ts.length) continue;
-      ts[0].textContent = e.newText;
-      for (let i = 1; i < ts.length; i++) ts[i].textContent = "";
+      if (ts.length) {
+        ts[0].textContent = e.newText;
+        for (let i = 1; i < ts.length; i++) ts[i].textContent = "";
+      } else {
+        // 空段落（无 a:r）：新建一个 run；不写具体 rPr，让其继承占位符/母版的字体与配色（保留模板设计）。
+        // 插到 a:endParaRPr 之前（若有），否则追加到段末。
+        const r = doc.createElement("a:r");
+        const rPr = doc.createElement("a:rPr");
+        rPr.setAttribute("lang", "zh-CN");
+        const t = doc.createElement("a:t");
+        t.textContent = e.newText;
+        r.appendChild(rPr);
+        r.appendChild(t);
+        const endPr = firstChild(para, "a:endParaRPr");
+        if (endPr) para.insertBefore(r, endPr); else para.appendChild(r);
+      }
     }
     let out = new XMLSerializer().serializeToString(doc);
     if (!out.startsWith("<?xml")) out = decl + (decl.endsWith("\n") ? "" : "\n") + out;

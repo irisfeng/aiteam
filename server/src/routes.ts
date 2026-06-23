@@ -560,7 +560,7 @@ api.post("/documents/:id/template-propose", async (req, res) => {
   const doc = getDocument(req.params.id);
   if (!doc) return res.status(404).json({ error: "document not found" });
   if (doc.kind !== "template" || !doc.template_meta) return res.status(400).json({ error: "该文档不是可就地编辑的 .pptx 模板" });
-  let slots: { slideIdx: number; shapeIdx: number; paraIdx: number; text: string; kind: string }[] = [];
+  let slots: { slideIdx: number; shapeIdx: number; paraIdx: number; text: string; kind: string; phType?: string }[] = [];
   try { slots = JSON.parse(doc.template_meta).slots ?? []; } catch { slots = []; }
   if (!slots.length) return res.json({ suggestions: [] });
   const brief = String(req.body?.brief ?? "").slice(0, 2000);
@@ -571,7 +571,7 @@ api.post("/documents/:id/template-propose", async (req, res) => {
     .map((d) => `《${d.title}》\n${d.content.slice(0, 6000)}`)
     .join("\n\n---\n\n")
     .slice(0, 16000);
-  const slotList = slots.map((s, i) => ({ id: i, page: s.slideIdx + 1, original: s.text }));
+  const slotList = slots.map((s, i) => ({ id: i, page: s.slideIdx + 1, role: s.text ? undefined : (s.phType || "内容"), original: s.text || "(空占位，请按角色与来源生成)" }));
   const system =
     "你在为一份 PPT 模板逐槽改写文案。铁律：1) 只基于【来源】与【目标】改写，不臆造事实/数字，没有可靠数字就保留原占位或写『示意值，待核实』；" +
     "2) 替换文本长度与原文同量级（标题短、正文略长亦可，但别暴涨，防破版）；3) 品牌固定文案（logo 文字、公司名、版权、页码、日期占位）不要改，直接不返回该槽；" +

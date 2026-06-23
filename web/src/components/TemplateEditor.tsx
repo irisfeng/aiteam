@@ -3,7 +3,7 @@ import { api } from "../api";
 import { useWorkspace } from "../store";
 import type { Doc } from "../types";
 
-interface Slot { slideIdx: number; shapeIdx: number; paraIdx: number; text: string; kind: "ph" | "sp" }
+interface Slot { slideIdx: number; shapeIdx: number; paraIdx: number; text: string; kind: "ph" | "sp"; phType?: string }
 interface Meta { slideCount: number; slots: Slot[]; warnings: string[] }
 interface Row { value: string; checked: boolean }
 
@@ -124,9 +124,14 @@ export function TemplateEditor({ doc }: { doc: Doc }) {
                     <input type="checkbox" checked={r.checked} onChange={(e) => setRow(i, { checked: e.target.checked })}
                       className="mt-1 shrink-0" title="勾选 = 用下方文案替换此槽" />
                     <div className="min-w-0 flex-1">
-                      <div className="mb-1 truncate text-[11px] text-ink-3" title={s.text}>原文：{s.text}</div>
+                      {s.text ? (
+                        <div className="mb-1 truncate text-[11px] text-ink-3" title={s.text}>原文：{s.text}</div>
+                      ) : (
+                        <div className="mb-1 text-[11px] text-accent/80">空占位（{s.phType || "内容"}）· 待填入</div>
+                      )}
                       <textarea value={r.value} onChange={(e) => setRow(i, { value: e.target.value })}
-                        rows={Math.min(4, Math.max(1, Math.ceil(r.value.length / 38)))}
+                        placeholder={s.text ? "" : `按「${s.phType || "内容"}」填写…`}
+                        rows={Math.min(4, Math.max(1, Math.ceil((r.value.length || 12) / 38)))}
                         className={`w-full resize-y rounded border px-2 py-1 text-[12.5px] outline-none ${changed ? "border-accent/60 bg-accent-soft/40" : "border-line bg-sel/40"} focus:border-accent/60`} />
                     </div>
                   </div>
