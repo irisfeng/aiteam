@@ -1122,7 +1122,7 @@ const TOOLS: Anthropic.ToolUnion[] = [
   {
     name: "read_skill",
     description:
-      "读取某个技能的完整方法正文（L2）。当工作区上下文的「已启用的技能」索引里有与当前任务相关的技能、你需要它的具体步骤/模板/参数时调用。能力型技能(capability)的正文会说明该调用哪个工具/MCP、参数怎么填、不可达时如何降级。skill_id 见技能索引中的 id。",
+      "读取某个技能的完整方法正文（L2）。当工作区上下文的「已启用的技能」索引里有与当前任务相关的技能、你需要它的具体步骤/模板/参数时调用。能力型技能(capability)的正文会说明该调用哪个工具/MCP、参数怎么填、不可达时如何降级。skill_id 见技能索引中的 id；也可传某技能正文里给出的『模板 id』（如『演示风格选择法』选定的 html-deck-* 精装模板）来按需单取该模板正文。",
     input_schema: {
       type: "object" as const,
       properties: { skill_id: { type: "string", description: "技能 id（取自上下文技能索引）" } },
@@ -1310,9 +1310,20 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
     }
     case "read_skill": {
       // 渐进式披露 L2/L3：按需拉技能正文 + 附带的可复用模板。只读、零计费（同步分支，不计 MCP_CALLS_PER_RUN）。
-      const sk = getSkill(String(input.skill_id));
-      if (!sk || !sk.enabled) return `未找到该技能或未启用（id: ${input.skill_id}）。`;
-      return stripLoneSurrogates(`【技能：${sk.name}】\n${readSkillBody(sk.id)}`);
+      const sid = String(input.skill_id);
+      const sk = getSkill(sid);
+      if (sk && sk.enabled) {
+        return stripLoneSurrogates(`【技能：${sk.name}】\n${readSkillBody(sk.id)}`);
+      }
+      // 回退：技能正文里以 id 直引的可复用模板（如『演示风格选择法』选定的某套精装模板）——按需单取一套，
+      // 避免把全部模板正文一次性灌进上下文（token 友好）。容忍 agent 误带 `tpl:` 前缀。
+      const tpl = getSkillTemplate(sid.startsWith("tpl:") ? sid.slice(4) : sid);
+      if (tpl) {
+        const longest = (tpl.content.match(/`+/g) ?? []).reduce((m, s) => Math.max(m, s.length), 0);
+        const fence = "`".repeat(Math.max(3, longest + 1));
+        return stripLoneSurrogates(`【模板：${tpl.name}】\n${tpl.desc}\n${fence}${tpl.lang}\n${tpl.content}\n${fence}`);
+      }
+      return `未找到该技能或未启用（id: ${sid}）。`;
     }
     case "request_approval": {
       const approval = createApproval({

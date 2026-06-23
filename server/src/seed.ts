@@ -51,7 +51,7 @@ const BUILTIN_AGENTS = [
  * 第三方方法学均为蒸馏改写（非原文照搬），来源与许可见 THIRD_PARTY_NOTICES/。
  * 扩库或改正文时整体把 BUILTIN_SKILL_PACK_VERSION +1，并把对应条目 version 设为该值。
  */
-export const BUILTIN_SKILL_PACK_VERSION = 10;
+export const BUILTIN_SKILL_PACK_VERSION = 11;
 const V = BUILTIN_SKILL_PACK_VERSION;
 
 type BuiltinSkill = Required<Pick<SkillInput, "name" | "desc" | "trigger" | "when_to_use" | "body" | "kind" | "version">> &
@@ -125,7 +125,14 @@ export const BUILTIN_SKILLS: BuiltinSkill[] = [
     trigger: "ppt,演示,幻灯片,slides,presentation,演讲稿,路演,deck",
     when_to_use: "制作演示/幻灯片，需要确定信息密度与节奏时",
     resources_json: JSON.stringify(["tpl:html-deck-horizontal", "tpl:html-deck-broadside", "tpl:html-deck-signal", "tpl:html-deck-monochrome"]),
-    body: "结论先行：先问『讲者驱动 vs 读物优先』再定密度，并善用 slides(Marp→内置 pptx) 的结构化原语（slides 正文用纯 Markdown，禁原始 HTML——HTML 只属 html 交付物）。1) 讲者驱动：每页 1-2 个观点、≤3 要点、宁可多分页；读物优先：4-6 个信息单元、每页自包含。2) **大数字用数字卡**：把关键指标写成单独成行的 `值 :: 标签`（如 `268亿元 :: 市场规模`、`↓80% :: 人力成本`），连续多行会自动渲成一排数字卡（最多 4 个），比埋进正文有力得多——方案/路演页标配。3) **章节幕页**：只含一个 `# 标题`（无其它内容）的页渲成章节分隔页，用于分段。4) **对比/选型用 Markdown 表格**（渲成原生可编辑 pptx 表格，不要压成要点）。5) 讲者备注写 `<!-- note: … -->`。6) 防溢出：渲染器已按高度预算自动分续页（标题带『（续）』）并均衡分配，但仍要主动控密度、别硬塞。7) 关键数字无可靠来源就写『示意值，待核实』，绝不编造。8) **架构/流程图用 ```arch 围栏**（首行 type: layered|flow|hub；节点写 `[组] 名`、边写 `A -> B`、虚线带标签 `A -. 标签 .-> B`）→ 渲成原生可编辑的框+箭头，**别用 ASCII 画框、也别用文生图（会糊中文标签）**。9) HTML 网页 deck：可从本技能附带的 4 套模板（横向翻页 / 满版大字 / 编辑杂志 / 极简单色）挑一套套用。落点：对外演示首选 slides（用户在文档面板一键 ⬇ .pptx，可编辑、无需 MCP）；纯网页交互才用 html。（蒸馏自 frontend-slides / guizang-ppt + ppt-master 图形法）",
+    body: "结论先行：先问『讲者驱动 vs 读物优先』再定密度，并善用 slides(Marp→内置 pptx) 的结构化原语（slides 正文用纯 Markdown，禁原始 HTML——HTML 只属 html 交付物）。1) 讲者驱动：每页 1-2 个观点、≤3 要点、宁可多分页；读物优先：4-6 个信息单元、每页自包含。2) **大数字用数字卡**：把关键指标写成单独成行的 `值 :: 标签`（如 `268亿元 :: 市场规模`、`↓80% :: 人力成本`），连续多行会自动渲成一排数字卡（最多 4 个），比埋进正文有力得多——方案/路演页标配。3) **章节幕页**：只含一个 `# 标题`（无其它内容）的页渲成章节分隔页，用于分段。4) **对比/选型用 Markdown 表格**（渲成原生可编辑 pptx 表格，不要压成要点）。5) 讲者备注写 `<!-- note: … -->`。6) 防溢出：渲染器已按高度预算自动分续页（标题带『（续）』）并均衡分配，但仍要主动控密度、别硬塞。7) 关键数字无可靠来源就写『示意值，待核实』，绝不编造。8) **架构/流程图用 ```arch 围栏**（首行 type: layered|flow|hub；节点写 `[组] 名`、边写 `A -> B`、虚线带标签 `A -. 标签 .-> B`）→ 渲成原生可编辑的框+箭头，**别用 ASCII 画框、也别用文生图（会糊中文标签）**。9) HTML 网页 deck：轻量可从本技能附带的 4 套模板（横向翻页 / 满版大字 / 编辑杂志 / 极简单色）挑一套套用；**要视觉天花板高的对外/高端精装演示，改用『演示风格选择法』**——它据主题受众从 5 套验收过的设计模板选一套、按需单取、填内容不重画。落点：要『可在 PowerPoint 继续编辑的 .pptx』首选 slides（用户在文档面板一键 ⬇ .pptx，无需 MCP）；要高视觉的对外网页 deck / 投屏 / 导出 PDF 用 html 精装模板；按客户交付要求二选一或都给。（蒸馏自 frontend-slides / guizang-ppt + ppt-master 图形法）",
+  },
+  {
+    name: "演示风格选择法", kind: "method", version: V,
+    desc: "对外精装演示：按主题/受众/调性从 5 套验收过的设计模板选一套，read_skill 单取该模板正文，填内容不重画（产出 html 网页 deck）",
+    trigger: "精装,高端ppt,对外演示,提报,路演,发布会,品牌演示,好看的ppt,设计感,模板,风格,deck设计,视觉",
+    when_to_use: "要做视觉天花板高的对外/高端演示时——先据主题与受众选定一套设计模板，再据其填内容",
+    body: "结论先行：对外精装演示别从零排版、也别一次性把所有模板拉进来——先按受众选定 1 套验收过的设计模板，read_skill 单取它，再把每页内容填进既有结构（保留版式与配色，不重画）。\n\n第一步·选风格（按受众/调性查表，各模板已配过色与版式）：\n- html-deck-navy-gold —— 金融 / 政企 / 银行 / 严肃对外提报、投标。深藏蓝渐变 + 烫金徽标 + 机密提报版式，稳重权威。\n- html-deck-whitespace —— 咨询 / 战略 / 管理层汇报。暖白大留白 + 超大无衬线标题 + 朱红点睛，克制高级。\n- html-deck-circuit —— 科技 / AI / 互联网产品发布。深色网格 + 青色辉光标题，未来感强。\n- html-deck-magazine —— 文化 / 品牌 / 内容 / 公关向。暖米底 + 超大衬线 + 刊号版式，编辑气质。\n- html-deck-colorblock —— 营销 / 发布会 / 路演 / C 端。撞色大色块（朱红/琥珀）+ 极粗黑标题，张力强。\n拿不准时默认：B2B 严肃→navy-gold；战略咨询→whitespace；科技产品→circuit；品牌内容→magazine；营销路演→colorblock。\n\n第二步·取模板：调用 read_skill(\"<上面选定的 id>\")（例 read_skill(\"html-deck-navy-gold\")）即可单取该套模板正文——一次只取一套，省 token。\n\n第三步·填内容不重画：1) 保留模板的 <style>、配色变量、版式骨架与每页 .slide 结构，只替换其中的文字/数字为你的真实内容；2) 按需复制 .slide 区块增减页数，沿用同款 class；3) 关键指标沿用模板里的数字/统计版式呈现，别塞进长段落；4) 不改字体族与主色（模板的设计价值就在这套搭配），不要重新发明布局；5) 数字无可靠来源标『示意值，待核实』，绝不编造。\n\n第四步·交付（诚实区分）：这些精装模板产出的是**网页 deck（html 交付物）**——视觉天花板高，适合在线展示 / 投屏 / 导出 PDF，但**不是**可在 PowerPoint 继续编辑的 .pptx。若客户明确要可编辑 .pptx，改走『演示设计与防溢出法』的 slides 路径（文档面板一键 ⬇ .pptx）；两种交付按客户要求二选一，或都给（html 看视觉、pptx 供编辑）。用 write_document(kind=html) 落库，模板已是脚本关闭可渲染、可过校验。",
   },
   {
     name: "反 AI-slop 设计审美守则", kind: "method", version: V,

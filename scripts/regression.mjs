@@ -393,6 +393,16 @@ check(
   const soffOk = SKILL_TEMPLATES.every((t) =>
     !/\.slide\s*\{[^}]*opacity\s*:\s*0/.test(t.content) || /scroll-snap|:first-of-type|:not\(\.js\)/.test(t.content));
   check("TPL-SOFF", "模板脚本关闭可渲染：无裸 opacity:0 门控（预览 iframe sandbox 空、脚本不跑）", soffOk);
+  // STRAT1 演示风格选择法：策略技能在册；5 套精装模板入库且正文引用的 html-deck-* id 全部可解析
+  // （read_skill 回退按单 id 取模板的前提；防 body 写错 id）
+  const { getSkillTemplate } = await import(join(root, "server/dist/registry.js"));
+  const strat = BUILTIN_SKILLS.find((s) => s.name === "演示风格选择法");
+  const designedIds = ["html-deck-navy-gold", "html-deck-whitespace", "html-deck-circuit", "html-deck-magazine", "html-deck-colorblock"];
+  const allInRegistry = designedIds.every((id) => SKILL_TEMPLATES.some((t) => t.id === id) && !!getSkillTemplate(id));
+  const refIds = strat ? [...new Set(strat.body.match(/html-deck-[a-z-]+/g) || [])] : [];
+  const refsResolve = refIds.length >= 5 && refIds.every((id) => !!getSkillTemplate(id));
+  check("STRAT1", "演示风格选择法在册 + 5 套精装模板入库且正文引用 id 全部可解析",
+    !!strat && allInRegistry && refsResolve, `策略=${!!strat} 入库=${allInRegistry} 引用id=${refIds.length}`);
 }
 
 // ENV1 stdio MCP 环境变量：值入库（仅服务端），sanitize 只回 key 名、绝不下发值（博查 BOCHA_API_KEY 用例）
