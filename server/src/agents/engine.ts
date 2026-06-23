@@ -960,6 +960,25 @@ export function readSkillBody(id: string): string {
   return out;
 }
 
+/**
+ * 一次性结构化补全（无工具、无流式、非 agent 循环）：供「模板就地改图文·AI 按来源产文案」等场景，
+ * 复用现有供应商/模型解析（含用户自托管的兼容端点）。须在 owner 作用域内调用（listAgents/解析皆 owner 隔离）。
+ * 返回纯文本，调用方自行解析（如 JSON）。失败抛错（无同事/无供应商/调用异常）。
+ */
+export async function oneShotComplete(system: string, userPrompt: string, maxTokens = 4000): Promise<string> {
+  const agent = listAgents()[0];
+  if (!agent) throw new Error("工作区没有可用的 AI 同事（模型通道）");
+  const rt = resolveRuntime(agent, {});
+  if (!rt.client) throw new Error("未配置可用的模型供应商（设置 → 模型供应商）");
+  const resp = await rt.client.messages.create({
+    model: rt.model,
+    max_tokens: Math.min(maxTokens, rt.maxTokens),
+    system,
+    messages: [{ role: "user", content: userPrompt }],
+  });
+  return resp.content.filter((b): b is Anthropic.TextBlock => b.type === "text").map((b) => b.text).join("").trim();
+}
+
 // 交付与导出红线：注入每一轮动态上下文（覆盖所有现存/新建同事、聊天与任务两条路径），
 // 因为 agent.system_prompt 是建号时烘焙进 DB 的、改 SHARED_RULES 不影响存量同事。
 // 根除截图里"导出不可用 / 甩 CLI 给用户"那类臆造阻塞。

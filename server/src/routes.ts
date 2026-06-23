@@ -76,6 +76,7 @@ import {
   onPlanResolved,
   onTaskAssigned,
   onTaskDelivered,
+  oneShotComplete,
   stopChannel,
   stopTask,
   teamStatus,
@@ -550,6 +551,49 @@ api.post("/documents/:id/template-export", async (req, res) => {
     res.send(out);
   } catch (err: unknown) {
     res.status(500).json({ error: `导出失败：${String((err as Error)?.message ?? err).slice(0, 200)}` });
+  }
+});
+
+// AI 按来源为模板槽位产替换文案（逐槽确认前的「建议」）：body { sourceDocIds?: string[], brief?: string }。
+// 接地在来源文档、不臆造数字、保长度量级防破版、品牌固定文案(logo/版权/页码)不动；返回 suggestions 供前端逐槽确认。
+api.post("/documents/:id/template-propose", async (req, res) => {
+  const doc = getDocument(req.params.id);
+  if (!doc) return res.status(404).json({ error: "document not found" });
+  if (doc.kind !== "template" || !doc.template_meta) return res.status(400).json({ error: "该文档不是可就地编辑的 .pptx 模板" });
+  let slots: { slideIdx: number; shapeIdx: number; paraIdx: number; text: string; kind: string }[] = [];
+  try { slots = JSON.parse(doc.template_meta).slots ?? []; } catch { slots = []; }
+  if (!slots.length) return res.json({ suggestions: [] });
+  const brief = String(req.body?.brief ?? "").slice(0, 2000);
+  const ids: string[] = Array.isArray(req.body?.sourceDocIds) ? req.body.sourceDocIds.map(String) : [];
+  const sourceText = ids
+    .map((sid) => getDocument(sid))
+    .filter((d): d is NonNullable<typeof d> => !!d && d.kind === "source")
+    .map((d) => `《${d.title}》\n${d.content.slice(0, 6000)}`)
+    .join("\n\n---\n\n")
+    .slice(0, 16000);
+  const slotList = slots.map((s, i) => ({ id: i, page: s.slideIdx + 1, original: s.text }));
+  const system =
+    "你在为一份 PPT 模板逐槽改写文案。铁律：1) 只基于【来源】与【目标】改写，不臆造事实/数字，没有可靠数字就保留原占位或写『示意值，待核实』；" +
+    "2) 替换文本长度与原文同量级（标题短、正文略长亦可，但别暴涨，防破版）；3) 品牌固定文案（logo 文字、公司名、版权、页码、日期占位）不要改，直接不返回该槽；" +
+    "4) 只返回你确有把握、确需替换的槽位。仅输出 JSON，无任何解释或 markdown 围栏，格式：{\"edits\":[{\"id\":数字,\"text\":\"新文案\"}]}。";
+  const user =
+    (brief ? `【目标】${brief}\n\n` : "") +
+    (sourceText ? `【来源】\n${sourceText}\n\n` : "【来源】(无，仅按目标与原文语义润色，不得编造具体数字)\n\n") +
+    `【模板槽位】(id/页码/原文)\n${JSON.stringify(slotList, null, 0)}`;
+  try {
+    const raw = await oneShotComplete(system, user, 4000);
+    const jsonText = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
+    let parsed: { edits?: { id: number; text: string }[] } = {};
+    try { parsed = JSON.parse(jsonText); } catch { return res.status(502).json({ error: "AI 未返回可解析的 JSON，请重试或手动编辑" }); }
+    const suggestions = (parsed.edits ?? [])
+      .filter((e) => Number.isInteger(e.id) && e.id >= 0 && e.id < slots.length && typeof e.text === "string" && e.text.trim())
+      .map((e) => {
+        const s = slots[e.id];
+        return { idx: e.id, slideIdx: s.slideIdx, shapeIdx: s.shapeIdx, paraIdx: s.paraIdx, original: s.text, suggestion: e.text.trim() };
+      });
+    res.json({ suggestions });
+  } catch (err: unknown) {
+    res.status(502).json({ error: `AI 建议失败：${String((err as Error)?.message ?? err).slice(0, 200)}` });
   }
 });
 

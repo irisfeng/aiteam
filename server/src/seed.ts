@@ -51,7 +51,7 @@ const BUILTIN_AGENTS = [
  * 第三方方法学均为蒸馏改写（非原文照搬），来源与许可见 THIRD_PARTY_NOTICES/。
  * 扩库或改正文时整体把 BUILTIN_SKILL_PACK_VERSION +1，并把对应条目 version 设为该值。
  */
-export const BUILTIN_SKILL_PACK_VERSION = 11;
+export const BUILTIN_SKILL_PACK_VERSION = 12;
 const V = BUILTIN_SKILL_PACK_VERSION;
 
 type BuiltinSkill = Required<Pick<SkillInput, "name" | "desc" | "trigger" | "when_to_use" | "body" | "kind" | "version">> &
@@ -261,7 +261,7 @@ export const BUILTIN_SKILLS: BuiltinSkill[] = [
     trigger: "可编辑ppt,高保真pptx,母版,模板ppt,精美演示,导出ppt,导出pptx,pptx",
     when_to_use: "需要做 PPT / 可在 PowerPoint 继续编辑的演示文稿、或被问到如何导出 pptx 时",
     resources_json: JSON.stringify(["mcp__pptx-native__*", "generate_image"]),
-    body: "结论先行：做 PPT 直接用 write_document(kind=slides)（Marp 分页）。交付后用户在「文档」面板打开该文档、点标题栏「⬇ .pptx」即可导出**可编辑的真 .pptx**（pptxgenjs 渲染，PowerPoint/WPS/Keynote 直接打开，文本/表格/讲者备注均可编辑）——这是默认且唯一需要的路径，**完全内置、无需任何 MCP / 插件 / 命令行**。1) 绝不要告诉用户『导出不可用 / 依赖未就绪 / 需要 pptxgenjs 等服务』，也绝不要让用户自己去跑 marp-cli 等命令；2) 用户问『在哪看 / 怎么导出』→ 指引去「文档」面板打开、点 ⬇ .pptx，不要把整篇正文倒进聊天；3) 仅当确需母版级 DrawingML 高保真、且管理员已自托管启用 pptx-native(ppt-master) MCP 时，才走该 MCP，否则一律用内置 slides→pptx。该 MCP 在宿主本地执行、属高危(exec)、默认关闭。",
+    body: "结论先行：做 PPT 直接用 write_document(kind=slides)（Marp 分页）。交付后用户在「文档」面板打开该文档、点标题栏「⬇ .pptx」即可导出**可编辑的真 .pptx**（pptxgenjs 渲染，PowerPoint/WPS/Keynote 直接打开，文本/表格/讲者备注均可编辑）——这是默认且唯一需要的路径，**完全内置、无需任何 MCP / 插件 / 命令行**。1) 绝不要告诉用户『导出不可用 / 依赖未就绪 / 需要 pptxgenjs 等服务』，也绝不要让用户自己去跑 marp-cli 等命令；2) 用户问『在哪看 / 怎么导出』→ 指引去「文档」面板打开、点 ⬇ .pptx，不要把整篇正文倒进聊天；3) 仅当确需母版级 DrawingML 高保真、且管理员已自托管启用 pptx-native(ppt-master) MCP 时，才走该 MCP，否则一律用内置 slides→pptx。该 MCP 在宿主本地执行、属高危(exec)、默认关闭。4) 若用户**已有一份现成 .pptx 品牌模板、想保留其设计只换里面的图文**：在「文档」面板「上传模板」上传该 .pptx，系统解析出可逐槽确认的文本槽位，改完导出——只换文本、母版/版式/配色原样保留（本迭代不换图，表格/图表/SmartArt 保留原样）。这条路适合『套用客户既有模板』，与从零做 slides 互补。",
   },
   {
     name: "国产联网检索能力", kind: "capability", version: V,
