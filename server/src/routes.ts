@@ -47,13 +47,15 @@ import { AGENT_TEMPLATES, getTemplate } from "./agents/templates.js";
 import multer from "multer";
 import { withOwner, ownerFromUserId } from "./ownerScope.js";
 import { dropConnection, testMcpServer, callMcpTool, mcpToolPrefixReady } from "./agents/mcp.js";
-import { UPLOAD_MAX_BYTES, TEXT_EXTS, DOC_EXTS, extOf, withTempFile } from "./uploads.js";
+import { UPLOAD_MAX_BYTES, TEXT_EXTS, DOC_EXTS, extOf, withTempFile, persistTemplateBinary, readTemplateBinary, removeTemplateBinary } from "./uploads.js";
+import { parseTemplate, applyTemplateEdits, type TemplateEdit } from "./pptx-template.js";
 import {
   createDocument,
   createProvider,
   deleteProvider,
   deleteRoutine,
   getDocument,
+  setDocumentBlobPath,
   getImageProvider,
   getProvider,
   listDocuments,
@@ -492,6 +494,65 @@ api.post("/uploads", uploadMw.single("file"), async (req, res) => {
   }
 });
 
+// 上传 .pptx 作为「模板」（就地改图文用）：解析槽位清单 + 持久化原二进制 + 存 kind="template" 文档。
+// 与 /uploads（来源文档，只抽文本即弃二进制）不同：模板必须保留原件供就地编辑。纯 jszip 解析，不需 markitdown。
+api.post("/templates", uploadMw.single("file"), async (req, res) => {
+  const f = (req as unknown as { file?: { originalname: string; buffer: Buffer } }).file;
+  if (!f) return res.status(400).json({ error: "未收到文件（表单字段名应为 file）" });
+  const ext = extOf(f.originalname);
+  if (ext !== ".pptx") return res.status(400).json({ error: "模板暂仅支持 .pptx（就地改图文）" });
+  const title = (f.originalname || "上传模板").slice(0, 200);
+  const userId = (req as AuthedRequest).userId;
+  if (!userId) return res.status(401).json({ error: "unauthorized" });
+  try {
+    const meta = await parseTemplate(f.buffer);
+    if (!meta.slideCount) return res.status(400).json({ error: "未能从该 .pptx 解析出幻灯片，可能文件损坏或为加密文件" });
+    // content 存一份可读的槽位摘要（满足非空约束 + 供 AI/搜索理解结构）
+    const digest = meta.slots.map((s) => `[第${s.slideIdx + 1}页·${s.kind}#${s.shapeIdx}.${s.paraIdx}] ${s.text}`).join("\n") || "(无可替换文本槽位)";
+    const doc = withOwner(ownerFromUserId(userId), () => {
+      const d = createDocument({
+        channel_id: null, agent_id: null, title, content: digest, kind: "template",
+        binary_format: "pptx", template_meta: JSON.stringify(meta),
+      });
+      const blobPath = persistTemplateBinary(d.owner_id, d.id, f.buffer, ".pptx");
+      setDocumentBlobPath(d.id, blobPath);
+      const fresh = getDocument(d.id)!;
+      broadcast({ type: "doc:upsert", payload: fresh });
+      return fresh;
+    });
+    res.json(doc);
+  } catch (err: unknown) {
+    res.status(502).json({ error: `模板解析失败：${String((err as Error)?.message ?? err).slice(0, 200)}` });
+  }
+});
+
+// 模板就地改图文 → 导出可编辑 .pptx：body { edits: [{slideIdx,shapeIdx,paraIdx,newText}] }。
+// 只改命中段落文本，不动母版/版式/主题/图片；保真度边界见 template_meta.warnings。
+api.post("/documents/:id/template-export", async (req, res) => {
+  const doc = getDocument(req.params.id);
+  if (!doc) return res.status(404).json({ error: "document not found" });
+  if (doc.kind !== "template" || !doc.original_blob_path) return res.status(400).json({ error: "该文档不是可就地编辑的 .pptx 模板" });
+  const editsRaw = (req.body?.edits ?? []) as unknown;
+  const edits: TemplateEdit[] = Array.isArray(editsRaw)
+    ? editsRaw.map((e) => ({
+        slideIdx: Number((e as TemplateEdit).slideIdx),
+        shapeIdx: Number((e as TemplateEdit).shapeIdx),
+        paraIdx: Number((e as TemplateEdit).paraIdx),
+        newText: String((e as TemplateEdit).newText ?? ""),
+      })).filter((e) => Number.isInteger(e.slideIdx) && Number.isInteger(e.shapeIdx) && Number.isInteger(e.paraIdx))
+    : [];
+  try {
+    const original = readTemplateBinary(doc.original_blob_path);
+    const out = await applyTemplateEdits(original, edits);
+    const filename = encodeURIComponent(doc.title.replace(/\.pptx$/i, "").replace(/[\\/:*?"<>|]/g, "_") + "-已编辑.pptx");
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.presentationml.presentation");
+    res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${filename}`);
+    res.send(out);
+  } catch (err: unknown) {
+    res.status(500).json({ error: `导出失败：${String((err as Error)?.message ?? err).slice(0, 200)}` });
+  }
+});
+
 /** 某文档的全部历史版本（含已被取代的旧版），供前端「查看历史版本」抽屉。 */
 api.get("/documents/:id/versions", (req, res) => {
   const doc = getDocument(req.params.id);
@@ -504,7 +565,10 @@ api.delete("/documents/:id", (req, res) => {
   const doc = getDocument(req.params.id);
   if (!doc) return res.status(404).json({ error: "document not found" });
   const versions = doc.task_id ? listDocumentVersions(doc.task_id, doc.kind) : [doc];
-  for (const v of versions) deleteDocument(v.id);
+  for (const v of versions) {
+    if (v.kind === "template") removeTemplateBinary(v.original_blob_path); // 连带删原 .pptx 二进制，无孤儿文件
+    deleteDocument(v.id);
+  }
   broadcast({ type: "doc:delete", payload: { ids: versions.map((v) => v.id) } });
   res.json({ ok: true, deleted: versions.map((v) => v.id) });
 });

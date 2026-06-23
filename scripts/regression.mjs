@@ -405,6 +405,49 @@ check(
     !!strat && allInRegistry && refsResolve, `策略=${!!strat} 入库=${allInRegistry} 引用id=${refIds.length}`);
 }
 
+// PTPL 上传 .pptx 模板「就地改图文」核心（方案① OOXML）：用 slidesToPptx 造夹具 → 解析槽位 → 文本就地替换 →
+// 重解析校验。关键不变量：母版/版式/主题 inner XML 逐字不变（原设计天然保留）、只动被编辑那一页、zip 条目零增减。
+{
+  const { slidesToPptx } = await import(join(root, "server/dist/pptx.js"));
+  const { parseTemplate, applyTemplateEdits } = await import(join(root, "server/dist/pptx-template.js"));
+  const JSZip = (await import("jszip")).default;
+  const fixtureDoc = {
+    id: "ptpl-fix", owner_id: "o", channel_id: null, task_id: null, agent_id: null,
+    title: "夹具", kind: "slides", version: 1, superseded_by: null, created_at: 0, updated_at: 0,
+    content: ["# 封面ALPHA", "副标题", "---", "## 第二页", "- 要点BRAVO", "- 要点乙", "---", "## 结尾CHARLIE", "联系方式"].join("\n"),
+  };
+  const original = await slidesToPptx(fixtureDoc);
+  const meta = await parseTemplate(original);
+  const alpha = meta.slots.find((s) => s.text.includes("封面ALPHA"));
+  const bravo = meta.slots.find((s) => s.text.includes("要点BRAVO"));
+  check("PTPL-PARSE", "上传模板解析：slidesToPptx 夹具解析出槽位清单（含封面/正文文本，定位稳定）",
+    meta.slideCount === 3 && meta.slots.length > 0 && !!alpha && !!bravo, `页=${meta.slideCount} 槽=${meta.slots.length}`);
+
+  // 内 XML 快照（母版/版式/主题 + 各 slide）
+  const innerMap = async (buf) => {
+    const z = await JSZip.loadAsync(buf); const out = {};
+    for (const p of Object.keys(z.files)) {
+      const fo = z.file(p); if (!fo || z.files[p].dir) continue;
+      if (/^ppt\/(slideMasters|slideLayouts|theme)\/.+\.xml$/.test(p) || /^ppt\/slides\/slide\d+\.xml$/.test(p)) out[p] = await fo.async("string");
+    } return out;
+  };
+  const before = await innerMap(original);
+  const edited = alpha ? await applyTemplateEdits(original, [{ slideIdx: alpha.slideIdx, shapeIdx: alpha.shapeIdx, paraIdx: alpha.paraIdx, newText: "封面已改DELTA" }]) : original;
+  const meta2 = await parseTemplate(edited);
+  const after = await innerMap(edited);
+  const masterChanged = Object.keys(before).filter((p) => !/slides\/slide\d+\.xml$/.test(p) && before[p] !== after[p]);
+  const slidesChanged = Object.keys(before).filter((p) => /slides\/slide\d+\.xml$/.test(p) && before[p] !== after[p]);
+  const za = await JSZip.loadAsync(original), zb = await JSZip.loadAsync(edited);
+  const setA = Object.keys(za.files).filter((p) => !za.files[p].dir).sort().join("|");
+  const setB = Object.keys(zb.files).filter((p) => !zb.files[p].dir).sort().join("|");
+  const deltaIn = !!meta2.slots.find((s) => s.text.includes("封面已改DELTA"));
+  const alphaGone = !meta2.slots.find((s) => s.text.includes("封面ALPHA"));
+  const bravoKept = !!meta2.slots.find((s) => s.text.includes("要点BRAVO"));
+  check("PTPL-EDIT", "就地改文本：命中段替换成功 + 母版/版式/主题 inner XML 逐字不变 + 只动被编辑页 + zip 条目零增减",
+    deltaIn && alphaGone && bravoKept && masterChanged.length === 0 && slidesChanged.length === 1 && setA === setB && meta2.slideCount === 3,
+    `delta=${deltaIn} alphaGone=${alphaGone} bravoKept=${bravoKept} master改=${masterChanged.length} slide改=${slidesChanged.length} 条目同=${setA === setB}`);
+}
+
 // ENV1 stdio MCP 环境变量：值入库（仅服务端），sanitize 只回 key 名、绝不下发值（博查 BOCHA_API_KEY 用例）
 {
   const s = db.createMcpServer({ name: "envtest", kind: "stdio", command: "true", args: [], env: { BOCHA_API_KEY: "sk-secret-xyz" } });
@@ -627,6 +670,41 @@ try {
     const rejected = !(await fetch(`${BASE}/documents/${report.id}/pptx`, cookieHdr)).ok;
     check("Q1", "真 .pptx 导出：slides 出合法 zip 包，report 被拒", res.ok && isZip && rejected,
       `${buf.length} bytes`);
+  }
+
+  // PTPL-HTTP 上传 .pptx 模板就地改图文（端到端走 HTTP/鉴权/owner）：POST /templates 解析+持久化 → POST /template-export 改文本出 pptx
+  {
+    const { slidesToPptx } = await import(join(root, "server/dist/pptx.js"));
+    const { parseTemplate } = await import(join(root, "server/dist/pptx-template.js"));
+    const fixture = await slidesToPptx({
+      id: "h", owner_id: "o", channel_id: null, task_id: null, agent_id: null, title: "夹具", kind: "slides",
+      version: 1, superseded_by: null, created_at: 0, updated_at: 0,
+      content: ["# 封面ECHO", "副标题", "---", "## 第二页FOXTROT", "- 要点"].join("\n"),
+    });
+    const fd = new FormData();
+    fd.append("file", new Blob([fixture]), "brand.pptx");
+    const up = await fetch(`${BASE}/templates`, { method: "POST", headers: { Cookie: sessionCookie }, body: fd });
+    const doc = await up.json();
+    const meta = doc.template_meta ? JSON.parse(doc.template_meta) : { slots: [] };
+    const slot = meta.slots?.find((s) => s.text.includes("封面ECHO"));
+    // 非 .pptx 应被拒
+    const fdBad = new FormData();
+    fdBad.append("file", new Blob(["x"]), "a.txt");
+    const badRej = !(await fetch(`${BASE}/templates`, { method: "POST", headers: { Cookie: sessionCookie }, body: fdBad })).ok;
+    // 就地改文本导出
+    let exportOk = false, deltaIn = false;
+    if (slot) {
+      const exp = await fetch(`${BASE}/documents/${doc.id}/template-export`, {
+        method: "POST", headers: { Cookie: sessionCookie, "Content-Type": "application/json" },
+        body: JSON.stringify({ edits: [{ slideIdx: slot.slideIdx, shapeIdx: slot.shapeIdx, paraIdx: slot.paraIdx, newText: "封面改GOLF" }] }),
+      });
+      const out = Buffer.from(await exp.arrayBuffer());
+      exportOk = exp.ok && out[0] === 0x50 && out[1] === 0x4b; // PK
+      if (exportOk) { const m2 = await parseTemplate(out); deltaIn = !!m2.slots.find((s) => s.text.includes("封面改GOLF")); }
+    }
+    check("PTPL-HTTP", "上传模板端到端：POST /templates 入库 kind=template+槽位清单+持久化 / 非pptx拒 / template-export 改文本出可用 pptx",
+      up.ok && doc.kind === "template" && doc.binary_format === "pptx" && !!doc.original_blob_path && (meta.slots?.length > 0) && !!slot && badRej && exportOk && deltaIn,
+      `kind=${doc.kind} 槽=${meta.slots?.length} 非pptx拒=${badRej} 导出=${exportOk} delta=${deltaIn}`);
   }
 
   // Q2 图像生成供应商配置：key 只存服务端

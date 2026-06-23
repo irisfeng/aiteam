@@ -1,9 +1,10 @@
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { nanoid } from "nanoid";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const dataRoot = process.env.AITEAM_DATA_DIR || join(__dirname, "..", "data");
 
 /**
  * 上传文件的临时落盘目录（与 sqlite/assets 同级，跟随 AITEAM_DATA_DIR 隔离）。
@@ -13,8 +14,46 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  *  - 此目录绝不挂 express.static（来源可能含敏感内容，且本就转瞬即逝）。
  * 提取出的 Markdown 存入 documents 表（owner 隔离 + 版本化），作为 kind="source" 文档。
  */
-const tmpRoot = join(process.env.AITEAM_DATA_DIR || join(__dirname, "..", "data"), "uploads-tmp");
+const tmpRoot = join(dataRoot, "uploads-tmp");
 mkdirSync(tmpRoot, { recursive: true });
+
+/**
+ * kind="template" 上传 .pptx 的**持久化**二进制目录（与临时目录不同：模板需保留原件供就地编辑）。
+ * 按 owner 隔离子目录；**绝不挂 express.static**（品牌模板可能含敏感内容，且只供服务端读取后编辑导出）。
+ * 删除 template 文档时应连带删此文件（见 routes 删除分支）。
+ */
+const templatesRoot = join(dataRoot, "templates");
+mkdirSync(templatesRoot, { recursive: true });
+
+/** owner/id 仅保留 [A-Za-z0-9_-]，绝不让用户输入参与磁盘路径拼接（防穿越）。 */
+function safeSeg(s: string): string {
+  return (s || "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 64) || "_";
+}
+
+/** 持久化模板原二进制到 owner 隔离目录，返回磁盘路径（存入 documents.original_blob_path）。 */
+export function persistTemplateBinary(owner: string, docId: string, buf: Buffer, ext = ".pptx"): string {
+  const safeExt = /^\.[a-zA-Z0-9]{1,8}$/.test(ext) ? ext : ".pptx";
+  const dir = join(templatesRoot, safeSeg(owner));
+  mkdirSync(dir, { recursive: true });
+  const abs = join(dir, safeSeg(docId) + safeExt);
+  writeFileSync(abs, buf);
+  return abs;
+}
+
+/** 读回模板原二进制（就地编辑/导出用）。路径必须落在 templatesRoot 下，防越权读取。 */
+export function readTemplateBinary(absPath: string): Buffer {
+  const norm = join(absPath);
+  if (!norm.startsWith(templatesRoot)) throw new Error("template path out of bounds");
+  return readFileSync(norm);
+}
+
+/** 删除模板原二进制（删 template 文档时调用）。越界路径忽略。 */
+export function removeTemplateBinary(absPath: string | null | undefined): void {
+  if (!absPath) return;
+  const norm = join(absPath);
+  if (!norm.startsWith(templatesRoot)) return;
+  try { rmSync(norm, { force: true }); } catch { /* ignore */ }
+}
 
 /** 单文件大小上限（默认 20MB） */
 export const UPLOAD_MAX_BYTES = Number(process.env.AITEAM_UPLOAD_MAX_BYTES ?? 20 * 1024 * 1024);
