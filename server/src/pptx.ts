@@ -327,12 +327,16 @@ function drawNodeBox(slide: any, x: number, y: number, w: number, h: number, lab
   slide.addShape("roundRect", { x, y, w, h, rectRadius: 0.06, fill: style.fill, line: style.line, ...(style.shadow ? { shadow: style.shadow } : {}) });
   if (items && items.length) {
     // 标题(粗) + 子项("·"连接、稍小、弱色) 同框：架构层/组件框列出其模块。
-    const sub = items.join(" · ");
+    const subFont = Math.max(8, fontPt - 3);
+    let sub = items.join(" · ");
+    // 防溢出：按盒尺寸估算可容字数（CJK 约每字 subFont/72 英寸宽），超约 3 行就省略，避免文字溢出盒外压住相邻节点/连线（与无 items 分支一致的省略策略）。
+    const perLine = Math.max(4, Math.floor((w - 0.16) / (subFont / 72)));
+    if (cp(sub) > perLine * 3) sub = [...sub].slice(0, perLine * 3 - 1).join("") + "…";
     const subColor = style.shadow ? "F3ECD2" : THEME.dim; // 主节点(深底)用浅金，子节点用弱灰
     slide.addText(
       [
         { text: label, options: { fontSize: fontPt, bold: true, color: style.color, breakLine: true } },
-        { text: sub, options: { fontSize: Math.max(8, fontPt - 3), color: subColor, breakLine: false } },
+        { text: sub, options: { fontSize: subFont, color: subColor, breakLine: false } },
       ],
       { x: x + 0.08, y: y + 0.04, w: w - 0.16, h: h - 0.08, align: "center", valign: "middle", fontFace: CJK_FONT, wrap: true, lineSpacingMultiple: 1.05 }
     );
