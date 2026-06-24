@@ -591,7 +591,9 @@ api.post("/documents/:id/template-propose", async (req, res) => {
     `【模板槽位】(id/页码/原文)\n${JSON.stringify(slotList, null, 0)}`;
   try {
     const raw = await oneShotComplete(system, user, 4000);
-    const jsonText = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
+    // 健壮提取：模型偶尔在 JSON 前后加说明文字或代码围栏——取最外层 {…} 子串再 parse（本端点产物恒为对象）。
+    const a = raw.indexOf("{"), b = raw.lastIndexOf("}");
+    const jsonText = a >= 0 && b > a ? raw.slice(a, b + 1) : raw.trim();
     let parsed: { edits?: { id: number; text: string }[] } = {};
     try { parsed = JSON.parse(jsonText); } catch { return res.status(502).json({ error: "AI 未返回可解析的 JSON，请重试或手动编辑" }); }
     const suggestions = (parsed.edits ?? [])

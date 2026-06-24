@@ -87,7 +87,7 @@ export function TemplateEditor({ doc }: { doc: Doc }) {
       const blob = await api.templateExport(doc.id, edits, imageEdits);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
-      a.href = url; a.download = doc.title.replace(/\.pptx$/i, "") + "-已编辑.pptx";
+      a.href = url; a.download = doc.title.replace(/\.pptx$/i, "").replace(/[\\/:*?"<>|]/g, "_") + "-已编辑.pptx";
       document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 4000);
       setNote(`已导出：替换文字 ${edits.length} 处、换/填图 ${imageEdits.length} 处，其余保留原样。母版/版式/配色未改。`);
