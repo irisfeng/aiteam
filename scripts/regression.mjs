@@ -44,6 +44,7 @@ async function waitFor(fn, timeout = 20000, interval = 400) {
 // ---------------------------------------------------------------------------
 const db = await import(join(root, "server/dist/db.js"));
 const { seedGlobalSkills, seedForOwner, BUILTIN_SKILLS } = await import(join(root, "server/dist/seed.js"));
+const { AGENT_TEMPLATES } = await import(join(root, "server/dist/agents/templates.js"));
 const { enterOwner, ownerFromUserId } = await import(join(root, "server/dist/ownerScope.js"));
 const { hashPassword } = await import(join(root, "server/dist/password.js"));
 const engine = await import(join(root, "server/dist/agents/engine.js"));
@@ -185,6 +186,98 @@ check(
     `表格=${tbl ? `${tbl.header.length}列${tbl.rows.length}行` : "无"}`);
 }
 
+// PPTX3 渲染升级：`值 :: 标签`→数字卡解析；长页按高度预算自动分续页（实渲幻灯片数 > 源页数）
+{
+  const { parseSlides, slidesManifest } = await import(join(root, "server/dist/pptx.js"));
+  const longPage = Array.from({ length: 14 }, (_, i) => `- 要点 ${i + 1}：这是一条较长的要点用于撑高页面高度从而触发自动续页分页逻辑`).join("\n");
+  const md = `# 封面\n\n---\n\n# 关键数字\n\n268亿元 :: 市场规模\n↓80% :: 人力成本\n\n---\n\n# 密集页\n\n${longPage}`;
+  const pages = parseSlides(md);
+  const statsPage = pages.find((p) => p.stats.length > 0);
+  const m = slidesManifest(md);
+  const ok =
+    Boolean(statsPage) && statsPage.stats.length === 2 && statsPage.stats[0].value === "268亿元" &&
+    m.statCards === 2 && m.renderedSlides > m.sourcePages && m.continuationSlides >= 1;
+  check("PPTX3", "渲染升级：值::标签→数字卡 + 长页自动续页（实渲>源页）", ok,
+    `源页=${m.sourcePages} 实渲=${m.renderedSlides} 续页=${m.continuationSlides} 数字卡=${m.statCards}`);
+}
+
+// PPTX4 解析健壮性：块状 <!-- note -->…<!-- end note --> 入备注不漏正文 + 剥离 slides 里的原始 HTML（跨行）
+{
+  const { parseSlides } = await import(join(root, "server/dist/pptx.js"));
+  const md = "# 封面\n\n副标题\n\n<!-- note -->\n这是讲者备注内容不应出现在正文\n<!-- end note -->\n\n---\n\n# 能力\n\n<div style=\"display:flex;\ngap:16px\">\n实际要点A\n</div>\n\n- 正常要点";
+  const pages = parseSlides(md);
+  const cover = pages[0], cap = pages[1];
+  const noteCaptured = cover.notes.includes("讲者备注内容");
+  const noteNotLeaked = !cover.bullets.concat(cover.paragraphs).join("").includes("讲者备注内容");
+  const capJson = JSON.stringify(cap);
+  const htmlStripped = !capJson.includes("<div") && !capJson.includes("style=") && !capJson.includes("</div>") && capJson.includes("实际要点A");
+  check("PPTX4", "解析健壮性：块状讲者备注入 notes 不漏正文 + slides 原始 HTML(跨行)被剥离", noteCaptured && noteNotLeaked && htmlStripped,
+    `noteCaptured=${noteCaptured} noteNotLeaked=${noteNotLeaked} htmlStripped=${htmlStripped}`);
+}
+
+// PPTX5 解析：Marp frontmatter（含 `style: |` 多行 CSS 块标量）应被跳过，不渲染成幻灯片
+{
+  const { parseSlides } = await import(join(root, "server/dist/pptx.js"));
+  const md = "---\nmarp: true\ntheme: default\npaginate: true\nstyle: |\n  :root { --x: #0B1D3A; }\n  section { color: var(--x); }\n---\n\n# 真封面\n\n副标题\n\n---\n\n# 第二页\n\n- 要点";
+  const pages = parseSlides(md);
+  const dump = JSON.stringify(pages);
+  const ok = pages.length === 2 && pages[0].title === "真封面" && !dump.includes("marp: true") && !dump.includes(":root");
+  check("PPTX5", "解析：Marp frontmatter(含 style:| 块标量) 被跳过、不渲染成幻灯片", ok,
+    `pages=${pages.length} title0=${pages[0] && pages[0].title}`);
+}
+
+// PPTX6 架构图：```arch 围栏 → 解析 4 节点/3 边 + 入 manifest + 悬空边计 droppedLinks + 端到端出 pptx buffer
+{
+  const { parseSlides, slidesManifest, slidesToPptx } = await import(join(root, "server/dist/pptx.js"));
+  const md = [
+    "# 系统架构", "", "---", "",
+    "# 数据管线", "",
+    "```arch", "type: layered", "dir: down",
+    "[接入] 网关", "[接入] 鉴权", "[核心] 调度器", "[存储] 主库",
+    "网关 -> 调度器", "鉴权 -> 调度器", "调度器 -> 主库",
+    "调度器 -. 异步 .-> 缓存",   // 缓存未定义 → droppedLinks=1
+    "```",
+  ].join("\n");
+  const pages = parseSlides(md);
+  const d = pages[1].diagrams[0];
+  const m = slidesManifest(md);
+  const buf = await slidesToPptx({ id: "x", title: "架构图", kind: "slides", content: md });
+  const ok =
+    Boolean(d) && d.type === "layered" && d.nodes.length === 4 && d.edges.length === 3 &&
+    m.diagrams === 1 && m.droppedLinks === 1 && buf.length > 5000;
+  check("PPTX6", "架构图：```arch 解析 4 节点/3 边、悬空边计 droppedLinks、端到端出 pptx", ok,
+    `nodes=${d && d.nodes.length} edges=${d && d.edges.length} dropped=${m.droppedLinks} bytes=${buf.length}`);
+}
+
+// PPTX7 架构图新语法（节点|子项→框内模块 + 自动分层 + 目标可带子项）+ 数字卡整行反引号容错（修复实测 deck 的两个渲染 bug）
+{
+  const { parseSlides } = await import(join(root, "server/dist/pptx.js"));
+  const md = [
+    "# 架构", "",
+    "```arch", "type: layered",
+    "接入层 | [小程序] [外卖平台]",
+    "接入层 -> 编排 | 引擎 | 路由",
+    "编排 -. 未命中 .-> 兜底 | 坐席",
+    "```", "",
+    "---", "",
+    "# 指标",
+    "`↓30% :: 人力成本`",   // 整行被 markdown 行内代码反引号包裹（模型常见产出）
+    "`<5秒 :: 响应`",
+  ].join("\n");
+  const pages = parseSlides(md);
+  const dg = pages[0].diagrams[0];
+  const byLabel = Object.fromEntries((dg?.nodes || []).map((n) => [n.label, n]));
+  const archOk = dg && dg.nodes.length === 3 && dg.edges.length === 2 && dg.droppedLinks === 0 &&
+    byLabel["接入层"]?.items?.length === 2 && byLabel["编排"]?.items?.length === 2 &&
+    dg.edges.some((e) => e.dashed && e.label === "未命中") && dg.nodes.every((n) => n.group);
+  const stats = pages[1].stats;
+  const statOk = stats.length === 2 && stats.every((s) => !/`/.test(s.value + s.label)) &&
+    stats[0].value === "↓30%" && stats[0].label === "人力成本";
+  check("PPTX7", "架构图新语法(节点|子项+自动分层+目标带子项+虚线标签) + 数字卡整行反引号容错",
+    !!archOk && statOk,
+    `节点=${dg?.nodes.length} 边=${dg?.edges.length} dropped=${dg?.droppedLinks} 接入层子项=${byLabel["接入层"]?.items?.length} stat0=${stats[0]?.value}/${stats[0]?.label}`);
+}
+
 // WD1 write_document kind 契约校验：坏格式被拒（返回行号/分页提示），合法格式放行
 {
   const v = engine.validateDocContent;
@@ -274,6 +367,41 @@ check(
   check("DOC-HTML", "html 交付物：合法放行 + 外链script/内联事件(含 /onload 绕过)/js:URI 全拒（防存储型 XSS）", ok);
 }
 
+// DOC-SRC 无源数字软门：report/slides 多处量化且零来源/零示意标注 → 退回自纠；有来源/示意/少量/sheet/html → 放行
+{
+  const v = engine.validateDocContent;
+  const manyNums = "市场规模 268亿元，渗透率 60%，成本下降 80%，ROI 提升 3 倍，年省 500 万元。";
+  const withSrc = manyNums + "（来源：https://example.com/report）";
+  const withMark = "市场规模 268亿元，渗透率 60%，成本下降 80%，ROI 提升 3 倍，年省 500 万元（示意值，待核实）。";
+  const few = "本季度营收 100 万元，同比增长 20%。";
+  const sheetNums = "指标,数值\n市场规模,268亿元\n渗透率,60%\n成本下降,80%\nROI,3倍\n年省,500万元"; // 合法 CSV，数字多但 sheet 不受 C2 约束
+  const ok =
+    typeof v("report", manyNums) === "string" &&   // 多处无源 → 退回自纠
+    v("report", withSrc) === null &&               // 有来源标注 → 放行
+    v("report", withMark) === null &&              // 示意值标注 → 放行
+    v("report", few) === null &&                   // 量化数量少(<5) → 不误伤
+    v("sheet", sheetNums) === null;                // sheet 豁免（数据表本就是数字，格式合法即放行）
+  check("DOC-SRC", "无源数字软门：report 多处量化零来源退回；有来源/示意/少量/sheet 放行", ok);
+}
+
+// VER-ROUTE 验收者按交付物类型路由：视觉物→设计审核 / 内容物→校对审核 / 退代码评审 / 兜底创建者·本人
+{
+  const pick = engine.pickVerifier;
+  const A = (id, name, role) => ({ id, name, role });
+  const design = A("d", "设计审核", "视觉与版式把关");
+  const content = A("c", "校对审核", "文字校对与事实核查");
+  const code = A("k", "代码评审", "代码审查与质量把关");
+  const pm = A("p", "产品经理", "产品规划");
+  const worker = A("w", "PPT 助手", "演示文稿制作");
+  const ok =
+    pick([pm, code, content, design], "slides", null, worker).id === "d" && // 视觉物→设计审核
+    pick([pm, code, content, design], "report", null, worker).id === "c" && // 内容物→校对审核
+    pick([pm, code], "slides", null, worker).id === "k" &&                  // 无设计/校对→退代码评审
+    pick([pm], "slides", "p", worker).id === "p" &&                         // 都没有→任务创建者
+    pick([], "slides", null, worker).id === "w";                           // 空→本人(solo 自检)
+  check("VER-ROUTE", "验收者按交付物类型路由：视觉→设计审核 / 内容→校对审核 / 退代码评审 / 兜底创建者·本人", ok);
+}
+
 // SK5 L3 模板资源：技能用 tpl: 引用内置模板，read_skill 附带模板正文返回
 {
   const sk = db.listSkills().find((s) => s.name === "演示设计与防溢出法");
@@ -290,6 +418,112 @@ check(
   const { SKILL_TEMPLATES } = await import(join(root, "server/dist/registry.js"));
   const allValid = SKILL_TEMPLATES.length > 0 && SKILL_TEMPLATES.every((t) => engine.validateDocContent("html", t.content) === null);
   check("TPL1", "内置模板自洽：全部 SKILL_TEMPLATES 通过 html 交付物校验", allValid, `模板数=${SKILL_TEMPLATES.length}`);
+  // TPL-SOFF 脚本关闭可渲染：禁 opacity:0 门控的 .slide（除非有 scroll-snap / :first-of-type / :not(.js) 兜底）
+  const soffOk = SKILL_TEMPLATES.every((t) =>
+    !/\.slide\s*\{[^}]*opacity\s*:\s*0/.test(t.content) || /scroll-snap|:first-of-type|:not\(\.js\)/.test(t.content));
+  check("TPL-SOFF", "模板脚本关闭可渲染：无裸 opacity:0 门控（预览 iframe sandbox 空、脚本不跑）", soffOk);
+  // STRAT1 演示风格选择法：策略技能在册；5 套精装模板入库且正文引用的 html-deck-* id 全部可解析
+  // （read_skill 回退按单 id 取模板的前提；防 body 写错 id）
+  const { getSkillTemplate } = await import(join(root, "server/dist/registry.js"));
+  const strat = BUILTIN_SKILLS.find((s) => s.name === "演示风格选择法");
+  const designedIds = ["html-deck-navy-gold", "html-deck-whitespace", "html-deck-circuit", "html-deck-magazine", "html-deck-colorblock"];
+  const allInRegistry = designedIds.every((id) => SKILL_TEMPLATES.some((t) => t.id === id) && !!getSkillTemplate(id));
+  const refIds = strat ? [...new Set(strat.body.match(/html-deck-[a-z-]+/g) || [])] : [];
+  const refsResolve = refIds.length >= 5 && refIds.every((id) => !!getSkillTemplate(id));
+  check("STRAT1", "演示风格选择法在册 + 5 套精装模板入库且正文引用 id 全部可解析",
+    !!strat && allInRegistry && refsResolve, `策略=${!!strat} 入库=${allInRegistry} 引用id=${refIds.length}`);
+}
+
+// PTPL 上传 .pptx 模板「就地改图文」核心（方案① OOXML）：用 slidesToPptx 造夹具 → 解析槽位 → 文本就地替换 →
+// 重解析校验。关键不变量：母版/版式/主题 inner XML 逐字不变（原设计天然保留）、只动被编辑那一页、zip 条目零增减。
+{
+  const { slidesToPptx } = await import(join(root, "server/dist/pptx.js"));
+  const { parseTemplate, applyTemplateEdits } = await import(join(root, "server/dist/pptx-template.js"));
+  const JSZip = (await import("jszip")).default;
+  const fixtureDoc = {
+    id: "ptpl-fix", owner_id: "o", channel_id: null, task_id: null, agent_id: null,
+    title: "夹具", kind: "slides", version: 1, superseded_by: null, created_at: 0, updated_at: 0,
+    content: ["# 封面ALPHA", "副标题", "---", "## 第二页", "- 要点BRAVO", "- 要点乙", "---", "## 结尾CHARLIE", "联系方式"].join("\n"),
+  };
+  const original = await slidesToPptx(fixtureDoc);
+  const meta = await parseTemplate(original);
+  const alpha = meta.slots.find((s) => s.text.includes("封面ALPHA"));
+  const bravo = meta.slots.find((s) => s.text.includes("要点BRAVO"));
+  check("PTPL-PARSE", "上传模板解析：slidesToPptx 夹具解析出槽位清单（含封面/正文文本，定位稳定）",
+    meta.slideCount === 3 && meta.slots.length > 0 && !!alpha && !!bravo, `页=${meta.slideCount} 槽=${meta.slots.length}`);
+
+  // 内 XML 快照（母版/版式/主题 + 各 slide）
+  const innerMap = async (buf) => {
+    const z = await JSZip.loadAsync(buf); const out = {};
+    for (const p of Object.keys(z.files)) {
+      const fo = z.file(p); if (!fo || z.files[p].dir) continue;
+      if (/^ppt\/(slideMasters|slideLayouts|theme)\/.+\.xml$/.test(p) || /^ppt\/slides\/slide\d+\.xml$/.test(p)) out[p] = await fo.async("string");
+    } return out;
+  };
+  const before = await innerMap(original);
+  const edited = alpha ? await applyTemplateEdits(original, [{ slideIdx: alpha.slideIdx, shapeIdx: alpha.shapeIdx, paraIdx: alpha.paraIdx, newText: "封面已改DELTA" }]) : original;
+  const meta2 = await parseTemplate(edited);
+  const after = await innerMap(edited);
+  const masterChanged = Object.keys(before).filter((p) => !/slides\/slide\d+\.xml$/.test(p) && before[p] !== after[p]);
+  const slidesChanged = Object.keys(before).filter((p) => /slides\/slide\d+\.xml$/.test(p) && before[p] !== after[p]);
+  const za = await JSZip.loadAsync(original), zb = await JSZip.loadAsync(edited);
+  const setA = Object.keys(za.files).filter((p) => !za.files[p].dir).sort().join("|");
+  const setB = Object.keys(zb.files).filter((p) => !zb.files[p].dir).sort().join("|");
+  const deltaIn = !!meta2.slots.find((s) => s.text.includes("封面已改DELTA"));
+  const alphaGone = !meta2.slots.find((s) => s.text.includes("封面ALPHA"));
+  const bravoKept = !!meta2.slots.find((s) => s.text.includes("要点BRAVO"));
+  check("PTPL-EDIT", "就地改文本：命中段替换成功 + 母版/版式/主题 inner XML 逐字不变 + 只动被编辑页 + zip 条目零增减",
+    deltaIn && alphaGone && bravoKept && masterChanged.length === 0 && slidesChanged.length === 1 && setA === setB && meta2.slideCount === 3,
+    `delta=${deltaIn} alphaGone=${alphaGone} bravoKept=${bravoKept} master改=${masterChanged.length} slide改=${slidesChanged.length} 条目同=${setA === setB}`);
+
+  // PTPL-EMPTY 空模板生成图文：把夹具首个文本形状改成「空 title 占位符」→ 解析应列出空占位槽(text=''、phType) → 填字导出 → 重解析有该字、母版不变
+  const { DOMParser, XMLSerializer } = await import("@xmldom/xmldom");
+  const baseEmpty = await slidesToPptx({ ...fixtureDoc, content: "# 占位\n副\n---\n## 二\n- x" });
+  const zE = await JSZip.loadAsync(baseEmpty);
+  const rawE = await zE.file("ppt/slides/slide1.xml").async("string");
+  const declE = (rawE.match(/^<\?xml[^>]*\?>/) || [""])[0];
+  const docE = new DOMParser().parseFromString(rawE, "text/xml");
+  const kidsOf = (p, tag) => { const o = []; for (let i = 0; i < p.childNodes.length; i++) { const n = p.childNodes[i]; if (n.nodeType === 1 && (!tag || n.nodeName === tag)) o.push(n); } return o; };
+  const tree = docE.getElementsByTagName("p:spTree")[0];
+  const sp0 = kidsOf(tree, "p:sp").find((sp) => kidsOf(sp, "p:txBody")[0]);
+  const nvSpPr = kidsOf(sp0, "p:nvSpPr")[0];
+  let nvPr = kidsOf(nvSpPr, "p:nvPr")[0]; if (!nvPr) { nvPr = docE.createElement("p:nvPr"); nvSpPr.appendChild(nvPr); }
+  const phEl = docE.createElement("p:ph"); phEl.setAttribute("type", "title"); nvPr.appendChild(phEl);
+  const firstP = kidsOf(kidsOf(sp0, "p:txBody")[0], "a:p")[0];
+  kidsOf(firstP, "a:r").forEach((r) => firstP.removeChild(r));
+  let outE = new XMLSerializer().serializeToString(docE); if (!outE.startsWith("<?xml")) outE = declE + "\n" + outE;
+  zE.file("ppt/slides/slide1.xml", outE);
+  const emptyTpl = Buffer.from(await zE.generateAsync({ type: "uint8array", compression: "DEFLATE" }));
+  const metaE = await parseTemplate(emptyTpl);
+  const emptySlot = metaE.slots.find((s) => s.text === "" && s.kind === "ph" && s.phType);
+  const beforeM = await innerMap(emptyTpl);
+  const filled = emptySlot ? await applyTemplateEdits(emptyTpl, [{ slideIdx: emptySlot.slideIdx, shapeIdx: emptySlot.shapeIdx, paraIdx: emptySlot.paraIdx, newText: "填入标题ZULU" }]) : emptyTpl;
+  const metaF = await parseTemplate(filled);
+  const afterM = await innerMap(filled);
+  const masterE = Object.keys(beforeM).filter((p) => !/slides\/slide\d+\.xml$/.test(p) && beforeM[p] !== afterM[p]);
+  check("PTPL-EMPTY", "空模板生成图文：空占位符列成可填槽(text=''+phType) + 填字入位 + 母版/版式/主题不变",
+    !!emptySlot && !!metaF.slots.find((s) => s.text.includes("填入标题ZULU")) && masterE.length === 0,
+    `空槽=${!!emptySlot} phType=${emptySlot?.phType} 填入=${!!metaF.slots.find((s) => s.text.includes("填入标题ZULU"))} master改=${masterE.length}`);
+
+  // PTPL-IMG 模板换图：夹具嵌图 → 解析出图片位 → 换图(base64) → 新 media + Content_Types png + 重解析仍在 + 母版不变
+  const { assetsDir } = await import(join(root, "server/dist/agents/images.js"));
+  const PNGa = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+  const PNGb = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  writeFileSync(join(assetsDir, "ptpl-img.png"), Buffer.from(PNGa, "base64"));
+  const imgDeck = await slidesToPptx({ ...fixtureDoc, content: "# 封面\n副\n---\n## 配图\n![x](/aiteam/assets/ptpl-img.png)\n要点" });
+  const metaI = await parseTemplate(imgDeck);
+  const picSlot = (metaI.images || []).find((s) => s.type === "pic" && s.fillable);
+  const beforeMI = await innerMap(imgDeck);
+  const editedI = picSlot ? await applyTemplateEdits(imgDeck, [], [{ slideIdx: picSlot.slideIdx, imageIdx: picSlot.imageIdx, dataBase64: PNGb, ext: "png" }]) : imgDeck;
+  const zI = await JSZip.loadAsync(editedI);
+  const mediaN = Object.keys(zI.files).filter((p) => /^ppt\/media\/.+\.(png|jpg|jpeg)$/i.test(p)).length;
+  const ctI = await zI.file("[Content_Types].xml").async("string");
+  const metaI2 = await parseTemplate(editedI);
+  const afterMI = await innerMap(editedI);
+  const masterMI = Object.keys(beforeMI).filter((p) => !/slides\/slide\d+\.xml$/.test(p) && beforeMI[p] !== afterMI[p]);
+  check("PTPL-IMG", "模板换图：解析出图片位 + 换图(新 media + Content_Types png) + 重解析仍在 + 母版/版式/主题不变",
+    !!picSlot && mediaN >= 2 && /Extension="png"/i.test(ctI) && (metaI2.images || []).some((s) => s.type === "pic") && masterMI.length === 0,
+    `图片位=${!!picSlot} media=${mediaN} ct=${/Extension="png"/i.test(ctI)} master改=${masterMI.length}`);
 }
 
 // ENV1 stdio MCP 环境变量：值入库（仅服务端），sanitize 只回 key 名、绝不下发值（博查 BOCHA_API_KEY 用例）
@@ -440,6 +674,20 @@ try {
     check("REG1", "预设目录可读非空 + registry 无 token + mcp 列表 auth_token 脱敏", hasMcp && hasSkills && noTokenInRegistry && sanitized);
   }
 
+  // UP1 上传来源文档：txt 直读入库为 kind=source、含内容；不支持类型被拒（multipart 走 multer，非 markitdown 路径）
+  {
+    const fd = new FormData();
+    fd.append("file", new Blob(["这是上传的来源文本 UPLOADMARK42，供定向润色。"], { type: "text/plain" }), "src.txt");
+    const r = await fetch(`${BASE}/uploads`, { method: "POST", headers: { Cookie: sessionCookie }, body: fd });
+    const doc = await r.json().catch(() => ({}));
+    const fd2 = new FormData();
+    fd2.append("file", new Blob(["MZ..."], { type: "application/octet-stream" }), "evil.exe");
+    const bad = await fetch(`${BASE}/uploads`, { method: "POST", headers: { Cookie: sessionCookie }, body: fd2 });
+    check("UP1", "上传来源：txt 入库为 source+含内容；不支持类型(.exe)被拒",
+      r.ok && doc.kind === "source" && String(doc.content || "").includes("UPLOADMARK42") && !bad.ok,
+      `ok=${r.ok} kind=${doc.kind} badRejected=${!bad.ok}`);
+  }
+
   // G2 MCP 容错（坏 URL 测试应报错不卡死）
   {
     const bad = (await J("/mcp-servers", { method: "POST", body: JSON.stringify({ name: "bad", kind: "http", url: "https://invalid.example.com/mcp" }) })).body;
@@ -502,6 +750,41 @@ try {
       `${buf.length} bytes`);
   }
 
+  // PTPL-HTTP 上传 .pptx 模板就地改图文（端到端走 HTTP/鉴权/owner）：POST /templates 解析+持久化 → POST /template-export 改文本出 pptx
+  {
+    const { slidesToPptx } = await import(join(root, "server/dist/pptx.js"));
+    const { parseTemplate } = await import(join(root, "server/dist/pptx-template.js"));
+    const fixture = await slidesToPptx({
+      id: "h", owner_id: "o", channel_id: null, task_id: null, agent_id: null, title: "夹具", kind: "slides",
+      version: 1, superseded_by: null, created_at: 0, updated_at: 0,
+      content: ["# 封面ECHO", "副标题", "---", "## 第二页FOXTROT", "- 要点"].join("\n"),
+    });
+    const fd = new FormData();
+    fd.append("file", new Blob([fixture]), "brand.pptx");
+    const up = await fetch(`${BASE}/templates`, { method: "POST", headers: { Cookie: sessionCookie }, body: fd });
+    const doc = await up.json();
+    const meta = doc.template_meta ? JSON.parse(doc.template_meta) : { slots: [] };
+    const slot = meta.slots?.find((s) => s.text.includes("封面ECHO"));
+    // 非 .pptx 应被拒
+    const fdBad = new FormData();
+    fdBad.append("file", new Blob(["x"]), "a.txt");
+    const badRej = !(await fetch(`${BASE}/templates`, { method: "POST", headers: { Cookie: sessionCookie }, body: fdBad })).ok;
+    // 就地改文本导出
+    let exportOk = false, deltaIn = false;
+    if (slot) {
+      const exp = await fetch(`${BASE}/documents/${doc.id}/template-export`, {
+        method: "POST", headers: { Cookie: sessionCookie, "Content-Type": "application/json" },
+        body: JSON.stringify({ edits: [{ slideIdx: slot.slideIdx, shapeIdx: slot.shapeIdx, paraIdx: slot.paraIdx, newText: "封面改GOLF" }] }),
+      });
+      const out = Buffer.from(await exp.arrayBuffer());
+      exportOk = exp.ok && out[0] === 0x50 && out[1] === 0x4b; // PK
+      if (exportOk) { const m2 = await parseTemplate(out); deltaIn = !!m2.slots.find((s) => s.text.includes("封面改GOLF")); }
+    }
+    check("PTPL-HTTP", "上传模板端到端：POST /templates 入库 kind=template+槽位清单+持久化 / 非pptx拒 / template-export 改文本出可用 pptx",
+      up.ok && doc.kind === "template" && doc.binary_format === "pptx" && !!doc.original_blob_path && (meta.slots?.length > 0) && !!slot && badRej && exportOk && deltaIn,
+      `kind=${doc.kind} 槽=${meta.slots?.length} 非pptx拒=${badRej} 导出=${exportOk} delta=${deltaIn}`);
+  }
+
   // Q2 图像生成供应商配置：key 只存服务端
   {
     const saved = (await J("/image-provider", { method: "PUT", body: JSON.stringify({ api_key: "img-secret-y", model: "doubao-seedream-5-0-260128" }) })).body;
@@ -529,8 +812,8 @@ try {
     check("U2", "工作区快照导出", exp.ok && (await exp.text()).includes("# AITeam 工作区快照"));
     const a1 = (await J("/agents/from-template", { method: "POST", body: JSON.stringify({ template_id: "analyst" }) })).body;
     const a2 = (await J("/agents/from-template", { method: "POST", body: JSON.stringify({ template_id: "analyst" }) })).body;
-    check("T1", "角色模板：12 个目录 + 实例化幂等",
-      (await J("/agent-templates")).body.length === 12 && a1.id === a2.id);
+    check("T1", `角色模板：${AGENT_TEMPLATES.length} 个目录 + 实例化幂等`,
+      (await J("/agent-templates")).body.length === AGENT_TEMPLATES.length && a1.id === a2.id);
     const nc = (await J("/channels", { method: "POST", body: JSON.stringify({ name: "回归tmp", agent_ids: [] }) })).body;
     const renamed = (await J(`/channels/${nc.id}`, { method: "PATCH", body: JSON.stringify({ name: "回归renamed" }) })).body;
     const deleted = (await J(`/channels/${nc.id}`, { method: "DELETE" })).ok;

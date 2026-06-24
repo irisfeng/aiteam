@@ -88,9 +88,13 @@ export interface Doc {
   agent_id: string | null;
   title: string;
   content: string;
-  kind: "report" | "slides" | "sheet" | "html";
+  kind: "report" | "slides" | "sheet" | "html" | "source" | "template";
   version: number;
   superseded_by: string | null;
+  /** kind=template：来源格式(如 'pptx')、原二进制路径、槽位清单 JSON(TemplateMeta)；其余为 null/缺省 */
+  binary_format?: string | null;
+  original_blob_path?: string | null;
+  template_meta?: string | null;
   created_at: number;
   updated_at: number;
 }

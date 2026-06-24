@@ -3,9 +3,10 @@ import * as echarts from "echarts";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useWorkspace } from "../store";
-import { api } from "../api";
+import { api, API_BASE } from "../api";
 import type { Doc } from "../types";
 import { AgentAvatar } from "./Avatar";
+import { TemplateEditor } from "./TemplateEditor";
 
 function fmt(ts: number) {
   return new Date(ts).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
@@ -19,6 +20,10 @@ export function docKindMeta(kind: Doc["kind"]) {
       return { icon: "📊", label: "数据表", ext: ".csv", mime: "text/csv", hint: "CSV，可导入 Excel" };
     case "html":
       return { icon: "🌐", label: "网页", ext: ".html", mime: "text/html", hint: "单文件 HTML，沙箱预览，可下载本地打开" };
+    case "source":
+      return { icon: "📎", label: "来源", ext: ".md", mime: "text/markdown", hint: "上传的来源文档（已转 Markdown），供 AI 同事定向润色时 grounding" };
+    case "template":
+      return { icon: "🪄", label: "模板", ext: ".pptx", mime: "application/vnd.openxmlformats-officedocument.presentationml.presentation", hint: "上传的 .pptx 模板：逐槽改图文、保留原设计后导出可编辑 pptx" };
     default:
       return { icon: "📄", label: "报告", ext: ".md", mime: "text/markdown", hint: "Markdown" };
   }
@@ -305,24 +310,28 @@ export function DocViewerModal({ doc, onClose }: { doc: Doc; onClose: () => void
           <span className="text-[12px] text-ink-3">
             {author ? `${author.emoji} ${author.name}` : "用户"} · {fmt(doc.created_at)}
           </span>
-          <button
-            onClick={() => download(doc)}
-            className="ml-auto rounded-lg border border-line px-2.5 py-1 text-[12px] text-ink-2 hover:bg-sel"
-            title={meta.hint}
-          >
-            ⬇{doc.kind === "html" ? " .html" : doc.kind === "sheet" && !doc.content.trimStart().startsWith("|") ? " .csv" : " .md"}
-          </button>
+          {doc.kind === "template" ? (
+            <span className="ml-auto text-[11.5px] text-ink-3">编辑与导出见下方面板</span>
+          ) : (
+            <button
+              onClick={() => download(doc)}
+              className="ml-auto rounded-lg border border-line px-2.5 py-1 text-[12px] text-ink-2 hover:bg-sel"
+              title={meta.hint}
+            >
+              ⬇{doc.kind === "html" ? " .html" : doc.kind === "sheet" && !doc.content.trimStart().startsWith("|") ? " .csv" : " .md"}
+            </button>
+          )}
           {doc.kind === "slides" && (
             <a
-              href={`/api/documents/${doc.id}/pptx`}
+              href={`${API_BASE}/documents/${doc.id}/pptx`}
               className="rounded-lg border border-accent/50 px-2.5 py-1 text-[12px] font-medium text-accent hover:bg-accent-soft"
               title="导出真 .pptx：可编辑文本、主题配色、讲者备注、嵌入配图，PowerPoint/WPS/Keynote 直接打开"
             >
               ⬇ .pptx
             </a>
           )}
-          {/* html 交付物内容是模型生成的不可信 HTML：禁走 exportWord/printDoc 的 document.write 同源路径（防存储型 XSS），只允许下载文件在 null 源打开 */}
-          {doc.kind !== "html" && (
+          {/* html 交付物内容是模型生成的不可信 HTML：禁走 exportWord/printDoc 的 document.write 同源路径（防存储型 XSS），只允许下载文件在 null 源打开。template 用专属编辑器导出，不走通用 Word/PDF。 */}
+          {doc.kind !== "html" && doc.kind !== "template" && (
             <>
               <button
                 onClick={() => contentRef.current && exportWord(doc.title, contentRef.current.innerHTML)}
@@ -343,7 +352,9 @@ export function DocViewerModal({ doc, onClose }: { doc: Doc; onClose: () => void
           <button onClick={onClose} className="rounded px-1.5 text-ink-3 hover:bg-sel">✕</button>
         </div>
         <div ref={contentRef} className={`flex-1 overflow-y-auto px-6 py-4 ${doc.kind === "slides" ? "bg-sel/40" : ""}`}>
-          {doc.kind === "slides" ? (
+          {doc.kind === "template" ? (
+            <TemplateEditor doc={doc} />
+          ) : doc.kind === "slides" ? (
             <SlidesPreview content={doc.content} />
           ) : doc.kind === "sheet" ? (
             <SheetTable content={doc.content} />
@@ -463,6 +474,8 @@ const DOC_KINDS: { k: "all" | Doc["kind"]; label: string }[] = [
   { k: "slides", label: "🖥 演示" },
   { k: "sheet", label: "📊 数据表" },
   { k: "html", label: "🌐 网页" },
+  { k: "source", label: "📎 来源" },
+  { k: "template", label: "🪄 模板" },
 ];
 
 export function DocsView() {
@@ -471,6 +484,35 @@ export function DocsView() {
   const [kind, setKind] = useState<"all" | Doc["kind"]>("all");
   const [q, setQ] = useState("");
   const [showMock, setShowMock] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadingTpl, setUploadingTpl] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const tplRef = useRef<HTMLInputElement>(null);
+
+  async function onUpload(file: File) {
+    setUploading(true);
+    try {
+      await api.uploadDoc(file); // 成功后经 WS doc:upsert 自动进文档列表
+      setKind("source"); // 切到"来源"筛选，便于用户立刻看到刚上传的
+    } catch (err) {
+      window.alert("上传失败：" + ((err as Error)?.message ?? err));
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function onUploadTemplate(file: File) {
+    setUploadingTpl(true);
+    try {
+      const doc = await api.uploadTemplate(file); // 解析槽位 + 持久化原件 → kind=template
+      setKind("template");
+      setOpenDoc(doc); // 直接打开模板编辑器
+    } catch (err) {
+      window.alert("模板上传失败：" + ((err as Error)?.message ?? err));
+    } finally {
+      setUploadingTpl(false);
+    }
+  }
 
   const mockDocs = ws.documents.filter(isMockDoc);
   let visible = showMock ? ws.documents : ws.documents.filter((d) => !isMockDoc(d));
@@ -508,6 +550,36 @@ export function DocsView() {
       <header className="flex flex-wrap items-center gap-2 border-b border-line px-5 py-3">
         <h1 className="text-[15px] font-semibold">文档</h1>
         <span className="hidden text-[12px] text-ink-3 lg:inline">AI 同事交付的报告、演示文稿与数据表都沉淀在这里</span>
+        <button
+          onClick={() => fileRef.current?.click()}
+          disabled={uploading}
+          className="rounded-lg border border-line px-2.5 py-1 text-[12px] text-ink-2 hover:bg-sel disabled:opacity-50"
+          title="上传文档(PDF/Word/PPT/Excel/txt/md…)作为「来源」，供 AI 同事定向润色时 grounding"
+        >
+          {uploading ? "上传中…" : "📎 上传来源"}
+        </button>
+        <input
+          ref={fileRef}
+          type="file"
+          hidden
+          accept=".txt,.md,.markdown,.csv,.tsv,.json,.log,.yaml,.yml,.xml,.pdf,.docx,.doc,.pptx,.ppt,.xlsx,.xls,.epub,.html,.htm,.png,.jpg,.jpeg,.gif,.webp"
+          onChange={(e) => { const file = e.currentTarget.files?.[0]; e.currentTarget.value = ""; if (file) void onUpload(file); }}
+        />
+        <button
+          onClick={() => tplRef.current?.click()}
+          disabled={uploadingTpl}
+          className="rounded-lg border border-accent/50 px-2.5 py-1 text-[12px] font-medium text-accent hover:bg-accent-soft disabled:opacity-50"
+          title="上传现成 .pptx 品牌模板：逐槽改里面的图文、保留原设计后导出可编辑 pptx"
+        >
+          {uploadingTpl ? "解析中…" : "🪄 上传模板"}
+        </button>
+        <input
+          ref={tplRef}
+          type="file"
+          hidden
+          accept=".pptx"
+          onChange={(e) => { const file = e.currentTarget.files?.[0]; e.currentTarget.value = ""; if (file) void onUploadTemplate(file); }}
+        />
         <div className="ml-auto flex flex-wrap items-center gap-1.5">
           {DOC_KINDS.map(({ k, label }) => (
             <button

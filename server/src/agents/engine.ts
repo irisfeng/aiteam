@@ -41,7 +41,7 @@ import {
 } from "../db.js";
 import { broadcast } from "../bus.js";
 import { currentOwner, withOwner } from "../ownerScope.js";
-import { parseSlides } from "../pptx.js";
+import { parseSlides, slidesManifest } from "../pptx.js";
 import { callMcpTool, isMcpTool, mcpToolDefs, mcpToolPrefixReady, mcpSafetyGate, searchQuerySignature } from "./mcp.js";
 import { IMAGE_TOOL, generateImage, imageGenAvailable } from "./images.js";
 import { getSkillTemplate } from "../registry.js";
@@ -109,7 +109,7 @@ export function validateDocContent(kind: "report" | "slides" | "sheet" | "html",
     const pages = parseSlides(content);
     if (pages.length < 1) return "slides 没有解析出任何有效页面。";
     if (pages.every((p) => !p.title)) return "slides 每页应有标题（以 # 开头），当前未检测到任何页标题。";
-    return null;
+    return unsourcedNumbersHint(content);
   }
   if (kind === "sheet") {
     if (c.startsWith("|")) return null; // Markdown 表格是另一种合法形式，放行
@@ -124,7 +124,21 @@ export function validateDocContent(kind: "report" | "slides" | "sheet" | "html",
     }
     return null;
   }
-  return null; // report 仅要求非空
+  return unsourcedNumbersHint(c); // report：格式无要求，但多处量化数据需有来源（防对外交付物编造数字）
+}
+
+/**
+ * 内容质量软门（C2）：交付物含多处量化数据（市场规模/占比/金额等）却零来源标注 → 返回自纠提示。
+ * 阈值保守（≥5 处且全文无任何来源/示意标注才触发）以免误伤；接受"示意值/待核实/估算"等显式标注豁免。
+ * 仅 report/slides 适用（sheet/html 由各自分支放行）。这是"有标注"而非"为真"的下限，须配 verifier/接地（后续批次）。
+ */
+function unsourcedNumbersHint(c: string): string | null {
+  const quant = (c.match(/\d[\d.,]*\s*(?:亿元|万元|亿|万|％|%|倍|元|美元|美金|\$|￥|¥)/g) || []).length;
+  if (quant < 5) return null;
+  const hasSource = /(https?:\/\/|来源|出处|资料来源|引用自|参见|据[^。；\n]{0,12}(报告|数据|统计|调研|测算|官方|官网|披露|年报|季报|白皮书|研究院|咨询)|\[\d+\])/.test(c);
+  const exempt = /(示意值|示意数据|示例数据|仅供示意|占位数据|待核实|粗略估算|假设场景)/.test(c);
+  if (hasSource || exempt) return null;
+  return `检测到约 ${quant} 处量化数据（市场规模 / 占比 / 金额等）但全文无任何来源标注。请为关键数字补来源（链接 / 出处 /“据 X 报告”），无法核实的改写为“示意值，待核实”或删去——对外交付物里的无源数字会损害可信度。`;
 }
 
 const envKey = process.env.ANTHROPIC_API_KEY;
@@ -477,10 +491,15 @@ async function runTaskWork(agent: Agent, taskId: string) {
     return;
   }
 
-  // 任务必须有可见的工作频道；没有则落到首个频道
+  // 任务必须有可见的工作频道。channel_id 丢失 / 指向已删频道时，按优先级兜底——
+  // 绝不盲目落到"首个频道(#general)"，否则项目任务会把过程消息窜到无关频道（实测的"窜台"）。
   let channel = task.channel_id ? getChannel(task.channel_id) : undefined;
   if (!channel) {
-    channel = listChannels().find((c) => c.kind === "channel");
+    const proj = task.project_id ? getProject(task.project_id) : undefined;
+    channel =
+      (proj?.channel_id ? getChannel(proj.channel_id) : undefined) ?? // 1) 项目立项所在频道（最贴合）
+      listChannels().find((c) => c.kind === "channel" && channelAgents(c).some((a) => a.id === agent.id)) ?? // 2) 负责人所在频道
+      listChannels().find((c) => c.kind === "channel"); // 3) 最后兜底
     if (!channel) return;
     task = updateTask(task.id, { channel_id: channel.id }) ?? task;
     broadcast({ type: "task:upsert", payload: task });
@@ -575,8 +594,8 @@ export function buildWorkBrief(task: Task, channel: Channel): string {
     `</transcript>`,
     ``,
     `工作要求：`,
-    `1. 开工前先查阅你的长期记忆（见系统上下文），其中"核实过的事实/通用规则"优先遵循；`,
-    `2. 如需要事实、数据或最新外部信息，先用 web_search / web_fetch 或可用插件调研，不要凭空编造；外部检索按次计费——先想清楚要查什么、合并关键词，单任务尽量不超过 3 次；能从已有文档（read_document）获得的不要重复检索。研究/写作类任务按"多视角列问题 → 搭大纲 → 成文"推进，重要事实注明来源；`,
+    `1. 开工前先查阅你的长期记忆（见系统上下文，"核实过的事实/通用规则"优先遵循），并扫一遍工作区文档库（见上下文文档列表），有相关材料先用 read_document 复用，不要从零臆造；`,
+    `2. 如需要事实、数据或最新外部信息，先用 web_search / web_fetch 或可用插件调研，不要凭空编造；外部检索按次计费——先想清楚要查什么、合并关键词，单任务尽量不超过 3 次；能从已有文档（read_document）获得的不要重复检索。研究/写作类任务按"多视角列问题 → 搭大纲 → 成文"推进，重要事实注明来源；找不到可靠来源的关键数字，宁可写"示意值，待核实"或不写，绝不编造看似精确的数字（市场规模/占比/ROI 等）；仅国内模型部署下服务端 web_search 可能不可用且其结果不被多轮保留——若已配检索类插件（如 web-search-prime / 博查），优先用插件检索（结果可留存、可引用）；`,
     `3. 用 write_document 产出完整、可直接使用的交付物，按任务性质选格式 kind：报告/方案用 report，需要演示就交 slides（Marp 分页），数据/报表交 sheet（CSV），网页/落地页/前端原型/HTML 演示(横向翻页 deck)/可交互可视化交 html（单文件、样式与脚本内联、禁外链 script 与内联事件处理器，可在预览区实时查看）——必要时可以多份组合（如 report + slides）；正文要详尽，逐条覆盖验收标准；${imageGenAvailable() ? "需要视觉表达（封面/概念示意/PPT 配图/图文混排）时可用 generate_image 生成 1-2 张点睛配图，把返回的 Markdown 图片行原样放进 report 或 html 正文（数据图表交 sheet 即可，不要用文生图画图表）；" : ""}`,
     `4. 交付前用 save_memory 记录至多 1 条本次任务沉淀的「核实过的事实」或「通用规则」（不要记流水账）；`,
     `5. 交付物正文一律结论先行（开头给核心结论 / TL;DR）、要点 MECE，关键事实与数据注明来源和检索日期；并在回复正文附「交付自查表」：逐条列出验收标准 → 满足 / 不满足 → 证据位置（章节或文档内定位），最后一句说明需要谁跟进什么；`,
@@ -615,6 +634,26 @@ export const NO_VERDICT_FALLBACK: { result: "revise"; reasons: string } = {
   reasons: "校验者未产出结构化裁决，按未通过处理。请补全交付内容与逐条自查表后重新提交。",
 };
 
+/** 按交付物类型选对口校验者（V3·按 kind 路由）：
+ *  视觉物(slides/html)→设计审核优先；内容物(report/sheet)→校对审核优先；代码类→代码评审。
+ *  ——避免把 PPT/方案的验收默认丢给"代码评审"（不对口）。都不在则回退 创建者 / 任意他人 / 本人(solo 自检)。
+ *  纯函数，导出供回归测试。 */
+export function pickVerifier(
+  others: Agent[],
+  kind: string | null | undefined,
+  createdBy: string | null,
+  worker: Agent
+): Agent {
+  const sig = (a: Agent) => `${a.name} ${a.role}`;
+  const design = (a: Agent) => /设计审核|视觉|design/i.test(sig(a));
+  const content = (a: Agent) => /校对|审核|质检|复核|事实|proofread|qa/i.test(sig(a)) && !/代码评审|code/i.test(a.name);
+  const code = (a: Agent) => /代码评审|code.?review/i.test(sig(a));
+  const visual = kind === "slides" || kind === "html";
+  const order = visual ? [design, content, code] : [content, design, code];
+  for (const pred of order) { const v = others.find(pred); if (v) return v; }
+  return others.find((a) => a.id === createdBy) ?? others[0] ?? worker;
+}
+
 async function runVerification(
   worker: Agent,
   channel: Channel,
@@ -626,13 +665,10 @@ async function runVerification(
   if (isMock()) return { result: "pass", reasons: "" }; // 全局 Mock 跳过验收
 
   const others = channelAgents(channel).filter((a) => a.id !== worker.id);
-  if (others.length === 0) return { result: "pass", reasons: "" };
-  const verifier =
-    others.find((a) => a.name.includes("评审")) ??
-    others.find((a) => a.id === task.created_by) ??
-    others[0];
+  // SOLO/DM（无其他同事）不再无条件放行（V1）：由本人在净上下文里做 fail-closed 自校验。
+  const soloSelfCheck = others.length === 0;
 
-  // 锚定该任务的「当前版」交付物（listDocuments 已只返当前版）：DeepSeek 乱序/多写时也验对版本，
+  // 先锚定该任务的「当前版」交付物（listDocuments 已只返当前版），再按其 kind 选对口校验者。
   // 优先 report，否则取最新当前版；兜底用本轮 createdDocIds 末位。
   const taskDocs = listDocuments().filter((d) => d.task_id === taskId);
   const doc =
@@ -641,11 +677,24 @@ async function runVerification(
     (docIds.length > 0 ? getDocument(docIds[docIds.length - 1]) : undefined);
   if (!doc) return { result: "revise", reasons: "没有找到交付物文档：必须用 write_document 提交正式交付物。" };
 
-  audit(channel.id, `🔎 ${verifier.name} 开始验收任务「${task.title}」的交付物`);
+  // V3：按交付物类型选对口校验者（视觉物→设计审核 / 内容物→校对审核 / 代码类→代码评审），团队永不自评。
+  const verifier = pickVerifier(others, doc.kind, task.created_by, worker);
+
+  audit(channel.id, `🔎 ${verifier.name} 开始${soloSelfCheck ? "自检" : "验收"}任务「${task.title}」的交付物`);
+
+  // V2：slides 交付物附"渲染清单"（机器读出的页数/要素），让验收对照"声称 vs 实产"、抓静默丢页与表演性自查。
+  const renderInfo =
+    doc.kind === "slides"
+      ? (() => {
+          const m = slidesManifest(doc.content);
+          return `渲染清单（机器读出，用于核对"声称 vs 实产"）：源页 ${m.sourcePages}、实渲幻灯片 ${m.renderedSlides}（含续页 ${m.continuationSlides}）、数字卡 ${m.statCards}、表格 ${m.tables}、配图 ${m.images}、带讲者备注页 ${m.pagesWithNotes}/${m.sourcePages}。`;
+        })()
+      : "";
 
   // 关键：干净上下文 —— 只给 rubric + 交付物，不带频道闲聊，避免被讨论氛围带偏
   const prompt = [
     `你是本次交付的校验者。请独立、严格地核验以下交付物是否满足任务要求。`,
+    soloSelfCheck ? `（本次无其他同事可担任校验者，由你对自己的交付做自检：请切换到挑剔的第三方视角，宁严勿松——这是交付前的唯一质量闸。）` : ``,
     ``,
     `任务：${task.title}`,
     `详情：${task.description || "（无）"}`,
@@ -657,6 +706,13 @@ async function runVerification(
     `<deliverable>`,
     stripLoneSurrogates(doc.content.slice(0, 16000)),
     `</deliverable>`,
+    renderInfo,
+    ``,
+    `核验时另须执行（不可放水）：`,
+    `· 量化主张须有来源：正文中市场规模 / 占比 / 金额 / ROI 等关键数字，若无来源标注且未标"示意值/待核实"，判 revise 并逐条点名（C3）；`,
+    doc.kind === "slides"
+      ? `· 对照上面的渲染清单：若交付或自查表声称的页数 / 要素（页数、表格、数字卡、讲者备注覆盖）与渲染清单明显不符，判 revise；slides→pptx 不支持自定义字号 / CSS 变量，自查表不得声称这类渲染器产不出的属性（V2）。`
+      : ``,
     ``,
     `请逐条给出核验结论（满足/不满足及理由），随后必须调用 submit_verdict 提交最终裁决：`,
     `- 全部关键标准满足 → result: "pass"`,
@@ -904,6 +960,54 @@ export function readSkillBody(id: string): string {
   return out;
 }
 
+/**
+ * 一次性结构化补全（无工具、无流式、非 agent 循环）：供「模板就地改图文·AI 按来源产文案」等场景，
+ * 复用现有供应商/模型解析（含用户自托管的兼容端点）。须在 owner 作用域内调用（listAgents/解析皆 owner 隔离）。
+ * 返回纯文本，调用方自行解析（如 JSON）。失败抛错（无同事/无供应商/调用异常）。
+ */
+export async function oneShotComplete(system: string, userPrompt: string, maxTokens = 4000): Promise<string> {
+  const agent = listAgents()[0];
+  if (!agent) throw new Error("工作区没有可用的 AI 同事（模型通道）");
+  const rt = resolveRuntime(agent, {});
+  if (!rt.client) throw new Error("未配置可用的模型供应商（设置 → 模型供应商）");
+  const resp = await rt.client.messages.create({
+    model: rt.model,
+    max_tokens: Math.min(maxTokens, rt.maxTokens),
+    system,
+    messages: [{ role: "user", content: userPrompt }],
+  });
+  return resp.content.filter((b): b is Anthropic.TextBlock => b.type === "text").map((b) => b.text).join("").trim();
+}
+
+// 交付与导出红线：注入每一轮动态上下文（覆盖所有现存/新建同事、聊天与任务两条路径），
+// 因为 agent.system_prompt 是建号时烘焙进 DB 的、改 SHARED_RULES 不影响存量同事。
+// 根除截图里"导出不可用 / 甩 CLI 给用户"那类臆造阻塞。
+const DELIVERY_RULES = `## 交付与导出（平台已内置，按此回答用户，不要臆造限制）
+- 交付物用 write_document 写入文档库后，用户在「文档」面板打开即可查看；其中 **slides 文档在查看页有一键「⬇ .pptx」按钮，导出的是可编辑的真 .pptx（PowerPoint/WPS/Keynote 直接打开，文本/表格/讲者备注均可编辑），完全内置、无需任何 MCP / 插件 / 命令行**。report/sheet 可导出 Markdown / CSV / Word，html 在预览区沙箱渲染。
+- 绝不要声称"导出不可用 / 依赖未就绪 / 需要 pptxgenjs 等服务"，也绝不要让用户自己去跑命令行（如 marp-cli）来导出——这些说法都是错的。
+- 用户问"在哪看 / 怎么导出"时，直接指引他到「文档」面板打开该文档、点标题栏的导出按钮（slides 点 ⬇ .pptx），不要把整篇正文倒进聊天。`;
+
+// 输入/上传途径红线（与交付红线同理）：纠正 agent 别承诺平台做不到的输入方式，尤其"贴图看图"。
+const INPUT_RULES = `## 用户给资料的途径（按此引导，别承诺做不到的）
+- 文件资料（PDF/Word/PPT/Excel/txt/md/csv 等）：用户可在**聊天输入框的 📎** 或「文档 → 📎 上传来源」上传；系统会**抽取其文本**存为「来源」文档，你用 read_document 读全文（解析非纯文本需管理员已启用 markitdown 插件）。
+- **截图 / 图片无法被读取**：系统只抽文本、不解析图像，模型也收不到图像像素——遇到界面/截图，请让用户**用文字描述**画面布局、字段、流程；不要让用户贴图、也不要声称你能看图。`;
+
+// 多人协作红线（团队频道）：目标级请求优先 start_project 拆解给多角色协作，而非一人包办——这是产品核心，别退化成单人。
+const COLLAB_RULES = `## 多人协作（团队频道的"目标级"请求，优先立项而非一人包办）
+- 当用户提出"完整解决方案 / 整套方案 / 对外演示 / 系统性多环节产出"这类**目标**（不是单点问答/小改）时，作为 Lead **优先用 start_project** 拆成带依赖的任务、分派给对口同事协作，不要自己从头做到尾。典型拆法：调研员查市场/竞品(带源) → 工程师做技术选型与架构 → 产品经理/解决方案助手整合方案(report) → PPT 助手做演示 slides → 校对审核/代码评审验收 → 你(Lead)汇总。
+- 判据：目标需要 ≥2 种专长、或含"调研+撰写+演示+把关"多环节 → **立项**；闲聊/答疑/小改 → 直接回复，别滥用立项。
+- 价值：每个环节由对口专家产出、并经独立验收，质量高于一人包办（也才会触发验收闭环）。
+- **别"讨论要不要立项"——判定该立就直接调 start_project，不要先开会对齐。**`;
+
+// 行动优先红线（最高优先级）：实测发现 agent 收到目标级请求时，倾向"开会讨论 + 抛澄清 + 等用户拍板"，
+// 三个目标 0/3 交付、十万 token 零产出。此规则压过下面任何"先澄清/先对齐"倾向，逼其直接产出。
+const ACTION_RULES = `## 行动优先（最高优先级，压过下方任何"先澄清/先对齐/等确认"的倾向）
+- 用户给的是**目标级请求**（要一个产出：代码/文章/方案/演示/分析等）→ **直接开干、直接交付**，不要停在讨论、也不要等用户拍板。
+- 多角色 / 多环节目标 → **立刻调 start_project（autonomy=auto）立项**，别先讨论"要不要立项"；规则就是立。
+- 单一交付物目标 → **直接 write_document 出一版**，把"我做了哪些合理假设、还有哪些待你确认"列在交付开头——让用户在成品上改，而不是先回答你一堆问题。
+- **禁止把"等用户确认 / 等老板拍板 / 先对齐再做"当作停下来的理由。** 最多问 1 个"不答就真的没法动手"的问题，且必须同时附上基于合理假设的草稿/方案。
+- 只有**对外发布、产生费用、不可逆 / 高风险**动作才走 request_approval；内部产出一律先做出来。`;
+
 function buildDynamicContext(agent: Agent, channel: Channel, focus = ""): string {
   const teammates = channelAgents(channel)
     .filter((a) => a.id !== agent.id)
@@ -928,14 +1032,21 @@ function buildDynamicContext(agent: Agent, channel: Channel, focus = ""): string
     year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
   }); // 分钟级粒度：秒级时间戳会破坏供应商的自动前缀缓存
   return [
+    // ① 稳定前缀：跨调用尽量逐字一致 → 命中第三方端点的自动前缀缓存（cache_read 计费约 1/10）。
+    //    勿在此之前放任何易变内容（时间/看板/文档），否则其后整段（含规则/技能/工具）都脱离缓存。
+    ACTION_RULES,
+    DELIVERY_RULES,
+    INPUT_RULES,
+    channel.kind !== "dm" ? COLLAB_RULES : "",
+    memory ? `## 你的长期记忆（先查阅，"核实过的事实/通用规则"优先遵循）\n${memory}` : "",
+    skillsBlock ? `## 已启用的技能（索引——需要某条的具体方法/步骤时用 read_skill(id) 取正文再遵循）\n${skillsBlock}` : "",
+    // ② 易变上下文置于最后：时间/看板/文档变动只破坏其自身之后，不再殃及上面的可缓存前缀。
     `## 当前工作区上下文`,
     `当前时间：${nowStr}（Asia/Shanghai）—— 涉及时间判断时以此为准`,
     `频道：#${channel.name}（${channel.kind === "dm" ? "与用户的私信" : "团队频道"}）`,
     teammates ? `频道内其他 AI 同事：\n${teammates}` : `频道内没有其他 AI 同事。`,
     tasks ? `频道任务看板：\n${tasks}` : `任务看板目前为空。`,
     docs ? `工作区文档（可用 read_document 阅读全文）：\n${docs}` : "",
-    memory ? `## 你的长期记忆（先查阅，"核实过的事实/通用规则"优先遵循）\n${memory}` : "",
-    skillsBlock ? `## 已启用的技能（索引——需要某条的具体方法/步骤时用 read_skill(id) 取正文再遵循）\n${skillsBlock}` : "",
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -1030,12 +1141,12 @@ const TOOLS: Anthropic.ToolUnion[] = [
   {
     name: "write_document",
     description:
-      "把一份正式交付物写入工作区文档库。文档应当完整、可直接使用，而不是片段。按交付物性质选择 kind：report=报告/PRD/方案（Markdown）；slides=演示文稿（Marp 约定：每页之间用单独一行 --- 分隔，首页为标题页，每页一个要点群，可直接生成 PPT）；sheet=表格/报表（标准 CSV：首行表头，逗号分隔，含逗号的字段用双引号包裹，可直接导入 Excel）；html=网页/落地页/前端原型/HTML 演示(横向翻页 deck)/可交互可视化（单文件 HTML，样式与脚本内联，可在预览区实时查看）。注意：返工时对同一任务、同一 kind 再次调用本工具，会作为该交付物的新版本覆盖旧版（旧版进历史、列表只显最新），所以请提交完整新版而非补丁；若确需在同一任务下保留多份并列文档，请用不同 kind 或开新任务。",
+      "把一份正式交付物写入工作区文档库。文档应当完整、可直接使用，而不是片段。按交付物性质选择 kind：report=报告/PRD/方案（Markdown）；slides=演示文稿（Marp：单独一行 --- 分页，首页标题页；**正文用 Markdown、不要写原始 HTML**；关键数字单独成行写 `值 :: 标签`（如 `268亿元 :: 市场规模`）→ 自动渲成数字卡；对比/选型用 Markdown 表格；只含一个 # 标题的页=章节幕页；讲者备注用 `<!-- note: 备注内容 -->`（内容写在注释里）；交付后用户在「文档」面板一键导出可编辑 .pptx，内置、无需 MCP/插件/命令行）；sheet=表格/报表（标准 CSV：首行表头，逗号分隔，含逗号的字段用双引号包裹，可直接导入 Excel）；html=网页/落地页/前端原型/HTML 演示(横向翻页 deck)/可交互可视化（单文件 HTML，样式与脚本内联，可在预览区实时查看）。注意：返工时对同一任务、同一 kind 再次调用本工具，会作为该交付物的新版本覆盖旧版（旧版进历史、列表只显最新），所以请提交完整新版而非补丁；若确需在同一任务下保留多份并列文档，请用不同 kind 或开新任务。",
     input_schema: {
       type: "object" as const,
       properties: {
         title: { type: "string", description: "文档标题" },
-        content: { type: "string", description: "完整正文：report 为 Markdown；slides 为 --- 分页的 Marp Markdown；sheet 为 CSV；html 为单文件 HTML（样式/脚本内联，禁外链 <script src> 与内联事件处理器 onload/onclick 等）" },
+        content: { type: "string", description: "完整正文：report 为 Markdown；slides 为 --- 分页的 Marp Markdown（纯 Markdown、禁原始 HTML；数字卡用 `值 :: 标签` 行、对比用表格、讲者备注用 `<!-- note: … -->`）；sheet 为 CSV；html 为单文件 HTML（样式/脚本内联，禁外链 <script src> 与内联事件处理器 onload/onclick 等）" },
         kind: { type: "string", enum: ["report", "slides", "sheet", "html"], description: "交付物格式，默认 report" },
       },
       required: ["title", "content"],
@@ -1044,7 +1155,7 @@ const TOOLS: Anthropic.ToolUnion[] = [
   {
     name: "read_skill",
     description:
-      "读取某个技能的完整方法正文（L2）。当工作区上下文的「已启用的技能」索引里有与当前任务相关的技能、你需要它的具体步骤/模板/参数时调用。能力型技能(capability)的正文会说明该调用哪个工具/MCP、参数怎么填、不可达时如何降级。skill_id 见技能索引中的 id。",
+      "读取某个技能的完整方法正文（L2）。当工作区上下文的「已启用的技能」索引里有与当前任务相关的技能、你需要它的具体步骤/模板/参数时调用。能力型技能(capability)的正文会说明该调用哪个工具/MCP、参数怎么填、不可达时如何降级。skill_id 见技能索引中的 id；也可传某技能正文里给出的『模板 id』（如『演示风格选择法』选定的 html-deck-* 精装模板）来按需单取该模板正文。",
     input_schema: {
       type: "object" as const,
       properties: { skill_id: { type: "string", description: "技能 id（取自上下文技能索引）" } },
@@ -1232,9 +1343,20 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
     }
     case "read_skill": {
       // 渐进式披露 L2/L3：按需拉技能正文 + 附带的可复用模板。只读、零计费（同步分支，不计 MCP_CALLS_PER_RUN）。
-      const sk = getSkill(String(input.skill_id));
-      if (!sk || !sk.enabled) return `未找到该技能或未启用（id: ${input.skill_id}）。`;
-      return stripLoneSurrogates(`【技能：${sk.name}】\n${readSkillBody(sk.id)}`);
+      const sid = String(input.skill_id);
+      const sk = getSkill(sid);
+      if (sk && sk.enabled) {
+        return stripLoneSurrogates(`【技能：${sk.name}】\n${readSkillBody(sk.id)}`);
+      }
+      // 回退：技能正文里以 id 直引的可复用模板（如『演示风格选择法』选定的某套精装模板）——按需单取一套，
+      // 避免把全部模板正文一次性灌进上下文（token 友好）。容忍 agent 误带 `tpl:` 前缀。
+      const tpl = getSkillTemplate(sid.startsWith("tpl:") ? sid.slice(4) : sid);
+      if (tpl) {
+        const longest = (tpl.content.match(/`+/g) ?? []).reduce((m, s) => Math.max(m, s.length), 0);
+        const fence = "`".repeat(Math.max(3, longest + 1));
+        return stripLoneSurrogates(`【模板：${tpl.name}】\n${tpl.desc}\n${fence}${tpl.lang}\n${tpl.content}\n${fence}`);
+      }
+      return `未找到该技能或未启用（id: ${sid}）。`;
     }
     case "request_approval": {
       const approval = createApproval({

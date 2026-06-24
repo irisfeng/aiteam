@@ -202,6 +202,11 @@ addColumnIfMissing("providers", "is_strong", "is_strong INTEGER NOT NULL DEFAULT
 addColumnIfMissing("documents", "version", "version INTEGER NOT NULL DEFAULT 1");
 addColumnIfMissing("documents", "superseded_by", "superseded_by TEXT");
 db.exec(`CREATE INDEX IF NOT EXISTS idx_documents_task_kind ON documents(task_id, kind, superseded_by)`);
+// kind="template"（上传 .pptx 模板就地改图文）：原二进制按 owner 隔离落盘（路径存这里，绝不挂 static），
+// 槽位清单(JSON)存 template_meta；binary_format 标来源格式（如 'pptx'）。普通文档这三列为 NULL。
+addColumnIfMissing("documents", "binary_format", "binary_format TEXT");
+addColumnIfMissing("documents", "original_blob_path", "original_blob_path TEXT");
+addColumnIfMissing("documents", "template_meta", "template_meta TEXT");
 // 技能系统 v2（渐进式披露 + 混合 method/capability 模型）：旧库补列，向后兼容。
 // 旧库的 content 仍是正文权威来源，read_skill 优先 body、回退 content；when_to_use 空时注入回退 desc。
 addColumnIfMissing("skills", "kind", "kind TEXT NOT NULL DEFAULT 'method'");          // method | capability
@@ -1063,12 +1068,18 @@ export interface Doc {
   agent_id: string | null;
   title: string;
   content: string;
-  /** report = Markdown 报告；slides = Marp 风格演示文稿（--- 分页）；sheet = CSV/表格数据 */
-  kind: "report" | "slides" | "sheet";
+  /** report=Markdown 报告；slides=Marp 演示(--- 分页)；sheet=CSV/表格；html=单文件网页；source=上传来源文档(定向润色用)；template=上传 .pptx 模板(就地改图文) */
+  kind: "report" | "slides" | "sheet" | "html" | "source" | "template";
   /** 版本号（1 起）；同 (task_id,kind) 返工再写即递增 */
   version: number;
   /** 被哪条新版取代的 doc id；NULL = 当前版 */
   superseded_by: string | null;
+  /** kind=template 专用：来源二进制格式（如 'pptx'）；其余文档为 null */
+  binary_format?: string | null;
+  /** kind=template 专用：原 .pptx 二进制的 owner 隔离磁盘路径（绝不挂 static）；其余为 null */
+  original_blob_path?: string | null;
+  /** kind=template 专用：槽位清单等元信息 JSON(TemplateMeta)；其余为 null */
+  template_meta?: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -1117,6 +1128,9 @@ export function createDocument(d: {
   title: string;
   content: string;
   kind?: Doc["kind"];
+  binary_format?: string | null;
+  original_blob_path?: string | null;
+  template_meta?: string | null;
 }): Doc {
   const kind = d.kind ?? "report";
   const taskId = d.task_id ?? null;
@@ -1145,11 +1159,14 @@ export function createDocument(d: {
       kind,
       version,
       superseded_by: null,
+      binary_format: d.binary_format ?? null,
+      original_blob_path: d.original_blob_path ?? null,
+      template_meta: d.template_meta ?? null,
       created_at: now(),
       updated_at: now(),
     };
     db.prepare(
-      "INSERT INTO documents (id, owner_id, channel_id, task_id, agent_id, title, content, kind, version, superseded_by, created_at, updated_at) VALUES (@id, @owner_id, @channel_id, @task_id, @agent_id, @title, @content, @kind, @version, @superseded_by, @created_at, @updated_at)"
+      "INSERT INTO documents (id, owner_id, channel_id, task_id, agent_id, title, content, kind, version, superseded_by, binary_format, original_blob_path, template_meta, created_at, updated_at) VALUES (@id, @owner_id, @channel_id, @task_id, @agent_id, @title, @content, @kind, @version, @superseded_by, @binary_format, @original_blob_path, @template_meta, @created_at, @updated_at)"
     ).run(doc);
     if (prevCurrentId) db.prepare("UPDATE documents SET superseded_by = ? WHERE id = ?").run(doc.id, prevCurrentId);
     return doc;
@@ -1210,6 +1227,10 @@ export function setUserRole(id: string, role: "admin" | "member"): User | undefi
 
 export function deleteDocument(id: string): void {
   db.prepare("DELETE FROM documents WHERE id = ? AND owner_id = ?").run(id, currentOwner());
+}
+/** kind=template 专用：创建后回填原二进制磁盘路径（文件名含 docId，故须先建文档再落盘再回填）。 */
+export function setDocumentBlobPath(id: string, blobPath: string): void {
+  db.prepare("UPDATE documents SET original_blob_path = ?, updated_at = ? WHERE id = ? AND owner_id = ?").run(blobPath, now(), id, currentOwner());
 }
 export function updateDocument(id: string, fields: { title?: string; content?: string }): Doc | undefined {
   const cur = getDocument(id);
