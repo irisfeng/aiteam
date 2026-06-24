@@ -1,4 +1,5 @@
-import { useRef, useState } from "react";
+import { useRef, useState, type ChangeEvent } from "react";
+import { api } from "../api";
 import type { Agent } from "../types";
 
 export function Composer({
@@ -19,7 +20,26 @@ export function Composer({
   const [value, setValue] = useState("");
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  async function onPickFile(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // 允许重复选同一文件
+    if (!file || uploading) return;
+    setUploading(true);
+    try {
+      const doc = await api.uploadDoc(file); // 抽文本 → 存为 source 文档（经 WS 自动进文档库，AI 可 read_document）
+      // 回填引用：让用户补一句指令再发；不自动发，避免误触发 AI 运行
+      setValue((v) => (v.trim() ? `${v.replace(/\s*$/, "")} [来源：《${doc.title}》] ` : `请基于来源文档《${doc.title}》：`));
+      requestAnimationFrame(() => textareaRef.current?.focus());
+    } catch (err) {
+      window.alert("上传失败：" + ((err as Error)?.message ?? err));
+    } finally {
+      setUploading(false);
+    }
+  }
 
   const candidates =
     mentionQuery === null
@@ -91,6 +111,22 @@ export function Composer({
         </div>
       )}
       <div className="flex items-end gap-2 rounded-xl border border-line bg-panel px-3 py-2 focus-within:border-accent/50">
+        <input
+          ref={fileRef}
+          type="file"
+          className="hidden"
+          accept=".txt,.md,.markdown,.csv,.tsv,.json,.log,.yaml,.yml,.xml,.pdf,.docx,.doc,.pptx,.ppt,.xlsx,.xls,.epub,.html,.htm"
+          onChange={onPickFile}
+        />
+        <button
+          type="button"
+          onClick={() => fileRef.current?.click()}
+          disabled={uploading}
+          title="上传来源文档（PDF/Word/PPT/Excel/txt 等，自动转文本供 AI 读取；截图无法读取，请用文字描述）"
+          className="shrink-0 rounded-lg px-1.5 py-1 text-[15px] leading-none text-ink-3 hover:bg-accent-soft hover:text-accent disabled:opacity-40"
+        >
+          {uploading ? "⏳" : "📎"}
+        </button>
         <textarea
           ref={textareaRef}
           value={value}

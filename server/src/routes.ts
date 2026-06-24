@@ -47,13 +47,15 @@ import { AGENT_TEMPLATES, getTemplate } from "./agents/templates.js";
 import multer from "multer";
 import { withOwner, ownerFromUserId } from "./ownerScope.js";
 import { dropConnection, testMcpServer, callMcpTool, mcpToolPrefixReady } from "./agents/mcp.js";
-import { UPLOAD_MAX_BYTES, TEXT_EXTS, DOC_EXTS, extOf, withTempFile } from "./uploads.js";
+import { UPLOAD_MAX_BYTES, TEXT_EXTS, DOC_EXTS, extOf, withTempFile, persistTemplateBinary, readTemplateBinary, removeTemplateBinary } from "./uploads.js";
+import { parseTemplate, applyTemplateEdits, type TemplateEdit, type ImageEdit } from "./pptx-template.js";
 import {
   createDocument,
   createProvider,
   deleteProvider,
   deleteRoutine,
   getDocument,
+  setDocumentBlobPath,
   getImageProvider,
   getProvider,
   listDocuments,
@@ -67,13 +69,14 @@ import {
 } from "./db.js";
 import { slidesToPptx } from "./pptx.js";
 import { MCP_REGISTRY, SKILL_PACK_REGISTRY } from "./registry.js";
-import { DEFAULT_IMAGE_BASE_URL } from "./agents/images.js";
+import { DEFAULT_IMAGE_BASE_URL, generateImageBytes } from "./agents/images.js";
 import {
   isMock,
   onMessage,
   onPlanResolved,
   onTaskAssigned,
   onTaskDelivered,
+  oneShotComplete,
   stopChannel,
   stopTask,
   teamStatus,
@@ -492,6 +495,130 @@ api.post("/uploads", uploadMw.single("file"), async (req, res) => {
   }
 });
 
+// 上传 .pptx 作为「模板」（就地改图文用）：解析槽位清单 + 持久化原二进制 + 存 kind="template" 文档。
+// 与 /uploads（来源文档，只抽文本即弃二进制）不同：模板必须保留原件供就地编辑。纯 jszip 解析，不需 markitdown。
+api.post("/templates", uploadMw.single("file"), async (req, res) => {
+  const f = (req as unknown as { file?: { originalname: string; buffer: Buffer } }).file;
+  if (!f) return res.status(400).json({ error: "未收到文件（表单字段名应为 file）" });
+  const ext = extOf(f.originalname);
+  if (ext !== ".pptx") return res.status(400).json({ error: "模板暂仅支持 .pptx（就地改图文）" });
+  const title = (f.originalname || "上传模板").slice(0, 200);
+  const userId = (req as AuthedRequest).userId;
+  if (!userId) return res.status(401).json({ error: "unauthorized" });
+  try {
+    const meta = await parseTemplate(f.buffer);
+    if (!meta.slideCount) return res.status(400).json({ error: "未能从该 .pptx 解析出幻灯片，可能文件损坏或为加密文件" });
+    // content 存一份可读的槽位摘要（满足非空约束 + 供 AI/搜索理解结构）
+    const digest = meta.slots.map((s) => `[第${s.slideIdx + 1}页·${s.kind}#${s.shapeIdx}.${s.paraIdx}] ${s.text}`).join("\n") || "(无可替换文本槽位)";
+    const doc = withOwner(ownerFromUserId(userId), () => {
+      const d = createDocument({
+        channel_id: null, agent_id: null, title, content: digest, kind: "template",
+        binary_format: "pptx", template_meta: JSON.stringify(meta),
+      });
+      const blobPath = persistTemplateBinary(d.owner_id, d.id, f.buffer, ".pptx");
+      setDocumentBlobPath(d.id, blobPath);
+      const fresh = getDocument(d.id)!;
+      broadcast({ type: "doc:upsert", payload: fresh });
+      return fresh;
+    });
+    res.json(doc);
+  } catch (err: unknown) {
+    res.status(502).json({ error: `模板解析失败：${String((err as Error)?.message ?? err).slice(0, 200)}` });
+  }
+});
+
+// 模板就地改图文 → 导出可编辑 .pptx：body { edits: [{slideIdx,shapeIdx,paraIdx,newText}] }。
+// 只改命中段落文本，不动母版/版式/主题/图片；保真度边界见 template_meta.warnings。
+api.post("/documents/:id/template-export", async (req, res) => {
+  const doc = getDocument(req.params.id);
+  if (!doc) return res.status(404).json({ error: "document not found" });
+  if (doc.kind !== "template" || !doc.original_blob_path) return res.status(400).json({ error: "该文档不是可就地编辑的 .pptx 模板" });
+  const editsRaw = (req.body?.edits ?? []) as unknown;
+  const edits: TemplateEdit[] = Array.isArray(editsRaw)
+    ? editsRaw.map((e) => ({
+        slideIdx: Number((e as TemplateEdit).slideIdx),
+        shapeIdx: Number((e as TemplateEdit).shapeIdx),
+        paraIdx: Number((e as TemplateEdit).paraIdx),
+        newText: String((e as TemplateEdit).newText ?? ""),
+      })).filter((e) => Number.isInteger(e.slideIdx) && Number.isInteger(e.shapeIdx) && Number.isInteger(e.paraIdx))
+    : [];
+  const imgRaw = (req.body?.imageEdits ?? []) as unknown;
+  const imageEdits: ImageEdit[] = Array.isArray(imgRaw)
+    ? imgRaw.map((e) => ({
+        slideIdx: Number((e as ImageEdit).slideIdx),
+        imageIdx: Number((e as ImageEdit).imageIdx),
+        dataBase64: String((e as ImageEdit).dataBase64 ?? "").replace(/^data:[^,]*,/, ""), // 容忍 data:URL 前缀
+        ext: String((e as ImageEdit).ext ?? "png"),
+      })).filter((e) => Number.isInteger(e.slideIdx) && Number.isInteger(e.imageIdx) && e.dataBase64)
+    : [];
+  try {
+    const original = readTemplateBinary(doc.original_blob_path);
+    const out = await applyTemplateEdits(original, edits, imageEdits);
+    const filename = encodeURIComponent(doc.title.replace(/\.pptx$/i, "").replace(/[\\/:*?"<>|]/g, "_") + "-已编辑.pptx");
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.presentationml.presentation");
+    res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${filename}`);
+    res.send(out);
+  } catch (err: unknown) {
+    res.status(500).json({ error: `导出失败：${String((err as Error)?.message ?? err).slice(0, 200)}` });
+  }
+});
+
+// AI 按来源为模板槽位产替换文案（逐槽确认前的「建议」）：body { sourceDocIds?: string[], brief?: string }。
+// 接地在来源文档、不臆造数字、保长度量级防破版、品牌固定文案(logo/版权/页码)不动；返回 suggestions 供前端逐槽确认。
+api.post("/documents/:id/template-propose", async (req, res) => {
+  const doc = getDocument(req.params.id);
+  if (!doc) return res.status(404).json({ error: "document not found" });
+  if (doc.kind !== "template" || !doc.template_meta) return res.status(400).json({ error: "该文档不是可就地编辑的 .pptx 模板" });
+  let slots: { slideIdx: number; shapeIdx: number; paraIdx: number; text: string; kind: string; phType?: string }[] = [];
+  try { slots = JSON.parse(doc.template_meta).slots ?? []; } catch { slots = []; }
+  if (!slots.length) return res.json({ suggestions: [] });
+  const brief = String(req.body?.brief ?? "").slice(0, 2000);
+  const ids: string[] = Array.isArray(req.body?.sourceDocIds) ? req.body.sourceDocIds.map(String) : [];
+  const sourceText = ids
+    .map((sid) => getDocument(sid))
+    .filter((d): d is NonNullable<typeof d> => !!d && d.kind === "source")
+    .map((d) => `《${d.title}》\n${d.content.slice(0, 6000)}`)
+    .join("\n\n---\n\n")
+    .slice(0, 16000);
+  const slotList = slots.map((s, i) => ({ id: i, page: s.slideIdx + 1, role: s.text ? undefined : (s.phType || "内容"), original: s.text || "(空占位，请按角色与来源生成)" }));
+  const system =
+    "你在为一份 PPT 模板逐槽改写文案。铁律：1) 只基于【来源】与【目标】改写，不臆造事实/数字，没有可靠数字就保留原占位或写『示意值，待核实』；" +
+    "2) 替换文本长度与原文同量级（标题短、正文略长亦可，但别暴涨，防破版）；3) 品牌固定文案（logo 文字、公司名、版权、页码、日期占位）不要改，直接不返回该槽；" +
+    "4) 只返回你确有把握、确需替换的槽位。仅输出 JSON，无任何解释或 markdown 围栏，格式：{\"edits\":[{\"id\":数字,\"text\":\"新文案\"}]}。";
+  const user =
+    (brief ? `【目标】${brief}\n\n` : "") +
+    (sourceText ? `【来源】\n${sourceText}\n\n` : "【来源】(无，仅按目标与原文语义润色，不得编造具体数字)\n\n") +
+    `【模板槽位】(id/页码/原文)\n${JSON.stringify(slotList, null, 0)}`;
+  try {
+    const raw = await oneShotComplete(system, user, 4000);
+    const jsonText = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
+    let parsed: { edits?: { id: number; text: string }[] } = {};
+    try { parsed = JSON.parse(jsonText); } catch { return res.status(502).json({ error: "AI 未返回可解析的 JSON，请重试或手动编辑" }); }
+    const suggestions = (parsed.edits ?? [])
+      .filter((e) => Number.isInteger(e.id) && e.id >= 0 && e.id < slots.length && typeof e.text === "string" && e.text.trim())
+      .map((e) => {
+        const s = slots[e.id];
+        return { idx: e.id, slideIdx: s.slideIdx, shapeIdx: s.shapeIdx, paraIdx: s.paraIdx, original: s.text, suggestion: e.text.trim() };
+      });
+    res.json({ suggestions });
+  } catch (err: unknown) {
+    res.status(502).json({ error: `AI 建议失败：${String((err as Error)?.message ?? err).slice(0, 200)}` });
+  }
+});
+
+// 为模板某图片位生成配图（Seedream）：返回 base64，前端预览并随 template-export 的 imageEdits 一起嵌入。
+api.post("/documents/:id/template-image-generate", async (req, res) => {
+  const doc = getDocument(req.params.id);
+  if (!doc) return res.status(404).json({ error: "document not found" });
+  if (doc.kind !== "template") return res.status(400).json({ error: "该文档不是 .pptx 模板" });
+  const prompt = String(req.body?.prompt ?? "").trim();
+  if (!prompt) return res.status(400).json({ error: "请填写配图描述（prompt）" });
+  const size = String(req.body?.size ?? "");
+  const r = await generateImageBytes(prompt, size);
+  if ("error" in r) return res.status(502).json({ error: r.error });
+  res.json(r); // { dataBase64, ext, assetUrl }
+});
+
 /** 某文档的全部历史版本（含已被取代的旧版），供前端「查看历史版本」抽屉。 */
 api.get("/documents/:id/versions", (req, res) => {
   const doc = getDocument(req.params.id);
@@ -504,7 +631,10 @@ api.delete("/documents/:id", (req, res) => {
   const doc = getDocument(req.params.id);
   if (!doc) return res.status(404).json({ error: "document not found" });
   const versions = doc.task_id ? listDocumentVersions(doc.task_id, doc.kind) : [doc];
-  for (const v of versions) deleteDocument(v.id);
+  for (const v of versions) {
+    if (v.kind === "template") removeTemplateBinary(v.original_blob_path); // 连带删原 .pptx 二进制，无孤儿文件
+    deleteDocument(v.id);
+  }
   broadcast({ type: "doc:delete", payload: { ids: versions.map((v) => v.id) } });
   res.json({ ok: true, deleted: versions.map((v) => v.id) });
 });

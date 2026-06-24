@@ -491,10 +491,15 @@ async function runTaskWork(agent: Agent, taskId: string) {
     return;
   }
 
-  // 任务必须有可见的工作频道；没有则落到首个频道
+  // 任务必须有可见的工作频道。channel_id 丢失 / 指向已删频道时，按优先级兜底——
+  // 绝不盲目落到"首个频道(#general)"，否则项目任务会把过程消息窜到无关频道（实测的"窜台"）。
   let channel = task.channel_id ? getChannel(task.channel_id) : undefined;
   if (!channel) {
-    channel = listChannels().find((c) => c.kind === "channel");
+    const proj = task.project_id ? getProject(task.project_id) : undefined;
+    channel =
+      (proj?.channel_id ? getChannel(proj.channel_id) : undefined) ?? // 1) 项目立项所在频道（最贴合）
+      listChannels().find((c) => c.kind === "channel" && channelAgents(c).some((a) => a.id === agent.id)) ?? // 2) 负责人所在频道
+      listChannels().find((c) => c.kind === "channel"); // 3) 最后兜底
     if (!channel) return;
     task = updateTask(task.id, { channel_id: channel.id }) ?? task;
     broadcast({ type: "task:upsert", payload: task });
@@ -629,6 +634,26 @@ export const NO_VERDICT_FALLBACK: { result: "revise"; reasons: string } = {
   reasons: "校验者未产出结构化裁决，按未通过处理。请补全交付内容与逐条自查表后重新提交。",
 };
 
+/** 按交付物类型选对口校验者（V3·按 kind 路由）：
+ *  视觉物(slides/html)→设计审核优先；内容物(report/sheet)→校对审核优先；代码类→代码评审。
+ *  ——避免把 PPT/方案的验收默认丢给"代码评审"（不对口）。都不在则回退 创建者 / 任意他人 / 本人(solo 自检)。
+ *  纯函数，导出供回归测试。 */
+export function pickVerifier(
+  others: Agent[],
+  kind: string | null | undefined,
+  createdBy: string | null,
+  worker: Agent
+): Agent {
+  const sig = (a: Agent) => `${a.name} ${a.role}`;
+  const design = (a: Agent) => /设计审核|视觉|design/i.test(sig(a));
+  const content = (a: Agent) => /校对|审核|质检|复核|事实|proofread|qa/i.test(sig(a)) && !/代码评审|code/i.test(a.name);
+  const code = (a: Agent) => /代码评审|code.?review/i.test(sig(a));
+  const visual = kind === "slides" || kind === "html";
+  const order = visual ? [design, content, code] : [content, design, code];
+  for (const pred of order) { const v = others.find(pred); if (v) return v; }
+  return others.find((a) => a.id === createdBy) ?? others[0] ?? worker;
+}
+
 async function runVerification(
   worker: Agent,
   channel: Channel,
@@ -641,17 +666,9 @@ async function runVerification(
 
   const others = channelAgents(channel).filter((a) => a.id !== worker.id);
   // SOLO/DM（无其他同事）不再无条件放行（V1）：由本人在净上下文里做 fail-closed 自校验。
-  // 弱于独立校验，但严格优于"others.length===0 → pass"那条免检漏口（截图全绿自查即源于此）。
   const soloSelfCheck = others.length === 0;
-  // V3：校验者选择去人名化——按"像评审/审核/质检的角色"软偏好，而非死磕"评审"二字；团队永不自评（worker 已排除）。
-  const reviewerLike = (a: Agent) => /评审|审核|校对|质检|复核|review|qa/i.test(`${a.name} ${a.role}`);
-  const verifier =
-    others.find(reviewerLike) ??
-    others.find((a) => a.id === task.created_by) ??
-    others[0] ??
-    worker;
 
-  // 锚定该任务的「当前版」交付物（listDocuments 已只返当前版）：DeepSeek 乱序/多写时也验对版本，
+  // 先锚定该任务的「当前版」交付物（listDocuments 已只返当前版），再按其 kind 选对口校验者。
   // 优先 report，否则取最新当前版；兜底用本轮 createdDocIds 末位。
   const taskDocs = listDocuments().filter((d) => d.task_id === taskId);
   const doc =
@@ -659,6 +676,9 @@ async function runVerification(
     taskDocs[0] ??
     (docIds.length > 0 ? getDocument(docIds[docIds.length - 1]) : undefined);
   if (!doc) return { result: "revise", reasons: "没有找到交付物文档：必须用 write_document 提交正式交付物。" };
+
+  // V3：按交付物类型选对口校验者（视觉物→设计审核 / 内容物→校对审核 / 代码类→代码评审），团队永不自评。
+  const verifier = pickVerifier(others, doc.kind, task.created_by, worker);
 
   audit(channel.id, `🔎 ${verifier.name} 开始${soloSelfCheck ? "自检" : "验收"}任务「${task.title}」的交付物`);
 
@@ -940,6 +960,25 @@ export function readSkillBody(id: string): string {
   return out;
 }
 
+/**
+ * 一次性结构化补全（无工具、无流式、非 agent 循环）：供「模板就地改图文·AI 按来源产文案」等场景，
+ * 复用现有供应商/模型解析（含用户自托管的兼容端点）。须在 owner 作用域内调用（listAgents/解析皆 owner 隔离）。
+ * 返回纯文本，调用方自行解析（如 JSON）。失败抛错（无同事/无供应商/调用异常）。
+ */
+export async function oneShotComplete(system: string, userPrompt: string, maxTokens = 4000): Promise<string> {
+  const agent = listAgents()[0];
+  if (!agent) throw new Error("工作区没有可用的 AI 同事（模型通道）");
+  const rt = resolveRuntime(agent, {});
+  if (!rt.client) throw new Error("未配置可用的模型供应商（设置 → 模型供应商）");
+  const resp = await rt.client.messages.create({
+    model: rt.model,
+    max_tokens: Math.min(maxTokens, rt.maxTokens),
+    system,
+    messages: [{ role: "user", content: userPrompt }],
+  });
+  return resp.content.filter((b): b is Anthropic.TextBlock => b.type === "text").map((b) => b.text).join("").trim();
+}
+
 // 交付与导出红线：注入每一轮动态上下文（覆盖所有现存/新建同事、聊天与任务两条路径），
 // 因为 agent.system_prompt 是建号时烘焙进 DB 的、改 SHARED_RULES 不影响存量同事。
 // 根除截图里"导出不可用 / 甩 CLI 给用户"那类臆造阻塞。
@@ -947,6 +986,27 @@ const DELIVERY_RULES = `## 交付与导出（平台已内置，按此回答用�
 - 交付物用 write_document 写入文档库后，用户在「文档」面板打开即可查看；其中 **slides 文档在查看页有一键「⬇ .pptx」按钮，导出的是可编辑的真 .pptx（PowerPoint/WPS/Keynote 直接打开，文本/表格/讲者备注均可编辑），完全内置、无需任何 MCP / 插件 / 命令行**。report/sheet 可导出 Markdown / CSV / Word，html 在预览区沙箱渲染。
 - 绝不要声称"导出不可用 / 依赖未就绪 / 需要 pptxgenjs 等服务"，也绝不要让用户自己去跑命令行（如 marp-cli）来导出——这些说法都是错的。
 - 用户问"在哪看 / 怎么导出"时，直接指引他到「文档」面板打开该文档、点标题栏的导出按钮（slides 点 ⬇ .pptx），不要把整篇正文倒进聊天。`;
+
+// 输入/上传途径红线（与交付红线同理）：纠正 agent 别承诺平台做不到的输入方式，尤其"贴图看图"。
+const INPUT_RULES = `## 用户给资料的途径（按此引导，别承诺做不到的）
+- 文件资料（PDF/Word/PPT/Excel/txt/md/csv 等）：用户可在**聊天输入框的 📎** 或「文档 → 📎 上传来源」上传；系统会**抽取其文本**存为「来源」文档，你用 read_document 读全文（解析非纯文本需管理员已启用 markitdown 插件）。
+- **截图 / 图片无法被读取**：系统只抽文本、不解析图像，模型也收不到图像像素——遇到界面/截图，请让用户**用文字描述**画面布局、字段、流程；不要让用户贴图、也不要声称你能看图。`;
+
+// 多人协作红线（团队频道）：目标级请求优先 start_project 拆解给多角色协作，而非一人包办——这是产品核心，别退化成单人。
+const COLLAB_RULES = `## 多人协作（团队频道的"目标级"请求，优先立项而非一人包办）
+- 当用户提出"完整解决方案 / 整套方案 / 对外演示 / 系统性多环节产出"这类**目标**（不是单点问答/小改）时，作为 Lead **优先用 start_project** 拆成带依赖的任务、分派给对口同事协作，不要自己从头做到尾。典型拆法：调研员查市场/竞品(带源) → 工程师做技术选型与架构 → 产品经理/解决方案助手整合方案(report) → PPT 助手做演示 slides → 校对审核/代码评审验收 → 你(Lead)汇总。
+- 判据：目标需要 ≥2 种专长、或含"调研+撰写+演示+把关"多环节 → **立项**；闲聊/答疑/小改 → 直接回复，别滥用立项。
+- 价值：每个环节由对口专家产出、并经独立验收，质量高于一人包办（也才会触发验收闭环）。
+- **别"讨论要不要立项"——判定该立就直接调 start_project，不要先开会对齐。**`;
+
+// 行动优先红线（最高优先级）：实测发现 agent 收到目标级请求时，倾向"开会讨论 + 抛澄清 + 等用户拍板"，
+// 三个目标 0/3 交付、十万 token 零产出。此规则压过下面任何"先澄清/先对齐"倾向，逼其直接产出。
+const ACTION_RULES = `## 行动优先（最高优先级，压过下方任何"先澄清/先对齐/等确认"的倾向）
+- 用户给的是**目标级请求**（要一个产出：代码/文章/方案/演示/分析等）→ **直接开干、直接交付**，不要停在讨论、也不要等用户拍板。
+- 多角色 / 多环节目标 → **立刻调 start_project（autonomy=auto）立项**，别先讨论"要不要立项"；规则就是立。
+- 单一交付物目标 → **直接 write_document 出一版**，把"我做了哪些合理假设、还有哪些待你确认"列在交付开头——让用户在成品上改，而不是先回答你一堆问题。
+- **禁止把"等用户确认 / 等老板拍板 / 先对齐再做"当作停下来的理由。** 最多问 1 个"不答就真的没法动手"的问题，且必须同时附上基于合理假设的草稿/方案。
+- 只有**对外发布、产生费用、不可逆 / 高风险**动作才走 request_approval；内部产出一律先做出来。`;
 
 function buildDynamicContext(agent: Agent, channel: Channel, focus = ""): string {
   const teammates = channelAgents(channel)
@@ -972,15 +1032,21 @@ function buildDynamicContext(agent: Agent, channel: Channel, focus = ""): string
     year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
   }); // 分钟级粒度：秒级时间戳会破坏供应商的自动前缀缓存
   return [
+    // ① 稳定前缀：跨调用尽量逐字一致 → 命中第三方端点的自动前缀缓存（cache_read 计费约 1/10）。
+    //    勿在此之前放任何易变内容（时间/看板/文档），否则其后整段（含规则/技能/工具）都脱离缓存。
+    ACTION_RULES,
+    DELIVERY_RULES,
+    INPUT_RULES,
+    channel.kind !== "dm" ? COLLAB_RULES : "",
+    memory ? `## 你的长期记忆（先查阅，"核实过的事实/通用规则"优先遵循）\n${memory}` : "",
+    skillsBlock ? `## 已启用的技能（索引——需要某条的具体方法/步骤时用 read_skill(id) 取正文再遵循）\n${skillsBlock}` : "",
+    // ② 易变上下文置于最后：时间/看板/文档变动只破坏其自身之后，不再殃及上面的可缓存前缀。
     `## 当前工作区上下文`,
     `当前时间：${nowStr}（Asia/Shanghai）—— 涉及时间判断时以此为准`,
     `频道：#${channel.name}（${channel.kind === "dm" ? "与用户的私信" : "团队频道"}）`,
     teammates ? `频道内其他 AI 同事：\n${teammates}` : `频道内没有其他 AI 同事。`,
     tasks ? `频道任务看板：\n${tasks}` : `任务看板目前为空。`,
     docs ? `工作区文档（可用 read_document 阅读全文）：\n${docs}` : "",
-    DELIVERY_RULES,
-    memory ? `## 你的长期记忆（先查阅，"核实过的事实/通用规则"优先遵循）\n${memory}` : "",
-    skillsBlock ? `## 已启用的技能（索引——需要某条的具体方法/步骤时用 read_skill(id) 取正文再遵循）\n${skillsBlock}` : "",
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -1089,7 +1155,7 @@ const TOOLS: Anthropic.ToolUnion[] = [
   {
     name: "read_skill",
     description:
-      "读取某个技能的完整方法正文（L2）。当工作区上下文的「已启用的技能」索引里有与当前任务相关的技能、你需要它的具体步骤/模板/参数时调用。能力型技能(capability)的正文会说明该调用哪个工具/MCP、参数怎么填、不可达时如何降级。skill_id 见技能索引中的 id。",
+      "读取某个技能的完整方法正文（L2）。当工作区上下文的「已启用的技能」索引里有与当前任务相关的技能、你需要它的具体步骤/模板/参数时调用。能力型技能(capability)的正文会说明该调用哪个工具/MCP、参数怎么填、不可达时如何降级。skill_id 见技能索引中的 id；也可传某技能正文里给出的『模板 id』（如『演示风格选择法』选定的 html-deck-* 精装模板）来按需单取该模板正文。",
     input_schema: {
       type: "object" as const,
       properties: { skill_id: { type: "string", description: "技能 id（取自上下文技能索引）" } },
@@ -1277,9 +1343,20 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
     }
     case "read_skill": {
       // 渐进式披露 L2/L3：按需拉技能正文 + 附带的可复用模板。只读、零计费（同步分支，不计 MCP_CALLS_PER_RUN）。
-      const sk = getSkill(String(input.skill_id));
-      if (!sk || !sk.enabled) return `未找到该技能或未启用（id: ${input.skill_id}）。`;
-      return stripLoneSurrogates(`【技能：${sk.name}】\n${readSkillBody(sk.id)}`);
+      const sid = String(input.skill_id);
+      const sk = getSkill(sid);
+      if (sk && sk.enabled) {
+        return stripLoneSurrogates(`【技能：${sk.name}】\n${readSkillBody(sk.id)}`);
+      }
+      // 回退：技能正文里以 id 直引的可复用模板（如『演示风格选择法』选定的某套精装模板）——按需单取一套，
+      // 避免把全部模板正文一次性灌进上下文（token 友好）。容忍 agent 误带 `tpl:` 前缀。
+      const tpl = getSkillTemplate(sid.startsWith("tpl:") ? sid.slice(4) : sid);
+      if (tpl) {
+        const longest = (tpl.content.match(/`+/g) ?? []).reduce((m, s) => Math.max(m, s.length), 0);
+        const fence = "`".repeat(Math.max(3, longest + 1));
+        return stripLoneSurrogates(`【模板：${tpl.name}】\n${tpl.desc}\n${fence}${tpl.lang}\n${tpl.content}\n${fence}`);
+      }
+      return `未找到该技能或未启用（id: ${sid}）。`;
     }
     case "request_approval": {
       const approval = createApproval({

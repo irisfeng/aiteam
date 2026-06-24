@@ -139,4 +139,34 @@ export const api = {
     if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as { error?: string })?.error ?? `HTTP ${res.status}`);
     return res.json() as Promise<Doc>;
   },
+  // 上传 .pptx 作为「模板」（就地改图文）：解析槽位 + 持久化原件，返回 kind=template 文档（含 template_meta）。
+  uploadTemplate: async (file: File): Promise<Doc> => {
+    const fd = new FormData();
+    fd.append("file", file);
+    const res = await fetch(`${API_BASE}/templates`, { method: "POST", body: fd });
+    if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as { error?: string })?.error ?? `HTTP ${res.status}`);
+    return res.json() as Promise<Doc>;
+  },
+  // AI 按来源为模板槽位产替换文案（逐槽确认前的建议）。
+  proposeTemplateEdits: (id: string, body: { sourceDocIds?: string[]; brief?: string }) =>
+    req<{ suggestions: { idx: number; slideIdx: number; shapeIdx: number; paraIdx: number; original: string; suggestion: string }[] }>(
+      `/documents/${id}/template-propose`, { method: "POST", body: JSON.stringify(body) }
+    ),
+  // 模板就地改文本/换图 → 导出可编辑 .pptx（返回二进制 Blob，组件负责触发下载）。
+  templateExport: async (
+    id: string,
+    edits: { slideIdx: number; shapeIdx: number; paraIdx: number; newText: string }[],
+    imageEdits: { slideIdx: number; imageIdx: number; dataBase64: string; ext: string }[] = []
+  ): Promise<Blob> => {
+    const res = await fetch(`${API_BASE}/documents/${id}/template-export`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ edits, imageEdits }),
+    });
+    if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as { error?: string })?.error ?? `HTTP ${res.status}`);
+    return res.blob();
+  },
+  // 为模板图片位生成配图（Seedream），返回 base64 供预览 + 随导出嵌入。
+  generateTemplateImage: (id: string, prompt: string, size?: string) =>
+    req<{ dataBase64: string; ext: string; assetUrl: string }>(
+      `/documents/${id}/template-image-generate`, { method: "POST", body: JSON.stringify({ prompt, size }) }
+    ),
 };

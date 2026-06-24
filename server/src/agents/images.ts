@@ -82,3 +82,32 @@ export async function generateImage(input: any): Promise<string> {
     `![${prompt.slice(0, 40)}](/aiteam/assets/${file})`,
   ].join("\n");
 }
+
+/**
+ * 生成图并返回 base64 字节（供「模板就地改图文」把生成图嵌入 .pptx，而非返回 Markdown）。
+ * 同样落盘一份到 /assets 便于预览/复用。失败返回 { error }。
+ */
+export async function generateImageBytes(prompt: string, size?: string): Promise<{ dataBase64: string; ext: string; assetUrl: string } | { error: string }> {
+  const p = getImageProvider();
+  if (!p.api_key || !p.model) return { error: "未配置图像生成供应商（设置 → 模型供应商 → 图像生成）" };
+  const pr = String(prompt ?? "").trim();
+  if (!pr) return { error: "prompt 不能为空" };
+  const sz = ["2048x1152", "1152x2048", "2048x2048"].includes(size || "") ? (size as string) : "2048x1152";
+  try {
+    const res = await fetch(`${p.base_url || DEFAULT_IMAGE_BASE_URL}/images/generations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${p.api_key}` },
+      body: JSON.stringify({ model: p.model, prompt: pr, size: sz, response_format: "b64_json", watermark: false }),
+      signal: AbortSignal.timeout(120_000),
+    });
+    if (!res.ok) return { error: `图像生成失败（HTTP ${res.status}）：${(await res.text().catch(() => "")).slice(0, 200)}` };
+    const data: any = await res.json();
+    const b64 = data?.data?.[0]?.b64_json;
+    if (!b64) return { error: "响应中没有 base64 图片数据（该网关可能只回 url，模板嵌图需 b64）" };
+    const file = `${nanoid(12)}.png`;
+    writeFileSync(join(assetsDir, file), Buffer.from(b64, "base64"));
+    return { dataBase64: b64, ext: "png", assetUrl: `/aiteam/assets/${file}` };
+  } catch (e) {
+    return { error: `图像生成异常：${String((e as Error)?.message ?? e).slice(0, 200)}` };
+  }
+}
