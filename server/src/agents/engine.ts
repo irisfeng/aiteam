@@ -1032,18 +1032,21 @@ function buildDynamicContext(agent: Agent, channel: Channel, focus = ""): string
     year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
   }); // 分钟级粒度：秒级时间戳会破坏供应商的自动前缀缓存
   return [
+    // ① 稳定前缀：跨调用尽量逐字一致 → 命中第三方端点的自动前缀缓存（cache_read 计费约 1/10）。
+    //    勿在此之前放任何易变内容（时间/看板/文档），否则其后整段（含规则/技能/工具）都脱离缓存。
     ACTION_RULES,
+    DELIVERY_RULES,
+    INPUT_RULES,
+    channel.kind !== "dm" ? COLLAB_RULES : "",
+    memory ? `## 你的长期记忆（先查阅，"核实过的事实/通用规则"优先遵循）\n${memory}` : "",
+    skillsBlock ? `## 已启用的技能（索引——需要某条的具体方法/步骤时用 read_skill(id) 取正文再遵循）\n${skillsBlock}` : "",
+    // ② 易变上下文置于最后：时间/看板/文档变动只破坏其自身之后，不再殃及上面的可缓存前缀。
     `## 当前工作区上下文`,
     `当前时间：${nowStr}（Asia/Shanghai）—— 涉及时间判断时以此为准`,
     `频道：#${channel.name}（${channel.kind === "dm" ? "与用户的私信" : "团队频道"}）`,
     teammates ? `频道内其他 AI 同事：\n${teammates}` : `频道内没有其他 AI 同事。`,
     tasks ? `频道任务看板：\n${tasks}` : `任务看板目前为空。`,
     docs ? `工作区文档（可用 read_document 阅读全文）：\n${docs}` : "",
-    DELIVERY_RULES,
-    INPUT_RULES,
-    channel.kind !== "dm" ? COLLAB_RULES : "",
-    memory ? `## 你的长期记忆（先查阅，"核实过的事实/通用规则"优先遵循）\n${memory}` : "",
-    skillsBlock ? `## 已启用的技能（索引——需要某条的具体方法/步骤时用 read_skill(id) 取正文再遵循）\n${skillsBlock}` : "",
   ]
     .filter(Boolean)
     .join("\n\n");
