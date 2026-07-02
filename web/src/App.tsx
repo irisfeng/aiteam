@@ -5,6 +5,7 @@ import { AgentProfileModal } from "./components/AgentProfile";
 import { Sidebar } from "./components/Sidebar";
 import { ChannelView } from "./components/ChannelView";
 import { TasksBoard } from "./components/TasksBoard";
+import { WorklineView } from "./components/WorklineView";
 import { InboxView } from "./components/InboxView";
 import { ChannelSettingsModal, NewAgentModal, NewChannelModal, SettingsModal, type SettingsTab } from "./components/Modals";
 import { MockBanner, WelcomeOverlay } from "./components/Onboarding";
@@ -43,6 +44,7 @@ export default function App() {
     if (channelId && ws.channels.some((c) => c.id === channelId)) ws.openChannel(channelId);
     else if (taskId || view === "tasks") ws.setView({ kind: "tasks" });
     else if (approvalId || view === "inbox") ws.setView({ kind: "inbox" });
+    else if (view === "workline") ws.setView({ kind: "workline" });
     if (taskId) setDeepTaskId(taskId);
     if (approvalId) setDeepApprovalId(approvalId);
     if (hasDeepTarget) window.history.replaceState(null, "", import.meta.env.BASE_URL);
@@ -82,11 +84,11 @@ export default function App() {
         <MockBanner onSettings={() => openSettings("providers")} />
         <div className="flex min-h-0 flex-1">
           {ws.view.kind === "channel" && <ChannelView channelId={ws.view.id} />}
+          {ws.view.kind === "workline" && <WorklineView onOpenSettings={openSettings} />}
           {ws.view.kind === "tasks" && (
             <TasksBoard
               deepTaskId={deepTaskId}
               onDeepTaskConsumed={() => setDeepTaskId(null)}
-              onOpenSettings={openSettings}
             />
           )}
           {ws.view.kind === "inbox" && <InboxView focusApprovalId={deepApprovalId} onFocusConsumed={() => setDeepApprovalId(null)} />}
