@@ -514,6 +514,7 @@ export function SettingsModal({
   const [error, setError] = useState("");
   const [providerTest, setProviderTest] = useState<Record<string, string>>({});
   const [providerTaskTest, setProviderTaskTest] = useState<Record<string, { text: string; taskId?: string }>>({});
+  const [providerTaskBusy, setProviderTaskBusy] = useState<Record<string, boolean>>({});
 
   useEffect(() => setTab(initialTab), [initialTab]);
 
@@ -588,18 +589,8 @@ export function SettingsModal({
     try {
       const saved = editingId ? await ws.updateProvider(editingId, data) : await ws.createProvider(data);
       if (runTaskAfterSave) {
-        setProviderTaskTest((s) => ({ ...s, [saved.id]: { text: "任务演练中…可能产生少量 token 消耗" } }));
-        const r = await ws.runProviderTaskTest(saved.id);
-        const checks = [
-          r.checks.delivered ? "交付" : "未交付",
-          r.checks.tool_observed ? "工具" : "无工具",
-          r.checks.verified ? "验收" : "未验收",
-          r.checks.usage_tracked ? "用量" : "无用量",
-        ].join(" / ");
-        setProviderTaskTest((s) => ({
-          ...s,
-          [saved.id]: { text: `${r.ok ? "通过" : "未通过"} · ${r.task.status} · ${checks} · ${r.latency_ms}ms · ${formatTokenCount(r.usage_summary?.billable)} billable${formatEstimatedCost(r.usage_summary?.estimated_cost, r.usage_summary?.price_currency)}`, taskId: r.task.id },
-        }));
+        // 供应商已保存成功；演练失败只记在演练结果里，不能报成「保存失败」诱导重复保存。
+        await runProviderTaskTest(saved.id);
       }
       resetForm();
     } catch (e: any) {
@@ -623,6 +614,8 @@ export function SettingsModal({
   }
 
   async function runProviderTaskTest(id: string) {
+    if (providerTaskBusy[id]) return;
+    setProviderTaskBusy((s) => ({ ...s, [id]: true }));
     setProviderTaskTest((s) => ({ ...s, [id]: { text: "任务演练中…可能产生少量 token 消耗" } }));
     try {
       const r = await ws.runProviderTaskTest(id);
@@ -638,6 +631,8 @@ export function SettingsModal({
       }));
     } catch (e: any) {
       setProviderTaskTest((s) => ({ ...s, [id]: { text: `失败：${String(e?.message ?? e).slice(0, 160)}` } }));
+    } finally {
+      setProviderTaskBusy((s) => ({ ...s, [id]: false }));
     }
   }
 
@@ -704,10 +699,11 @@ export function SettingsModal({
               </button>
               <button
                 onClick={() => void runProviderTaskTest(p.id)}
-                className="rounded px-1.5 text-[12px] text-ink-2 hover:bg-sel hover:text-ink"
+                disabled={Boolean(providerTaskBusy[p.id])}
+                className="rounded px-1.5 text-[12px] text-ink-2 hover:bg-sel hover:text-ink disabled:opacity-40"
                 title="创建一条诊断任务，验证工具调用、文档交付、验收和用量归因；会产生少量 token 消耗"
               >
-                任务演练
+                {providerTaskBusy[p.id] ? "演练中…" : "任务演练"}
               </button>
               <button
                 onClick={() => startEdit(p.id)}

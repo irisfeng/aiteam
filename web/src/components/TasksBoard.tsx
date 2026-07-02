@@ -43,6 +43,9 @@ function TaskCard({ task, onOpenDoc, onOpenTask }: { task: Task; onOpenDoc: (doc
   const project = ws.projects.find((p) => p.id === task.project_id);
   const events = ws.taskEvents.filter((e) => e.task_id === task.id);
   const latest = events.at(-1);
+  const hasPendingApproval = ws.approvals.some(
+    (a) => a.status === "pending" && (a.ref_id === task.id || a.id === task.blocked_approval_id),
+  );
   let depCount = 0;
   try {
     depCount = (JSON.parse(task.depends_on) as string[]).length;
@@ -98,7 +101,8 @@ function TaskCard({ task, onOpenDoc, onOpenTask }: { task: Task; onOpenDoc: (doc
           <select
             value={task.assignee_agent_id ?? ""}
             onChange={(e) => void ws.updateTask(task.id, { assignee_agent_id: e.target.value || null })}
-            className="min-w-0 rounded-full border border-line bg-sel px-1.5 py-0.5 text-[11.5px] text-ink-2 outline-none"
+            disabled={task.status === "done"}
+            className="min-w-0 rounded-full border border-line bg-sel px-1.5 py-0.5 text-[11.5px] text-ink-2 outline-none disabled:opacity-50"
             title="指派给 AI 同事后会自动开工"
           >
             <option value="">未分配</option>
@@ -111,7 +115,8 @@ function TaskCard({ task, onOpenDoc, onOpenTask }: { task: Task; onOpenDoc: (doc
           <select
             value={task.reviewer_agent_id ?? ""}
             onChange={(e) => void ws.updateTask(task.id, { reviewer_agent_id: e.target.value || null })}
-            className="min-w-0 rounded-full border border-line bg-sel px-1.5 py-0.5 text-[11.5px] text-ink-2 outline-none"
+            disabled={task.status === "done"}
+            className="min-w-0 rounded-full border border-line bg-sel px-1.5 py-0.5 text-[11.5px] text-ink-2 outline-none disabled:opacity-50"
             title="指定复核人；留空则系统按交付物类型自动选择"
           >
             <option value="">自动复核</option>
@@ -166,8 +171,13 @@ function TaskCard({ task, onOpenDoc, onOpenTask }: { task: Task; onOpenDoc: (doc
           {next && (
             <button
               onClick={() => void ws.moveTask(task, next)}
-              className="rounded px-1 text-ink-3 hover:bg-sel hover:text-ink"
-              title={`移到「${COLUMN_LABEL[next]}」${next === "done" ? "（关单是 human-only）" : ""}`}
+              disabled={next === "done" && hasPendingApproval}
+              className="rounded px-1 text-ink-3 hover:bg-sel hover:text-ink disabled:opacity-40"
+              title={
+                next === "done" && hasPendingApproval
+                  ? "先在收件箱处理该任务的审批/输入，再关闭"
+                  : `移到「${COLUMN_LABEL[next]}」${next === "done" ? "（关单是 human-only）" : ""}`
+              }
             >
               →
             </button>
@@ -216,7 +226,9 @@ function ProjectGroup({
   const summaryDoc = project?.summary_doc_id ? ws.documents.find((d) => d.id === project.summary_doc_id) : undefined;
   const featuredDoc = summaryDoc ?? projectDocs[0];
   const taskIds = new Set(allTasks.map((t) => t.id));
-  const pendingApprovals = ws.approvals.filter((a) => a.status === "pending" && a.ref_id && taskIds.has(a.ref_id));
+  const pendingApprovals = ws.approvals.filter(
+    (a) => a.status === "pending" && (a.ref_id === projectId || (a.ref_id ? taskIds.has(a.ref_id) : false)),
+  );
   const projectEvents = ws.taskEvents
     .filter((e) => e.task_id && taskIds.has(e.task_id))
     .sort((a, b) => a.created_at - b.created_at);

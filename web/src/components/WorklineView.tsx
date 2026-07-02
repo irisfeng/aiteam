@@ -63,6 +63,14 @@ export function WorklineView({ onOpenSettings }: { onOpenSettings?: (tab: Settin
 
   async function closeAcceptanceProject() {
     if (!acceptanceProject) return;
+    const ids = new Set(acceptanceTasks.map((t) => t.id));
+    const blockedByApproval = ws.approvals.some(
+      (a) => a.status === "pending" && (a.ref_id === acceptanceProject.id || (a.ref_id ? ids.has(a.ref_id) : false)),
+    );
+    if (blockedByApproval) {
+      window.alert("该验收项目还有待处理的审批/输入，请先在收件箱处理后再关闭。");
+      return;
+    }
     if (!window.confirm(`确认关闭验收项目「${acceptanceProject.title}」？\n这会把本轮验收任务归档为完成。`)) return;
     await ws.closeProject(acceptanceProject.id);
   }

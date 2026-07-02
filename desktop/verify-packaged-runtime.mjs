@@ -7,10 +7,26 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const desktopDir = dirname(fileURLToPath(import.meta.url));
-const appResources = join(desktopDir, "release", "mac-arm64", "AiTeam.app", "Contents", "Resources");
+
+// 打包产物的 resources 目录随平台/架构变化；可用 AITEAM_PACKED_RESOURCES 显式指定，否则按常见产物路径探测。
+function resolveAppResources() {
+  if (process.env.AITEAM_PACKED_RESOURCES) return process.env.AITEAM_PACKED_RESOURCES;
+  const release = join(desktopDir, "release");
+  const candidates = [
+    join(release, "mac-arm64", "AiTeam.app", "Contents", "Resources"),
+    join(release, "mac", "AiTeam.app", "Contents", "Resources"),
+    join(release, "mac-universal", "AiTeam.app", "Contents", "Resources"),
+    join(release, "win-unpacked", "resources"),
+    join(release, "linux-unpacked", "resources"),
+  ];
+  return candidates.find((p) => existsSync(p)) ?? candidates[0];
+}
+
+const appResources = resolveAppResources();
 
 if (!existsSync(appResources)) {
   console.error(`Missing packaged Resources: ${appResources}`);
+  console.error("提示：可设置 AITEAM_PACKED_RESOURCES=<path> 指向打包产物的 resources 目录。");
   process.exit(1);
 }
 

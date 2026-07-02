@@ -2,7 +2,7 @@ import { Suspense, lazy, useEffect, useState } from "react";
 import { useWorkspace } from "./store";
 import type { Agent, Channel } from "./types";
 import { AgentProfileModal } from "./components/AgentProfile";
-import { Sidebar } from "./components/Sidebar";
+import { MobileNav, Sidebar } from "./components/Sidebar";
 import { ChannelView } from "./components/ChannelView";
 import { TasksBoard } from "./components/TasksBoard";
 import { WorklineView } from "./components/WorklineView";
@@ -81,6 +81,7 @@ export default function App() {
         onOpenProfile={setProfileAgent}
       />
       <main className="flex h-full min-w-0 flex-1 flex-col">
+        <MobileNav onSettings={() => openSettings("providers")} />
         <MockBanner onSettings={() => openSettings("providers")} />
         <div className="flex min-h-0 flex-1">
           {ws.view.kind === "channel" && <ChannelView channelId={ws.view.id} />}

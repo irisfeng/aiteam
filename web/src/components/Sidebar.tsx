@@ -100,6 +100,65 @@ function TodayUsage() {
   );
 }
 
+/** 移动端（<md）侧栏整体隐藏，这条横向滚动条是唯一导航：视图切换 + 频道/私信下拉 + 设置/退出。 */
+export function MobileNav({ onSettings }: { onSettings: () => void }) {
+  const ws = useWorkspace();
+  const pending = ws.approvals.filter((a) => a.status === "pending").length;
+  const views = [
+    { kind: "workline", label: "工作台" },
+    { kind: "inbox", label: "收件箱", badge: pending },
+    { kind: "tasks", label: "任务" },
+    { kind: "docs", label: "文档" },
+    { kind: "team", label: "团队" },
+    { kind: "usage", label: "用量" },
+  ] as const;
+  return (
+    <nav className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-line bg-panel px-2 py-1.5 md:hidden">
+      {views.map((v) => (
+        <button
+          key={v.kind}
+          onClick={() => ws.setView({ kind: v.kind })}
+          className={`shrink-0 rounded-full px-2.5 py-1 text-[12.5px] ${
+            ws.view.kind === v.kind ? "bg-accent-soft font-medium text-ink" : "text-ink-2 hover:bg-sel"
+          }`}
+        >
+          {v.label}
+          {"badge" in v && v.badge ? (
+            <span className="ml-1 rounded-full bg-accent px-1.5 text-[10px] font-medium text-white">{v.badge}</span>
+          ) : null}
+        </button>
+      ))}
+      <select
+        value={ws.view.kind === "channel" ? ws.view.id : ""}
+        onChange={(e) => e.target.value && ws.openChannel(e.target.value)}
+        className="shrink-0 rounded-full border border-line bg-sel px-2 py-1 text-[12px] text-ink-2 outline-none"
+        title="打开频道或私信"
+      >
+        <option value="">频道…</option>
+        {ws.channels.map((c) => (
+          <option key={c.id} value={c.id}>
+            {c.kind === "dm" ? "@" : "#"} {c.name}
+          </option>
+        ))}
+      </select>
+      <span className="ml-auto flex shrink-0 items-center gap-0.5 pl-1">
+        {ws.user.role === "admin" && (
+          <button onClick={onSettings} className="rounded px-1.5 text-ink-3 hover:bg-sel hover:text-ink" title="设置">
+            ⚙
+          </button>
+        )}
+        <button
+          onClick={() => void ws.logout()}
+          className="rounded px-1.5 text-ink-3 hover:bg-sel hover:text-red-500"
+          title="退出登录"
+        >
+          ⏻
+        </button>
+      </span>
+    </nav>
+  );
+}
+
 export function Sidebar({
   onNewChannel,
   onNewAgent,

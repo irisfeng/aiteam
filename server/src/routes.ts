@@ -54,7 +54,7 @@ import { seedForOwner } from "./seed.js";
 import { AGENT_TEMPLATES, getTemplate } from "./agents/templates.js";
 import multer from "multer";
 import { withOwner, ownerFromUserId } from "./ownerScope.js";
-import { dropConnection, testMcpServer, callMcpTool, mcpToolPrefixReady } from "./agents/mcp.js";
+import { dropConnection, testMcpServer, callMcpTool, mcpToolPrefixReady, mcpToolName } from "./agents/mcp.js";
 import { UPLOAD_MAX_BYTES, TEXT_EXTS, DOC_EXTS, extOf, withTempFile, persistTemplateBinary, readTemplateBinary, removeTemplateBinary } from "./uploads.js";
 import { parseTemplate, applyTemplateEdits, type TemplateEdit, type ImageEdit } from "./pptx-template.js";
 import {
@@ -326,7 +326,7 @@ api.post("/mcp-servers/:id/task-test", requireAdmin, async (req, res) => {
     if (mcpKey(server.name) === "markitdown") {
       const sample = Buffer.from("# AiTeam MCP 演练\n\n- 输入：本地样本文档\n- 预期：转换为 Markdown 来源\n", "utf8");
       sampleOutput = await withTempFile(sample, ".txt", (p) =>
-        callMcpTool(`mcp__${mcpKey(server.name)}__convert_to_markdown`, { uri: "file://" + p })
+        callMcpTool(mcpToolName(server.name, "convert_to_markdown"), { uri: "file://" + p })
       );
       converted = !/^错误：/.test(sampleOutput);
       if (converted) {

@@ -350,7 +350,7 @@ export function WorklineOverview({
     const verified = eventTypes.has("verification");
     const usageTracked = typeof resultChecks?.usage_tracked === "boolean" ? resultChecks.usage_tracked : null;
     const status: LinkCheckResult["status"] =
-      eventTypes.has("failure") || task.status === "blocked"
+      eventTypes.has("failure")
         ? "failed"
         : task.status === "review" || task.status === "done"
           ? "passed"
@@ -368,7 +368,7 @@ export function WorklineOverview({
         : task.status === "review" || task.status === "done"
           ? `${task.status} · 已有可复核交付证据`
         : task.status === "blocked"
-          ? "blocked · 等待输入或处理失败"
+          ? "blocked · 等待输入或审批"
           : `${task.status} · 等待演练完成`;
     return { id: `persisted:${task.id}`, label, status, detail, taskId: task.id };
   });
