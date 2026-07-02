@@ -17,6 +17,9 @@ export interface Provider {
   max_tokens: number;
   web_tools: number;
   is_strong: number;
+  price_input_per_million: number;
+  price_output_per_million: number;
+  price_currency: string;
   is_official: number;
   has_key: boolean;
 }
@@ -46,16 +49,41 @@ export interface Task {
   channel_id: string | null;
   title: string;
   description: string;
-  status: "todo" | "doing" | "review" | "done";
+  status: "todo" | "doing" | "review" | "blocked" | "done";
   assignee_agent_id: string | null;
+  reviewer_agent_id: string | null;
+  blocked_approval_id: string | null;
   created_by: string;
   acceptance_criteria: string;
   depends_on: string;
   model_tier: "standard" | "light";
+  source_doc_ids: string;
   project_id: string | null;
   revision_count: number;
   created_at: number;
   updated_at: number;
+}
+export interface TaskEvent {
+  id: string;
+  task_id: string;
+  channel_id: string | null;
+  project_id: string | null;
+  agent_id: string | null;
+  type:
+    | "created"
+    | "claim"
+    | "start"
+    | "tool"
+    | "blocked"
+    | "handoff"
+    | "delivery"
+    | "verification"
+    | "approval"
+    | "user_close"
+    | "failure";
+  summary: string;
+  metadata_json: string;
+  created_at: number;
 }
 export interface Project {
   id: string;
@@ -75,7 +103,7 @@ export interface Approval {
   agent_id: string;
   title: string;
   payload: string;
-  kind: "action" | "plan";
+  kind: "action" | "plan" | "clarification";
   ref_id: string | null;
   status: "pending" | "approved" | "rejected";
   created_at: number;

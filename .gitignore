@@ -1,5 +1,7 @@
 node_modules/
 dist/
+desktop/.runtime/
+desktop/release/
 *.log
 .env
 server/data/

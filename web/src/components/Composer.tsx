@@ -27,7 +27,11 @@ export function Composer({
   async function onPickFile(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.target.value = ""; // 允许重复选同一文件
-    if (!file || uploading) return;
+    if (file) await uploadSourceFile(file);
+  }
+
+  async function uploadSourceFile(file: File) {
+    if (uploading) return;
     setUploading(true);
     try {
       const doc = await api.uploadDoc(file); // 抽文本 → 存为 source 文档（经 WS 自动进文档库，AI 可 read_document）
@@ -39,6 +43,21 @@ export function Composer({
     } finally {
       setUploading(false);
     }
+  }
+
+  async function chooseSourceFile() {
+    if (window.aiteamDesktop?.pickFile) {
+      try {
+        const picked = await window.aiteamDesktop.pickFile("source");
+        if (!picked.canceled) {
+          await uploadSourceFile(new File([new Uint8Array(picked.file.bytes)], picked.file.name));
+        }
+      } catch (err) {
+        window.alert("选择文件失败：" + ((err as Error)?.message ?? err));
+      }
+      return;
+    }
+    fileRef.current?.click();
   }
 
   const candidates =
@@ -120,7 +139,7 @@ export function Composer({
         />
         <button
           type="button"
-          onClick={() => fileRef.current?.click()}
+          onClick={() => void chooseSourceFile()}
           disabled={uploading}
           title="上传来源文档（PDF/Word/PPT/Excel/txt 等，自动转文本供 AI 读取；截图无法读取，请用文字描述）"
           className="shrink-0 rounded-lg px-1.5 py-1 text-[15px] leading-none text-ink-3 hover:bg-accent-soft hover:text-accent disabled:opacity-40"

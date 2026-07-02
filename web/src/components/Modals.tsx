@@ -28,6 +28,53 @@ const inputCls =
   "w-full rounded-lg border border-line bg-panel px-3 py-2 text-[13.5px] outline-none focus:border-accent/50";
 const labelCls = "mb-1 mt-3 block text-[12.5px] font-medium text-ink-2 first:mt-0";
 
+function formatTokenCount(value: unknown) {
+  const n = typeof value === "number" && Number.isFinite(value) ? value : 0;
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(Math.round(n));
+}
+
+function formatEstimatedCost(value: unknown, currency: unknown) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return "";
+  const unit = typeof currency === "string" && currency.trim() ? currency.trim().toUpperCase() : "USD";
+  const amount = value < 0.01 ? value.toFixed(4) : value.toFixed(2);
+  return ` · ≈${unit} ${amount}`;
+}
+
+const PROVIDER_PRESETS = [
+  {
+    id: "deepseek",
+    name: "DeepSeek",
+    desc: "Anthropic-compatible，适合先跑通工具调用和长任务线。",
+    base_url: "https://api.deepseek.com/anthropic",
+    default_model: "deepseek-v4-pro",
+    light_model: "deepseek-v4-flash",
+    web_tools: true,
+    is_strong: true,
+  },
+  {
+    id: "siliconflow-glm",
+    name: "SiliconFlow GLM",
+    desc: "OpenAI-compatible，GLM 长上下文适合方案、研发和评审任务。",
+    base_url: "https://api.siliconflow.com/v1",
+    default_model: "zai-org/GLM-5.2",
+    light_model: "",
+    web_tools: false,
+    is_strong: true,
+  },
+  {
+    id: "bailian",
+    name: "百炼 DashScope",
+    desc: "OpenAI-compatible；生产可替换为工作空间专属域名。",
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    default_model: "qwen-plus",
+    light_model: "qwen-turbo",
+    web_tools: false,
+    is_strong: true,
+  },
+] as const;
+
 /** 场景组队模板（Hive 设计：3-4 张场景卡一键组队，零输入成本）。
  *  roleKeys 匹配已有成员；templateIds 指向角色模板库——选卡时自动实例化；
  *  skills 选卡时自动启用配套工作方法（全员生效）；mcp 给出推荐插件提示。 */
@@ -437,9 +484,19 @@ export function NewAgentModal({ onClose }: { onClose: () => void }) {
   );
 }
 
-export function SettingsModal({ onClose }: { onClose: () => void }) {
+export type SettingsTab = "providers" | "mcp" | "skills";
+
+export function SettingsModal({
+  onClose,
+  onOpenTask,
+  initialTab = "providers",
+}: {
+  onClose: () => void;
+  onOpenTask?: (taskId: string) => void;
+  initialTab?: SettingsTab;
+}) {
   const ws = useWorkspace();
-  const [tab, setTab] = useState<"providers" | "mcp" | "skills">("providers");
+  const [tab, setTab] = useState<SettingsTab>(initialTab);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
@@ -447,10 +504,18 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [defaultModel, setDefaultModel] = useState("");
   const [lightModel, setLightModel] = useState("");
   const [maxTokens, setMaxTokens] = useState("");
+  const [priceInputPerMillion, setPriceInputPerMillion] = useState("");
+  const [priceOutputPerMillion, setPriceOutputPerMillion] = useState("");
+  const [priceCurrency, setPriceCurrency] = useState("USD");
   const [webTools, setWebTools] = useState(false);
   const [isStrong, setIsStrong] = useState(false);
+  const [runTaskAfterSave, setRunTaskAfterSave] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [providerTest, setProviderTest] = useState<Record<string, string>>({});
+  const [providerTaskTest, setProviderTaskTest] = useState<Record<string, { text: string; taskId?: string }>>({});
+
+  useEffect(() => setTab(initialTab), [initialTab]);
 
   function resetForm() {
     setEditingId(null);
@@ -460,8 +525,27 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     setDefaultModel("");
     setLightModel("");
     setMaxTokens("");
+    setPriceInputPerMillion("");
+    setPriceOutputPerMillion("");
+    setPriceCurrency("USD");
     setWebTools(false);
     setIsStrong(false);
+    setRunTaskAfterSave(false);
+    setError("");
+  }
+
+  function applyProviderPreset(preset: (typeof PROVIDER_PRESETS)[number]) {
+    setEditingId(null);
+    setName(preset.name);
+    setBaseUrl(preset.base_url);
+    setDefaultModel(preset.default_model);
+    setLightModel(preset.light_model);
+    setMaxTokens("");
+    setPriceInputPerMillion("");
+    setPriceOutputPerMillion("");
+    setPriceCurrency("USD");
+    setWebTools(preset.web_tools);
+    setIsStrong(preset.is_strong);
     setError("");
   }
 
@@ -475,6 +559,9 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     setDefaultModel(p.default_model);
     setLightModel(p.light_model ?? "");
     setMaxTokens(p.max_tokens && p.max_tokens !== 16000 ? String(p.max_tokens) : "");
+    setPriceInputPerMillion(p.price_input_per_million > 0 ? String(p.price_input_per_million) : "");
+    setPriceOutputPerMillion(p.price_output_per_million > 0 ? String(p.price_output_per_million) : "");
+    setPriceCurrency(p.price_currency || "USD");
     setWebTools(Boolean(p.web_tools));
     setIsStrong(Boolean(p.is_strong));
     setError("");
@@ -492,17 +579,65 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       default_model: defaultModel.trim(),
       light_model: lightModel.trim(),
       max_tokens: Number(maxTokens) || undefined,
+      price_input_per_million: Math.max(0, Number(priceInputPerMillion) || 0),
+      price_output_per_million: Math.max(0, Number(priceOutputPerMillion) || 0),
+      price_currency: priceCurrency.trim().toUpperCase() || "USD",
       web_tools: webTools,
       is_strong: isStrong,
     };
     try {
-      if (editingId) await ws.updateProvider(editingId, data);
-      else await ws.createProvider(data);
+      const saved = editingId ? await ws.updateProvider(editingId, data) : await ws.createProvider(data);
+      if (runTaskAfterSave) {
+        setProviderTaskTest((s) => ({ ...s, [saved.id]: { text: "任务演练中…可能产生少量 token 消耗" } }));
+        const r = await ws.runProviderTaskTest(saved.id);
+        const checks = [
+          r.checks.delivered ? "交付" : "未交付",
+          r.checks.tool_observed ? "工具" : "无工具",
+          r.checks.verified ? "验收" : "未验收",
+          r.checks.usage_tracked ? "用量" : "无用量",
+        ].join(" / ");
+        setProviderTaskTest((s) => ({
+          ...s,
+          [saved.id]: { text: `${r.ok ? "通过" : "未通过"} · ${r.task.status} · ${checks} · ${r.latency_ms}ms · ${formatTokenCount(r.usage_summary?.billable)} billable${formatEstimatedCost(r.usage_summary?.estimated_cost, r.usage_summary?.price_currency)}`, taskId: r.task.id },
+        }));
+      }
       resetForm();
     } catch (e: any) {
       setError(e?.message ?? "保存失败");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function testProvider(id: string) {
+    setProviderTest((s) => ({ ...s, [id]: "测试中…" }));
+    try {
+      const r = await api.testProvider(id);
+      setProviderTest((s) => ({
+        ...s,
+        [id]: `可用 · ${r.protocol === "openai-compatible" ? "OpenAI" : "Anthropic"} · ${r.model} · ${r.latency_ms}ms`,
+      }));
+    } catch (e: any) {
+      setProviderTest((s) => ({ ...s, [id]: `失败：${String(e?.message ?? e).slice(0, 120)}` }));
+    }
+  }
+
+  async function runProviderTaskTest(id: string) {
+    setProviderTaskTest((s) => ({ ...s, [id]: { text: "任务演练中…可能产生少量 token 消耗" } }));
+    try {
+      const r = await ws.runProviderTaskTest(id);
+      const checks = [
+        r.checks.delivered ? "交付" : "未交付",
+        r.checks.tool_observed ? "工具" : "无工具",
+        r.checks.verified ? "验收" : "未验收",
+        r.checks.usage_tracked ? "用量" : "无用量",
+      ].join(" / ");
+      setProviderTaskTest((s) => ({
+        ...s,
+        [id]: { text: `${r.ok ? "通过" : "未通过"} · ${r.task.status} · ${checks} · ${r.latency_ms}ms · ${formatTokenCount(r.usage_summary?.billable)} billable${formatEstimatedCost(r.usage_summary?.estimated_cost, r.usage_summary?.price_currency)}`, taskId: r.task.id },
+      }));
+    } catch (e: any) {
+      setProviderTaskTest((s) => ({ ...s, [id]: { text: `失败：${String(e?.message ?? e).slice(0, 160)}` } }));
     }
   }
 
@@ -522,14 +657,14 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         {tabBtn("mcp", "MCP 插件")}
         {tabBtn("skills", "技能")}
       </div>
-      {tab === "mcp" && <McpTab />}
-      {tab === "skills" && <SkillsTab />}
+      {tab === "mcp" && <McpTab onOpenTask={onOpenTask} />}
+      {tab === "skills" && <SkillsTab onOpenTask={onOpenTask} />}
       {tab === "providers" && (
         <div>
       <div className="text-[12.5px] leading-relaxed text-ink-2">
         默认推荐 Anthropic 官方（环境变量 <code className="rounded bg-panel px-1">ANTHROPIC_API_KEY</code>）。
-        也可接入任何 <span className="font-medium">Anthropic 协议兼容</span>端点：DeepSeek / GLM / Kimi /
-        MiniMax，或经 LiteLLM 网关接入 OpenAI 协议供应商与本地模型（Ollama、vLLM…）。
+        也可接入 Anthropic-compatible 端点（如 DeepSeek Anthropic）或 OpenAI-compatible 端点（如 SiliconFlow、百炼 DashScope、LiteLLM、vLLM）。
+        系统会按 Base URL 自动识别协议。
         <span className="font-medium">默认模型</span>承担分析/创作，<span className="font-medium">轻量模型</span>承担
         重复性/格式化任务（拆解时由 Lead 逐任务智能选择，大幅降本）。
       </div>
@@ -545,7 +680,35 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
               <span className="min-w-0 flex-1 truncate text-[12px] text-ink-3">
                 {p.base_url || "api.anthropic.com"} · {p.default_model || "未设默认模型"}
                 {p.light_model ? ` · ⚡${p.light_model}` : ""}
+                {p.price_input_per_million > 0 || p.price_output_per_million > 0
+                  ? ` · ${p.price_currency || "USD"}/百万 输入 ${p.price_input_per_million || 0} 输出 ${p.price_output_per_million || 0}`
+                  : ""}
+                {providerTest[p.id] ? ` · ${providerTest[p.id]}` : ""}
+                {providerTaskTest[p.id] ? ` · 任务演练：${providerTaskTest[p.id].text}` : ""}
               </span>
+              {providerTaskTest[p.id]?.taskId && (
+                <button
+                  onClick={() => onOpenTask?.(providerTaskTest[p.id]!.taskId!)}
+                  className="rounded px-1.5 text-[12px] text-accent hover:bg-accent-soft"
+                  title="打开该模型演练任务的详情、活动日志和交付物"
+                >
+                  打开任务
+                </button>
+              )}
+              <button
+                onClick={() => void testProvider(p.id)}
+                className="rounded px-1.5 text-[12px] text-ink-2 hover:bg-sel hover:text-ink"
+                title="发送一次最小模型请求，验证 Base URL / Key / 模型名 / 协议适配"
+              >
+                测试
+              </button>
+              <button
+                onClick={() => void runProviderTaskTest(p.id)}
+                className="rounded px-1.5 text-[12px] text-ink-2 hover:bg-sel hover:text-ink"
+                title="创建一条诊断任务，验证工具调用、文档交付、验收和用量归因；会产生少量 token 消耗"
+              >
+                任务演练
+              </button>
               <button
                 onClick={() => startEdit(p.id)}
                 className="rounded px-1.5 text-[12px] text-ink-2 hover:bg-sel hover:text-ink"
@@ -577,10 +740,37 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         )}
       </div>
 
+      {!editingId && (
+        <>
+          <label className={labelCls}>推荐预设</label>
+          <div className="grid gap-2 sm:grid-cols-3">
+            {PROVIDER_PRESETS.map((preset) => (
+              <button
+                key={preset.id}
+                type="button"
+                onClick={() => applyProviderPreset(preset)}
+                className={`rounded-lg border p-2 text-left transition-colors ${
+                  name === preset.name && baseUrl === preset.base_url
+                    ? "border-accent bg-accent-soft"
+                    : "border-line hover:border-accent/40 hover:bg-sel/60"
+                }`}
+                title={`${preset.base_url} · ${preset.default_model}`}
+              >
+                <div className="text-[12.5px] font-semibold">{preset.name}</div>
+                <div className="mt-1 line-clamp-2 text-[11px] leading-snug text-ink-3">{preset.desc}</div>
+              </button>
+            ))}
+          </div>
+          <div className="mt-1.5 text-[11px] leading-relaxed text-ink-3">
+            预设只负责填入协议路径和模型名；Key 仍需你手动填写并点击「测试」确认。模型列表可能随供应商更新，字段可直接改。
+          </div>
+        </>
+      )}
+
       <label className={labelCls}>名称</label>
-      <input value={name} onChange={(e) => setName(e.target.value)} placeholder="例如 DeepSeek / 本地 Ollama" className={inputCls} />
-      <label className={labelCls}>Base URL（Anthropic 协议兼容端点）</label>
-      <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://api.deepseek.com/anthropic" className={inputCls} />
+      <input value={name} onChange={(e) => setName(e.target.value)} placeholder="例如 DeepSeek / SiliconFlow / 百炼" className={inputCls} />
+      <label className={labelCls}>Base URL（自动识别 Anthropic-compatible / OpenAI-compatible）</label>
+      <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://api.deepseek.com/anthropic 或 https://api.siliconflow.cn/v1" className={inputCls} />
       <label className={labelCls}>API Key（仅存服务端，不会下发前端）</label>
       <input
         value={apiKey}
@@ -592,11 +782,11 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       <div className="flex gap-2">
         <div className="flex-1">
           <label className={labelCls}>默认模型（分析/创作）</label>
-          <input value={defaultModel} onChange={(e) => setDefaultModel(e.target.value)} placeholder="deepseek-v4-pro" className={inputCls} />
+          <input value={defaultModel} onChange={(e) => setDefaultModel(e.target.value)} placeholder="deepseek-v4-pro / THUDM/GLM-4.1V-9B-Thinking / qwen-plus" className={inputCls} />
         </div>
         <div className="flex-1">
           <label className={labelCls}>轻量模型（重复性任务，可选）</label>
-          <input value={lightModel} onChange={(e) => setLightModel(e.target.value)} placeholder="deepseek-v4-flash" className={inputCls} />
+          <input value={lightModel} onChange={(e) => setLightModel(e.target.value)} placeholder="deepseek-v4-flash / Qwen/Qwen3-8B / qwen-turbo" className={inputCls} />
         </div>
       </div>
       <label className={labelCls}>单次输出上限 max_tokens（可选）</label>
@@ -606,15 +796,48 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         placeholder="默认 16000（DeepSeek V4 支持 384K，可不填）；本地模型按运行时上限"
         className={inputCls}
       />
+      <label className={labelCls}>价格（可选，用于模型演练估算成本）</label>
+      <div className="grid gap-2 sm:grid-cols-[1fr_1fr_96px]">
+        <input
+          value={priceInputPerMillion}
+          onChange={(e) => setPriceInputPerMillion(e.target.value)}
+          placeholder="输入 / 1M tokens"
+          inputMode="decimal"
+          className={inputCls}
+        />
+        <input
+          value={priceOutputPerMillion}
+          onChange={(e) => setPriceOutputPerMillion(e.target.value)}
+          placeholder="输出 / 1M tokens"
+          inputMode="decimal"
+          className={inputCls}
+        />
+        <input
+          value={priceCurrency}
+          onChange={(e) => setPriceCurrency(e.target.value.toUpperCase())}
+          placeholder="USD"
+          className={inputCls}
+        />
+      </div>
+      <div className="mt-1 text-[11px] leading-relaxed text-ink-3">
+        按供应商控制台价格手动填写；不填则只显示 billable tokens，不估算金额。
+      </div>
       <label className="mt-3 flex cursor-pointer items-center gap-2 text-[12.5px] text-ink-2">
         <input type="checkbox" checked={webTools} onChange={(e) => setWebTools(e.target.checked)} />
-        该端点支持服务端联网工具（web_search/web_fetch）。DeepSeek 官方 Anthropic 端点声明原生支持，可勾选；
-        若实测不支持会自动停用并继续工作。
+        该端点支持 Anthropic 服务端联网工具（web_search/web_fetch）。仅 Anthropic-compatible 端点建议勾选；
+        OpenAI-compatible 通道会自动关闭该项，联网请优先用 MCP。
       </label>
       <label className="mt-2 flex cursor-pointer items-center gap-2 text-[12.5px] text-ink-2">
         <input type="checkbox" checked={isStrong} onChange={(e) => setIsStrong(e.target.checked)} />
         ⭐ 用作强通道：没有官方 Anthropic key 时，验收与项目汇总优先走该供应商的默认模型
         （质量闭环的下限，建议指给最强的一家）。
+      </label>
+      <label className="mt-2 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-2">
+        <input className="mt-0.5" type="checkbox" checked={runTaskAfterSave} onChange={(e) => setRunTaskAfterSave(e.target.checked)} />
+        <span>
+          保存后立即跑任务演练：创建一条诊断任务，验证工具调用、文档交付、验收和用量归因。
+          会产生少量 token 消耗，适合 DeepSeek / SiliconFlow / 百炼首次接入后直接闭环。
+        </span>
       </label>
       {error && <div className="mt-2 text-[12px] text-red-500">{error}</div>}
       <button
@@ -622,7 +845,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         disabled={!name.trim() || (!editingId && !apiKey.trim()) || busy}
         className="mt-4 w-full rounded-lg bg-accent py-2 text-[13.5px] font-medium text-white disabled:opacity-40"
       >
-        {editingId ? "保存修改" : "添加供应商"}
+        {busy ? "处理中…" : runTaskAfterSave ? "保存并跑任务演练" : editingId ? "保存修改" : "添加供应商"}
       </button>
 
       <ImageProviderSection />

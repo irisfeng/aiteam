@@ -5,12 +5,16 @@ import {
   closeProject,
   createAgent,
   createMcpServer,
+  createProject,
   createSkill,
+  createTaskEvent,
   deleteChannel,
   deleteMcpServer,
   deleteSkill,
   getMcpServer,
   getMessage,
+  getSkill,
+  getProject,
   getUserById,
   listMcpServers,
   listSkills,
@@ -27,16 +31,20 @@ import {
   deleteDocument,
   findDm,
   getAgent,
+  getApproval,
   getChannel,
   getMemory,
+  getTask,
   listDocumentVersions,
   insertMessage,
   listAgents,
   listApprovals,
   listChannels,
   listMessages,
+  listTaskEvents,
   listTasks,
   resolveApproval,
+  updateApprovalPayload,
   updateTask,
 } from "./db.js";
 import { broadcast } from "./bus.js";
@@ -73,17 +81,44 @@ import { DEFAULT_IMAGE_BASE_URL, generateImageBytes } from "./agents/images.js";
 import {
   isMock,
   onMessage,
+  onClarificationResolved,
   onPlanResolved,
   onTaskAssigned,
   onTaskDelivered,
   oneShotComplete,
+  buildSkillIndex,
+  readSkillBody,
   stopChannel,
   stopTask,
   teamStatus,
+  testProviderConnection,
   triggerAgent,
 } from "./agents/engine.js";
 
 export const api = Router();
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const mcpKey = (name: string) => name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "server";
+
+async function waitForProviderTask(taskId: string, timeoutMs = 60000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const task = getTask(taskId);
+    const events = listTaskEvents(taskId);
+    if (!task) return { task, events, done: true };
+    if (task.status === "review" || task.status === "blocked" || events.some((e) => e.type === "failure")) {
+      return { task, events, done: true };
+    }
+    await sleep(500);
+  }
+  return { task: getTask(taskId), events: listTaskEvents(taskId), done: false };
+}
+
+function emitTaskEvent(input: Parameters<typeof createTaskEvent>[0]) {
+  const event = createTaskEvent(input);
+  broadcast({ type: "task:event", payload: event });
+  return event;
+}
 
 api.get("/bootstrap", async (req, res) => {
   seedForOwner(); // 首次进入：为当前用户播种私有工作区（幂等）
@@ -98,6 +133,7 @@ api.get("/bootstrap", async (req, res) => {
     agents: listAgents(),
     channels: listChannels(),
     tasks: listTasks(),
+    task_events: listTaskEvents(),
     approvals: listApprovals(),
     documents: listDocuments(),
     projects: listProjects(),
@@ -238,6 +274,122 @@ api.post("/mcp-servers/:id/test", requireAdmin, (req, res) => {
     .catch((err) => res.status(502).json({ error: String(err?.message ?? err) }));
 });
 
+api.post("/mcp-servers/:id/task-test", requireAdmin, async (req, res) => {
+  const server = getMcpServer(req.params.id);
+  if (!server) return res.status(404).json({ error: "not found" });
+  const startedAt = Date.now();
+  try {
+    let channel = req.body?.channel_id ? getChannel(String(req.body.channel_id)) : undefined;
+    channel = channel ?? listChannels().find((c) => c.kind === "channel");
+    if (!channel) {
+      channel = createChannel("MCP 测试", [], "channel");
+      broadcast({ type: "channel:new", payload: channel });
+    }
+    const projectId = req.body?.project_id ? getProject(String(req.body.project_id))?.id ?? null : null;
+
+    const task = createTask({
+      channel_id: channel.id,
+      project_id: projectId,
+      title: `MCP 能力演练：${server.name}`,
+      description: "验证该 MCP server 是否能进入 AiTeam 工作线：连接、列工具，并在可识别场景下执行一次样例工具。",
+      acceptance_criteria: "必须留下 tool / delivery / verification 事件；文档转换类 MCP 应生成来源文档。",
+      created_by: "user",
+    });
+    emitTaskEvent({
+      task_id: task.id,
+      channel_id: task.channel_id,
+      project_id: task.project_id,
+      type: "created",
+      summary: "用户启动 MCP 能力演练",
+      metadata: { mcp_server_id: server.id, mcp_server: server.name, safety: server.safety, link_check: Boolean(projectId) },
+    });
+    broadcast({ type: "task:upsert", payload: task });
+
+    if (!server.enabled) {
+      const enabled = setMcpServerEnabled(server.id, true);
+      if (enabled) broadcast({ type: "channel:update", payload: channel });
+    }
+
+    const tools = await testMcpServer(server);
+    emitTaskEvent({
+      task_id: task.id,
+      channel_id: task.channel_id,
+      project_id: task.project_id,
+      type: "tool",
+      summary: `MCP 连接成功，发现 ${tools} 个工具`,
+      metadata: { mcp_server_id: server.id, tools },
+    });
+
+    const docs = [];
+    let sampleOutput = "";
+    let converted = false;
+    if (mcpKey(server.name) === "markitdown") {
+      const sample = Buffer.from("# AiTeam MCP 演练\n\n- 输入：本地样本文档\n- 预期：转换为 Markdown 来源\n", "utf8");
+      sampleOutput = await withTempFile(sample, ".txt", (p) =>
+        callMcpTool(`mcp__${mcpKey(server.name)}__convert_to_markdown`, { uri: "file://" + p })
+      );
+      converted = !/^错误：/.test(sampleOutput);
+      if (converted) {
+        const doc = createDocument({
+          channel_id: channel.id,
+          title: `MCP 来源演练：${server.name}`,
+          kind: "source",
+          content: sampleOutput.slice(0, 20000),
+          task_id: task.id,
+        });
+        docs.push(doc);
+        broadcast({ type: "doc:upsert", payload: doc });
+        emitTaskEvent({
+          task_id: task.id,
+          channel_id: task.channel_id,
+          project_id: task.project_id,
+          type: "delivery",
+          summary: "MCP 已把样本文档转换为来源文档",
+          metadata: { doc_id: doc.id, mcp_server_id: server.id },
+        });
+      }
+    } else {
+      emitTaskEvent({
+        task_id: task.id,
+        channel_id: task.channel_id,
+        project_id: task.project_id,
+        type: "delivery",
+        summary: "MCP 连接和工具清单已验证；具体业务工具将在任务运行时调用",
+        metadata: { mcp_server_id: server.id, tools },
+      });
+    }
+
+    const finalTask = updateTask(task.id, { status: "review" }) ?? task;
+    emitTaskEvent({
+      task_id: task.id,
+      channel_id: task.channel_id,
+      project_id: task.project_id,
+      type: "verification",
+      summary: converted || mcpKey(server.name) !== "markitdown" ? "MCP 能力演练通过，等待人工复核" : "MCP 连接成功，但样例转换未通过",
+      metadata: { mcp_server_id: server.id, converted, tools },
+    });
+    broadcast({ type: "task:upsert", payload: finalTask });
+
+    res.json({
+      ok: tools > 0 && (mcpKey(server.name) === "markitdown" ? converted : true),
+      server: sanitizeMcpServer(getMcpServer(server.id) ?? server),
+      task: finalTask,
+      docs,
+      events: listTaskEvents(task.id),
+      checks: {
+        connected: tools > 0,
+        tools,
+        converted,
+        source_document_created: docs.length > 0,
+      },
+      latency_ms: Date.now() - startedAt,
+      sample: sampleOutput.slice(0, 500),
+    });
+  } catch (err: any) {
+    res.status(502).json({ ok: false, error: String(err?.message ?? err).slice(0, 500), latency_ms: Date.now() - startedAt });
+  }
+});
+
 api.delete("/mcp-servers/:id", requireAdmin, (req, res) => {
   dropConnection(req.params.id);
   deleteMcpServer(req.params.id);
@@ -278,6 +430,104 @@ api.patch("/skills/:id", requireAdmin, (req, res) => {
   });
   if (!skill) return res.status(404).json({ error: "not found" });
   res.json(skill);
+});
+
+api.post("/skills/:id/task-test", requireAdmin, (req, res) => {
+  const before = getSkill(req.params.id);
+  if (!before) return res.status(404).json({ error: "not found" });
+  const skill = before.enabled ? before : updateSkill(before.id, { enabled: true }) ?? before;
+  let channel = req.body?.channel_id ? getChannel(String(req.body.channel_id)) : undefined;
+  channel = channel ?? listChannels().find((c) => c.kind === "channel");
+  if (!channel) {
+    channel = createChannel("技能测试", [], "channel");
+    broadcast({ type: "channel:new", payload: channel });
+  }
+  const projectId = req.body?.project_id ? getProject(String(req.body.project_id))?.id ?? null : null;
+
+  const focus = `技能演练 ${skill.name} ${skill.trigger} ${skill.when_to_use} ${skill.desc}`;
+  const index = buildSkillIndex(focus, [skill]);
+  const body = readSkillBody(skill.id);
+  const task = createTask({
+    channel_id: channel.id,
+    project_id: projectId,
+    title: `技能演练：${skill.name}`,
+    description: "验证该技能启用后是否能进入 AiTeam 工作线：索引可见、正文可读取、交付物明确引用该方法。",
+    acceptance_criteria: "必须留下 tool / delivery / verification 事件，并生成一份 report 交付物。",
+    created_by: "user",
+  });
+  emitTaskEvent({
+    task_id: task.id,
+    channel_id: task.channel_id,
+    project_id: task.project_id,
+    type: "created",
+    summary: "用户启动技能演练",
+    metadata: { skill_id: skill.id, skill_name: skill.name, link_check: Boolean(projectId) },
+  });
+  emitTaskEvent({
+    task_id: task.id,
+    channel_id: task.channel_id,
+    project_id: task.project_id,
+    type: "tool",
+    summary: `read_skill 读取「${skill.name}」正文`,
+    metadata: { skill_id: skill.id, body_chars: body.length },
+  });
+  const report = [
+    `# 技能演练：${skill.name}`,
+    "",
+    `结论：${body ? "该技能已启用，索引可见，正文可按需读取。" : "该技能正文为空或不可读取。"}`,
+    "",
+    "## 索引证据",
+    index || "（无索引）",
+    "",
+    "## 正文摘录",
+    body.slice(0, 1200) || "（无正文）",
+    "",
+    "## 自查表",
+    `- 技能启用 -> ${skill.enabled ? "是" : "否"}`,
+    `- 索引包含 read_skill -> ${index.includes("read_skill") ? "是" : "否"}`,
+    `- 正文可读取 -> ${body ? "是" : "否"}`,
+  ].join("\n");
+  const doc = createDocument({
+    channel_id: channel.id,
+    title: `技能演练报告：${skill.name}`,
+    kind: "report",
+    content: report,
+    task_id: task.id,
+  });
+  broadcast({ type: "doc:upsert", payload: doc });
+  emitTaskEvent({
+    task_id: task.id,
+    channel_id: task.channel_id,
+    project_id: task.project_id,
+    type: "delivery",
+    summary: "技能演练报告已写入文档库",
+    metadata: { skill_id: skill.id, doc_id: doc.id },
+  });
+  const finalTask = updateTask(task.id, { status: "review" }) ?? task;
+  emitTaskEvent({
+    task_id: task.id,
+    channel_id: task.channel_id,
+    project_id: task.project_id,
+    type: "verification",
+    summary: body && index.includes("read_skill") ? "技能演练通过，等待人工复核" : "技能演练未完全通过",
+    metadata: { skill_id: skill.id, indexed: Boolean(index), body_chars: body.length },
+  });
+  broadcast({ type: "task:upsert", payload: finalTask });
+
+  res.json({
+    ok: Boolean(body && index.includes("read_skill")),
+    skill,
+    task: finalTask,
+    docs: [doc],
+    events: listTaskEvents(task.id),
+    checks: {
+      enabled: Boolean(skill.enabled),
+      indexed: Boolean(index),
+      read_hint: index.includes("read_skill"),
+      body_loaded: body.length > 0,
+      delivered: true,
+    },
+  });
 });
 
 api.delete("/skills/:id", requireAdmin, (req, res) => {
@@ -368,7 +618,19 @@ api.post("/agents/from-template", (req, res) => {
 });
 
 api.post("/providers", requireAdmin, (req, res) => {
-  const { name, base_url, api_key, default_model, light_model, max_tokens, web_tools, is_strong } = req.body ?? {};
+  const {
+    name,
+    base_url,
+    api_key,
+    default_model,
+    light_model,
+    max_tokens,
+    web_tools,
+    is_strong,
+    price_input_per_million,
+    price_output_per_million,
+    price_currency,
+  } = req.body ?? {};
   if (!name || !api_key) return res.status(400).json({ error: "name and api_key required" });
   const provider = createProvider({
     name: String(name).trim(),
@@ -379,12 +641,27 @@ api.post("/providers", requireAdmin, (req, res) => {
     max_tokens: Number(max_tokens) || undefined,
     web_tools: Boolean(web_tools),
     is_strong: Boolean(is_strong),
+    price_input_per_million: Math.max(0, Number(price_input_per_million) || 0),
+    price_output_per_million: Math.max(0, Number(price_output_per_million) || 0),
+    price_currency: String(price_currency || "USD").trim().toUpperCase(),
   });
   res.json(sanitizeProvider(provider));
 });
 
 api.patch("/providers/:id", requireAdmin, (req, res) => {
-  const { name, base_url, api_key, default_model, light_model, max_tokens, web_tools, is_strong } = req.body ?? {};
+  const {
+    name,
+    base_url,
+    api_key,
+    default_model,
+    light_model,
+    max_tokens,
+    web_tools,
+    is_strong,
+    price_input_per_million,
+    price_output_per_million,
+    price_currency,
+  } = req.body ?? {};
   const provider = updateProvider(req.params.id, {
     ...(name !== undefined ? { name: String(name).trim() } : {}),
     ...(base_url !== undefined ? { base_url: String(base_url).trim().replace(/\/$/, "") } : {}),
@@ -394,9 +671,149 @@ api.patch("/providers/:id", requireAdmin, (req, res) => {
     ...(max_tokens !== undefined ? { max_tokens: Number(max_tokens) || 16000 } : {}),
     ...(web_tools !== undefined ? { web_tools: web_tools ? 1 : 0 } : {}),
     ...(is_strong !== undefined ? { is_strong: is_strong ? 1 : 0 } : {}),
+    ...(price_input_per_million !== undefined ? { price_input_per_million: Math.max(0, Number(price_input_per_million) || 0) } : {}),
+    ...(price_output_per_million !== undefined ? { price_output_per_million: Math.max(0, Number(price_output_per_million) || 0) } : {}),
+    ...(price_currency !== undefined ? { price_currency: String(price_currency || "USD").trim().toUpperCase() } : {}),
   });
   if (!provider) return res.status(404).json({ error: "provider not found" });
   res.json(sanitizeProvider(provider));
+});
+
+api.post("/providers/:id/test", requireAdmin, async (req, res) => {
+  try {
+    const result = await testProviderConnection(req.params.id);
+    res.json(result);
+  } catch (err: any) {
+    const msg = String(err?.message ?? err);
+    const status = msg === "provider not found" ? 404 : 400;
+    res.status(status).json({ ok: false, error: msg.slice(0, 500) });
+  }
+});
+
+api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
+  try {
+    const provider = getProvider(req.params.id);
+    if (!provider) return res.status(404).json({ error: "provider not found" });
+    if (!provider.api_key) return res.status(400).json({ error: "provider api key is missing" });
+    const model = provider.default_model || provider.light_model;
+    if (!model) return res.status(400).json({ error: "provider default model is missing" });
+
+    let channel = req.body?.channel_id ? getChannel(String(req.body.channel_id)) : undefined;
+    channel = channel ?? listChannels().find((c) => c.kind === "channel");
+    if (!channel) {
+      channel = createChannel("模型测试", [], "channel");
+      broadcast({ type: "channel:new", payload: channel });
+    }
+
+    const agentName = `模型演练-${provider.name}`.slice(0, 40);
+    let agent = listAgents().find((a) => a.provider_id === provider.id && a.name === agentName);
+    if (!agent) {
+      agent = createAgent({
+        name: agentName,
+        emoji: "🧪",
+        role: "模型供应商任务演练",
+        system_prompt:
+          "你是 AiTeam 的模型供应商任务演练同事。收到任务后必须使用 write_document 写入一份 report 交付物，内容应包含：模型通道、工具调用、验收自查。不要只在聊天里回答。",
+        provider_id: provider.id,
+        model,
+      });
+    }
+
+    if (!channel.agent_ids?.includes(agent.id)) {
+      channel = setChannelAgents(channel.id, Array.from(new Set([...(channel.agent_ids ?? []), agent.id]))) ?? channel;
+      broadcast({ type: "channel:update", payload: channel });
+    }
+    const projectId = req.body?.project_id ? getProject(String(req.body.project_id))?.id ?? null : null;
+
+    const task = createTask({
+      channel_id: channel.id,
+      project_id: projectId,
+      title: `模型任务演练：${provider.name}`,
+      description: "验证该模型供应商能否在 AiTeam 任务运行线中完成工具调用、工具结果续写、文档交付和验收。",
+      acceptance_criteria: "必须通过 write_document 写入 report 交付物，并进入待评审；活动日志应包含 tool、delivery、verification。",
+      assignee_agent_id: agent.id,
+      reviewer_agent_id: null,
+      created_by: "user",
+    });
+    emitTaskEvent({
+      task_id: task.id,
+      channel_id: task.channel_id,
+      project_id: task.project_id,
+      agent_id: agent.id,
+      type: "created",
+      summary: "用户启动模型供应商任务演练",
+      metadata: { provider_id: provider.id, model, link_check: Boolean(projectId) },
+    });
+    emitTaskEvent({
+      task_id: task.id,
+      channel_id: task.channel_id,
+      project_id: task.project_id,
+      agent_id: agent.id,
+      type: "claim",
+      summary: `${agent.name} 接手模型供应商任务演练`,
+      metadata: { provider_id: provider.id, model },
+    });
+    broadcast({ type: "task:upsert", payload: task });
+
+    const startedAt = Date.now();
+    onTaskAssigned(task);
+    const { task: finalTask, events, done } = await waitForProviderTask(task.id, 60000);
+    const docs = listDocuments().filter((d) => d.task_id === task.id);
+    const eventTypes = new Set(events.map((e) => e.type));
+    const delivered = finalTask?.status === "review" && docs.length > 0;
+    const toolObserved = eventTypes.has("tool");
+    const verified = eventTypes.has("verification");
+    const usageRows = usageRecent(40).filter((r) => r.author_id === agent.id && r.model === model && r.created_at >= startedAt);
+    const usageTracked = usageRows.length > 0;
+    const usageSummary = usageRows.reduce((acc, row) => {
+      const usage = readUsage(row.usage_json);
+      acc.input += usage.promptTotal;
+      acc.output += usage.output;
+      acc.billable += usage.billable;
+      return acc;
+    }, { input: 0, output: 0, billable: 0 });
+    const estimatedCost =
+      provider.price_input_per_million > 0 || provider.price_output_per_million > 0
+        ? (usageSummary.input * provider.price_input_per_million + usageSummary.output * provider.price_output_per_million) / 1_000_000
+        : null;
+    const usageSummaryWithCost = {
+      ...usageSummary,
+      estimated_cost: estimatedCost,
+      price_currency: provider.price_currency || "USD",
+    };
+    const latencyMs = Date.now() - startedAt;
+    const checks = {
+      completed: done,
+      delivered,
+      tool_observed: toolObserved,
+      verified,
+      usage_tracked: usageTracked,
+    };
+    const ok = delivered && toolObserved && verified && usageTracked;
+    const resultEvent = emitTaskEvent({
+      task_id: task.id,
+      channel_id: task.channel_id,
+      project_id: task.project_id,
+      agent_id: agent.id,
+      type: ok ? "verification" : "failure",
+      summary: ok ? "模型供应商任务演练通过" : "模型供应商任务演练未通过",
+      metadata: { provider_id: provider.id, model, latency_ms: latencyMs, checks, usage_summary: usageSummaryWithCost, provider_task_test: true },
+    });
+
+    res.json({
+      ok,
+      provider: sanitizeProvider(provider),
+      model,
+      latency_ms: latencyMs,
+      task: finalTask ?? task,
+      docs,
+      events: [...events, resultEvent],
+      checks,
+      usage_summary: usageSummaryWithCost,
+    });
+  } catch (err: any) {
+    res.status(400).json({ ok: false, error: String(err?.message ?? err).slice(0, 500) });
+  }
 });
 
 api.delete("/providers/:id", requireAdmin, (req, res) => {
@@ -406,8 +823,14 @@ api.delete("/providers/:id", requireAdmin, (req, res) => {
 
 api.get("/tasks", (_req, res) => res.json(listTasks()));
 
+api.get("/tasks/:id/events", (req, res) => {
+  const task = getTask(req.params.id);
+  if (!task) return res.status(404).json({ error: "task not found" });
+  res.json(listTaskEvents(task.id));
+});
+
 api.post("/tasks", (req, res) => {
-  const { title, description, channel_id, assignee_agent_id, acceptance_criteria, source_doc_ids } = req.body ?? {};
+  const { title, description, channel_id, assignee_agent_id, reviewer_agent_id, acceptance_criteria, source_doc_ids } = req.body ?? {};
   if (!title) return res.status(400).json({ error: "title required" });
   const task = createTask({
     title: String(title),
@@ -415,25 +838,405 @@ api.post("/tasks", (req, res) => {
     acceptance_criteria: String(acceptance_criteria ?? ""),
     channel_id: channel_id ?? null,
     assignee_agent_id: assignee_agent_id ?? null,
+    reviewer_agent_id: reviewer_agent_id ?? null,
     // 定向润色：前端/调用方可直接把来源文档 id 挂到任务上，触发 buildWorkBrief 的受限改写引导
     source_doc_ids: Array.isArray(source_doc_ids) ? source_doc_ids.map(String) : [],
     created_by: "user",
   });
+  emitTaskEvent({
+    task_id: task.id,
+    channel_id: task.channel_id,
+    project_id: task.project_id,
+    type: "created",
+    summary: "用户创建了任务",
+  });
+  if (task.assignee_agent_id) {
+    emitTaskEvent({
+      task_id: task.id,
+      channel_id: task.channel_id,
+      project_id: task.project_id,
+      agent_id: task.assignee_agent_id,
+      type: "claim",
+      summary: `任务指派给 ${getAgent(task.assignee_agent_id)?.name ?? "AI 同事"}`,
+    });
+  }
+  if (task.reviewer_agent_id) {
+    emitTaskEvent({
+      task_id: task.id,
+      channel_id: task.channel_id,
+      project_id: task.project_id,
+      agent_id: task.reviewer_agent_id,
+      type: "verification",
+      summary: `用户指定复核人：${getAgent(task.reviewer_agent_id)?.name ?? "AI 同事"}`,
+    });
+  }
   broadcast({ type: "task:upsert", payload: task });
   if (task.assignee_agent_id) onTaskAssigned(task);
   res.json(task);
 });
 
+function pickScenarioAgent(agents: ReturnType<typeof listAgents>, patterns: RegExp[], fallbackIndex: number) {
+  return (
+    agents.find((a) => patterns.some((p) => p.test(`${a.name} ${a.role}`))) ??
+    agents[fallbackIndex] ??
+    agents[0]
+  );
+}
+
+const SCENARIOS = [
+  {
+    id: "helio-core",
+    title: "协作演练",
+    desc: "三步跑通认领、依赖推进、复核和人类关闭。",
+  },
+  {
+    id: "research-report",
+    title: "调研报告",
+    desc: "调研、对比表、分析报告、复核摘要的知识工作闭环。",
+  },
+  {
+    id: "solution-deck",
+    title: "方案演示",
+    desc: "需求澄清、方案架构、演示文稿、交付复核。",
+  },
+] as const;
+
+api.get("/scenarios", (_req, res) => res.json(SCENARIOS));
+
+type ScenarioId = (typeof SCENARIOS)[number]["id"];
+
+/** 配置链路验收：把模型 / MCP / Skills 自检任务收进同一个项目，方便人工复核与关单。 */
+api.post("/link-checks", requireAdmin, (req, res) => {
+  const requestedChannelId = req.body?.channel_id ? String(req.body.channel_id) : "";
+  const channel = requestedChannelId
+    ? getChannel(requestedChannelId)
+    : listChannels().find((c) => c.kind === "channel") ?? listChannels()[0];
+  if (!channel) return res.status(400).json({ error: "channel required" });
+  const lead = listAgents()[0];
+  const project = createProject({
+    channel_id: channel.id,
+    lead_agent_id: lead?.id ?? null,
+    title: "配置链路验收：模型 / MCP / Skills",
+    goal: "验证真实模型、MCP 插件和技能能进入同一任务运行线：产生结构化事件、交付物、复核状态，并由人类最终关单。",
+    status: "running",
+    autonomy: "auto",
+  });
+  const sys = insertMessage({
+    channel_id: channel.id,
+    author_type: "system",
+    content: `🧪 已启动「${project.title}」：模型、MCP、Skills 自检任务会挂入同一个项目，等待人工复核与关单。`,
+  });
+  broadcast({ type: "message:new", payload: sys });
+  broadcast({ type: "project:upsert", payload: project });
+  res.json({ project });
+});
+
+/** 受控场景：从产品内一键启动 goal → plan → claim → work → review → close 的任务运行线。 */
+api.post("/scenarios/:id/start", (req, res) => {
+  const scenarioId = String(req.params.id) as ScenarioId;
+  const scenario = SCENARIOS.find((s) => s.id === scenarioId);
+  if (!scenario) return res.status(404).json({ error: "scenario not found" });
+  const acceptanceMode = Boolean(req.body?.acceptance) && scenarioId === "helio-core";
+  const requestedChannelId = req.body?.channel_id ? String(req.body.channel_id) : "";
+  const channel = requestedChannelId
+    ? getChannel(requestedChannelId)
+    : listChannels().find((c) => c.kind === "channel") ?? listChannels()[0];
+  if (!channel) return res.status(400).json({ error: "channel required" });
+
+  const agents = listAgents();
+  if (agents.length === 0) return res.status(400).json({ error: "at least one agent required" });
+  const lead = pickScenarioAgent(agents, [/产品|PM|经理|规划|product/i], 0);
+  const builder = pickScenarioAgent(agents, [/工程|开发|实现|engineer|dev/i], 1);
+  const reviewer = pickScenarioAgent(agents, [/审核|评审|复核|review|QA|测试/i], 2);
+  const researcher = pickScenarioAgent(agents, [/调研|分析|SEO|增长|research|analyst/i], 3);
+  const writer = pickScenarioAgent(agents, [/文案|内容|写作|SEO|writer|content/i], 3);
+  const projectTitle =
+    acceptanceMode
+      ? "闭环验收：AI 同事任务运行线"
+      : scenarioId === "research-report"
+      ? "调研报告：从问题到可复核交付"
+      : scenarioId === "solution-deck"
+        ? "方案演示：从需求到可讲解材料"
+        : "协作演练：AI 同事任务运行线";
+  const projectGoal =
+    acceptanceMode
+      ? "产品内验收 AI 同事在同一频道里认领任务、按依赖推进、留下结构化审计轨迹，交付后等待人类复核并最终关闭。"
+      : scenarioId === "research-report"
+      ? "验证 AI 同事围绕同一调研目标分工：先定口径，再调研与对比，最后交付报告并等待人类关单。"
+      : scenarioId === "solution-deck"
+        ? "验证需求澄清、方案设计、演示文稿与复核摘要能在同一任务运行线中推进。"
+        : "验证 AI 同事在同一频道里认领任务、按依赖推进、留下结构化审计轨迹，并等待人类最终关闭。";
+  const existingProject = listProjects().find((p) => p.channel_id === channel.id && p.title === projectTitle && p.status !== "done");
+  if (existingProject) {
+    const tasks = listTasks().filter((task) => task.project_id === existingProject.id);
+    return res.json({ project: existingProject, tasks, reused: true });
+  }
+
+  const project = createProject({
+    channel_id: channel.id,
+    lead_agent_id: lead.id,
+    title: projectTitle,
+    goal: projectGoal,
+    status: "running",
+    autonomy: "auto",
+  });
+
+  const specs =
+    scenarioId === "research-report"
+      ? [
+          {
+            key: "scope",
+            title: "确定调研问题与验收口径",
+            description: "明确调研对象、比较维度、输出格式和哪些事实需要标来源。",
+            assignee: lead.id,
+            reviewer: reviewer.id,
+            deps: [],
+            acceptance: "包含目标、范围、比较维度、来源要求和最终交付格式。",
+          },
+          {
+            key: "research",
+            title: "收集资料并形成来源清单",
+            description: "按口径收集候选信息，输出带来源的要点清单。",
+            assignee: researcher.id,
+            reviewer: reviewer.id,
+            deps: ["scope"],
+            acceptance: "每个关键事实都应有来源或明确标注待核实。",
+          },
+          {
+            key: "matrix",
+            title: "整理对比表与初步结论",
+            description: "把资料整理成可导出的表格，并给出初步判断。",
+            assignee: builder.id,
+            reviewer: reviewer.id,
+            deps: ["research"],
+            acceptance: "输出维度清晰的对比表，结论能追溯到来源清单。",
+          },
+          {
+            key: "report",
+            title: "撰写最终调研报告",
+            description: "综合来源清单和对比表，形成结论先行的报告。",
+            assignee: writer.id,
+            reviewer: reviewer.id,
+            deps: ["matrix"],
+            acceptance: "报告包含摘要、证据、对比、建议和风险边界。",
+          },
+        ]
+      : scenarioId === "solution-deck"
+        ? [
+            {
+              key: "needs",
+              title: "澄清目标、受众和成功标准",
+              description: "明确演示对象、业务目标、约束和必须回答的问题。",
+              assignee: lead.id,
+              reviewer: reviewer.id,
+              deps: [],
+              acceptance: "输出受众、目标、约束、成功标准和待确认项。",
+            },
+            {
+              key: "solution",
+              title: "设计解决方案与实施路径",
+              description: "给出架构/流程、阶段计划、风险和资源需求。",
+              assignee: builder.id,
+              reviewer: reviewer.id,
+              deps: ["needs"],
+              acceptance: "方案应能落地，包含边界、里程碑和风险控制。",
+            },
+            {
+              key: "deck",
+              title: "制作汇报演示文稿",
+              description: "把方案转成可讲解的 slides 结构和正文。",
+              assignee: writer.id,
+              reviewer: reviewer.id,
+              deps: ["solution"],
+              acceptance: "演示稿应有标题页、问题、方案、路径、风险和结论页。",
+            },
+            {
+              key: "review",
+              title: "复核演示并整理关闭摘要",
+              description: "检查方案与演示是否一致，给出通过/返工意见。",
+              assignee: reviewer.id,
+              reviewer: lead.id,
+              deps: ["deck"],
+              acceptance: "输出复核结论、需修改项或可关闭摘要。",
+            },
+          ]
+        : [
+            {
+              key: "brief",
+              title: "梳理目标与验收口径",
+              description: "把用户目标拆成可验收的短清单，明确哪些动作需要人类确认。",
+              assignee: lead.id,
+              reviewer: reviewer.id,
+              deps: [],
+              acceptance: "输出包含目标、边界、验收口径、风险动作审批点。",
+            },
+            {
+              key: "draft",
+              title: "形成执行方案与交付草稿",
+              description: "基于第一步口径产出可执行方案和首版交付物。",
+              assignee: builder.id,
+              reviewer: reviewer.id,
+              deps: ["brief"],
+              acceptance: "输出方案应能被 reviewer 复核，且清楚标出下一步。",
+            },
+            {
+              key: "gate",
+              title: "复核交付并整理关闭摘要",
+              description: "复核前两步交付质量，整理给人类关闭项目的摘要。",
+              assignee: reviewer.id,
+              reviewer: lead.id,
+              deps: ["brief", "draft"],
+              acceptance: "输出是否通过、返工建议或关闭摘要。",
+            },
+          ];
+
+  const byKey = new Map<string, string>();
+  const tasks = specs.map((s) => {
+    const task = createTask({
+      channel_id: channel.id,
+      project_id: project.id,
+      title: s.title,
+      description: s.description,
+      assignee_agent_id: s.assignee,
+      reviewer_agent_id: s.reviewer,
+      created_by: "user",
+      depends_on: s.deps.map((key) => byKey.get(key)).filter(Boolean) as string[],
+      acceptance_criteria: s.acceptance,
+    });
+    byKey.set(s.key, task.id);
+    return task;
+  });
+
+  const sys = insertMessage({
+    channel_id: channel.id,
+    author_type: "system",
+    content: `🧪 已启动「${project.title}」：${tasks.length} 个子任务将由 AI 同事认领/执行，最终等待人类关闭。`,
+  });
+  broadcast({ type: "message:new", payload: sys });
+  broadcast({ type: "project:upsert", payload: project });
+  for (const task of tasks) {
+    emitTaskEvent({
+      task_id: task.id,
+      channel_id: task.channel_id,
+      project_id: task.project_id,
+      type: "created",
+      summary: `用户启动「${scenario.title}」场景并创建子任务`,
+      metadata: { scenario: scenario.id, acceptance: acceptanceMode },
+    });
+    if (task.assignee_agent_id) {
+      emitTaskEvent({
+        task_id: task.id,
+        channel_id: task.channel_id,
+        project_id: task.project_id,
+        agent_id: task.assignee_agent_id,
+        type: "claim",
+        summary: `场景任务由 ${getAgent(task.assignee_agent_id)?.name ?? "AI 同事"} 认领`,
+        metadata: { scenario: scenario.id, acceptance: acceptanceMode },
+      });
+    }
+    broadcast({ type: "task:upsert", payload: task });
+  }
+  for (const task of tasks) onTaskAssigned(task);
+  res.json({ project, tasks });
+});
+
 api.patch("/tasks/:id", (req, res) => {
-  const { title, description, status, assignee_agent_id } = req.body ?? {};
-  const prev = listTasks().find((t) => t.id === req.params.id);
+  const { title, description, status, assignee_agent_id, reviewer_agent_id } = req.body ?? {};
+  const prev = getTask(req.params.id);
+  if (!prev) return res.status(404).json({ error: "task not found" });
+  if (status !== undefined) {
+    const nextStatus = String(status);
+    const allowed: Record<string, string[]> = {
+      todo: ["todo", "done"],
+      doing: ["todo", "review", "done"],
+      review: ["todo", "done"],
+      blocked: ["done"],
+      done: ["todo", "review"],
+    };
+    if (!["todo", "doing", "review", "blocked", "done"].includes(nextStatus)) {
+      return res.status(400).json({ error: `invalid task status: ${nextStatus}` });
+    }
+    if (nextStatus === "blocked") {
+      return res.status(400).json({ error: "blocked status must be entered through clarification flow" });
+    }
+    if (!allowed[prev.status]?.includes(nextStatus)) {
+      return res.status(400).json({ error: `invalid task transition: ${prev.status} -> ${nextStatus}` });
+    }
+    if (nextStatus === "done") {
+      const pendingApprovals = listApprovals().filter((approval) =>
+        approval.status === "pending" &&
+        (approval.ref_id === prev.id || approval.id === prev.blocked_approval_id)
+      );
+      if (pendingApprovals.length > 0) {
+        return res.status(400).json({
+          error: "task has pending approvals",
+          approval_ids: pendingApprovals.map((a) => a.id),
+        });
+      }
+    }
+  }
   const task = updateTask(req.params.id, {
     ...(title !== undefined ? { title } : {}),
     ...(description !== undefined ? { description } : {}),
     ...(status !== undefined ? { status } : {}),
     ...(assignee_agent_id !== undefined ? { assignee_agent_id } : {}),
+    ...(reviewer_agent_id !== undefined ? { reviewer_agent_id } : {}),
   });
   if (!task) return res.status(404).json({ error: "task not found" });
+  if (task.assignee_agent_id !== prev?.assignee_agent_id) {
+    emitTaskEvent({
+      task_id: task.id,
+      channel_id: task.channel_id,
+      project_id: task.project_id,
+      agent_id: task.assignee_agent_id,
+      type: task.assignee_agent_id ? "claim" : "handoff",
+      summary: task.assignee_agent_id
+        ? `用户指派给 ${getAgent(task.assignee_agent_id)?.name ?? "AI 同事"}`
+        : "用户取消了任务指派",
+    });
+  }
+  if (reviewer_agent_id !== undefined && task.reviewer_agent_id !== prev?.reviewer_agent_id) {
+    emitTaskEvent({
+      task_id: task.id,
+      channel_id: task.channel_id,
+      project_id: task.project_id,
+      agent_id: task.reviewer_agent_id ?? task.assignee_agent_id,
+      type: "verification",
+      summary: task.reviewer_agent_id
+        ? `用户指定复核人：${getAgent(task.reviewer_agent_id)?.name ?? "AI 同事"}`
+        : "用户恢复自动复核",
+    });
+  }
+  if (task.status !== prev?.status) {
+    if (task.status === "blocked") {
+      emitTaskEvent({
+        task_id: task.id,
+        channel_id: task.channel_id,
+        project_id: task.project_id,
+        agent_id: task.assignee_agent_id,
+        type: "blocked",
+        summary: "任务进入等待用户输入状态",
+      });
+    } else if (task.status === "review") {
+      emitTaskEvent({
+        task_id: task.id,
+        channel_id: task.channel_id,
+        project_id: task.project_id,
+        agent_id: task.assignee_agent_id,
+        type: "delivery",
+        summary: "任务提交到人工评审",
+      });
+    } else if (task.status === "done") {
+      emitTaskEvent({
+        task_id: task.id,
+        channel_id: task.channel_id,
+        project_id: task.project_id,
+        agent_id: task.assignee_agent_id,
+        type: "user_close",
+        summary: "用户关闭了任务",
+      });
+    }
+  }
   broadcast({ type: "task:upsert", payload: task });
   // 用户把任务指派给了新的 AI 同事 → 对方自动开工
   if (task.assignee_agent_id && task.assignee_agent_id !== prev?.assignee_agent_id) onTaskAssigned(task);
@@ -449,13 +1252,85 @@ api.post("/tasks/:id/stop", (req, res) => {
   res.json({ ok: true });
 });
 
+/** 待评审任务退回返工：reviewer/human 明确要求修订，任务回到 todo 并保留审计轨迹 */
+api.post("/tasks/:id/revise", (req, res) => {
+  const prev = getTask(req.params.id);
+  if (!prev) return res.status(404).json({ error: "task not found" });
+  if (prev.status !== "review") return res.status(400).json({ error: `task must be in review before revision, got ${prev.status}` });
+  const reason = String(req.body?.reason ?? "").trim() || "复核要求返工";
+  const revisions = (prev.revision_count ?? 0) + 1;
+  const task = updateTask(prev.id, { status: "todo", revision_count: revisions, blocked_approval_id: null });
+  if (!task) return res.status(404).json({ error: "task not found" });
+  emitTaskEvent({
+    task_id: task.id,
+    channel_id: task.channel_id,
+    project_id: task.project_id,
+    agent_id: task.reviewer_agent_id ?? task.assignee_agent_id,
+    type: "verification",
+    summary: `复核退回返工：${reason}`,
+    metadata: { result: "revise", reasons: reason, revision_count: revisions },
+  });
+  emitTaskEvent({
+    task_id: task.id,
+    channel_id: task.channel_id,
+    project_id: task.project_id,
+    agent_id: task.assignee_agent_id,
+    type: "handoff",
+    summary: "任务已退回负责人修订",
+    metadata: { revision_count: revisions },
+  });
+  if (task.channel_id) {
+    const assignee = task.assignee_agent_id ? getAgent(task.assignee_agent_id) : undefined;
+    insertMessage({
+      channel_id: task.channel_id,
+      author_type: "system",
+      content: `↩️ 任务「${task.title}」被退回返工（第 ${revisions} 次）：${reason}${assignee ? `。已交回 ${assignee.name}` : ""}`,
+    });
+  }
+  broadcast({ type: "task:upsert", payload: task });
+  if (task.assignee_agent_id) onTaskAssigned(task);
+  res.json(task);
+});
+
 /** 项目级批量关单（human-only）：一次决策把整个项目的剩余任务与项目本身置 done */
 api.post("/projects/:id/close", (req, res) => {
-  const { project, tasks } = closeProject(req.params.id);
+  const project = getProject(req.params.id);
   if (!project) return res.status(404).json({ error: "project not found" });
-  for (const t of tasks) broadcast({ type: "task:upsert", payload: t });
-  broadcast({ type: "project:upsert", payload: project });
-  res.json({ project, tasks });
+  const projectTasks = listTasks().filter((t) => t.project_id === project.id);
+  const notDelivered = projectTasks.filter((t) => t.status !== "review" && t.status !== "done");
+  if (notDelivered.length > 0) {
+    return res.status(400).json({
+      error: "project has unfinished tasks",
+      task_ids: notDelivered.map((t) => t.id),
+    });
+  }
+  const projectTaskIds = new Set(projectTasks.map((t) => t.id));
+  const pendingApprovals = listApprovals().filter((a) => (
+    a.status === "pending" &&
+    a.ref_id &&
+    (a.ref_id === project.id || projectTaskIds.has(a.ref_id))
+  ));
+  if (pendingApprovals.length > 0) {
+    return res.status(400).json({
+      error: "project has pending approvals",
+      approval_ids: pendingApprovals.map((a) => a.id),
+    });
+  }
+  const { project: closedProject, tasks } = closeProject(req.params.id);
+  if (!closedProject) return res.status(404).json({ error: "project not found" });
+  for (const t of tasks) {
+    emitTaskEvent({
+      task_id: t.id,
+      channel_id: t.channel_id,
+      project_id: t.project_id,
+      agent_id: t.assignee_agent_id,
+      type: "user_close",
+      summary: "用户批量关闭了项目任务",
+    });
+    broadcast({ type: "task:upsert", payload: t });
+  }
+  broadcast({ type: "project:upsert", payload: closedProject });
+  res.json({ project: closedProject, tasks });
 });
 
 api.get("/documents", (_req, res) => res.json(listDocuments()));
@@ -733,12 +1608,29 @@ api.delete("/routines/:id", (req, res) => {
   res.json({ ok: true });
 });
 
+function mergeClarificationResponse(payload: string, response: string): string {
+  try {
+    const parsed = JSON.parse(payload || "{}") as Record<string, unknown>;
+    const proposed = typeof parsed.proposed_default === "string" ? parsed.proposed_default : "";
+    const userResponse = response.trim() || proposed.trim();
+    return JSON.stringify({ ...parsed, user_response: userResponse }, null, 2);
+  } catch {
+    return JSON.stringify({ question: payload, user_response: response.trim() }, null, 2);
+  }
+}
+
 api.post("/approvals/:id/resolve", (req, res) => {
   const approve = Boolean(req.body?.approve);
+  const before = getApproval(req.params.id);
+  if (before?.status === "pending" && before.kind === "clarification" && approve) {
+    const response = typeof req.body?.response === "string" ? req.body.response : "";
+    updateApprovalPayload(before.id, mergeClarificationResponse(before.payload, response));
+  }
   const approval = resolveApproval(req.params.id, approve);
   if (!approval) return res.status(404).json({ error: "approval not found" });
-  broadcast({ type: "approval:upsert", payload: approval });
-  if (approval.channel_id) {
+  const changed = before?.status === "pending" && approval.status !== "pending";
+  if (changed) broadcast({ type: "approval:upsert", payload: approval });
+  if (changed && approval.channel_id) {
     const agent = getAgent(approval.agent_id);
     const sys = insertMessage({
       channel_id: approval.channel_id,
@@ -748,9 +1640,10 @@ api.post("/approvals/:id/resolve", (req, res) => {
     broadcast({ type: "message:new", payload: sys });
     if (approval.kind === "plan" && approval.ref_id) {
       onPlanResolved(approval.ref_id, approve); // 计划把关：批准开工 / 退回唤起 Lead
-    } else {
+    } else if (approval.kind !== "clarification") {
       triggerAgent(approval.agent_id, approval.channel_id);
     }
   }
+  if (changed && approval.kind === "clarification") onClarificationResolved(approval, approve);
   res.json(approval);
 });

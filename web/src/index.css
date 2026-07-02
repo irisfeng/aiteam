@@ -1,31 +1,31 @@
 @import "tailwindcss";
 
-/* ===== Hive 双主题令牌（来自 Claude Design「Hive 桌面端」交接稿） ===== */
+/* ===== AiTeam 工作台双主题令牌 ===== */
 :root {
-  --t-bg: #f3f1eb;
+  --t-bg: #f6f8fb;
   --t-panel: #ffffff;
-  --t-line: #e6e3db;
-  --t-ink: #26241f;
-  --t-dim: #8a877e;
-  --t-faint: #a8a49a;
-  --t-sel: #ece9e1;
-  --t-accent: #c28a1e;
-  --t-accent-soft: #fbf3e2;
-  --t-code-bg: #2b2925;
-  --t-code-ink: #f2efe9;
+  --t-line: #dbe3ee;
+  --t-ink: #172033;
+  --t-dim: #667085;
+  --t-faint: #98a2b3;
+  --t-sel: #edf2f7;
+  --t-accent: #2563eb;
+  --t-accent-soft: #eaf2ff;
+  --t-code-bg: #111827;
+  --t-code-ink: #f8fafc;
 }
 .dark {
-  --t-bg: #131312;
-  --t-panel: #181817;
-  --t-line: #262624;
-  --t-ink: #e8e6e1;
-  --t-dim: #8f8d86;
-  --t-faint: #6e6c66;
-  --t-sel: #232322;
-  --t-accent: #e0a848;
-  --t-accent-soft: #1c1915;
-  --t-code-bg: #0e0e0d;
-  --t-code-ink: #d9d6cf;
+  --t-bg: #0f141b;
+  --t-panel: #151b24;
+  --t-line: #263241;
+  --t-ink: #e6edf6;
+  --t-dim: #99a6b7;
+  --t-faint: #6f7e91;
+  --t-sel: #1f2937;
+  --t-accent: #60a5fa;
+  --t-accent-soft: #13243a;
+  --t-code-bg: #0b1020;
+  --t-code-ink: #e6edf6;
 }
 
 @theme {

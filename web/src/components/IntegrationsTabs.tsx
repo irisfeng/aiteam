@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { API_BASE } from "../api";
 import type { McpPreset } from "../types";
+import { useWorkspace } from "../store";
 
 const SCENARIO_LABEL: Record<McpPreset["scenario"], string> = {
   "office-doc": "办公文档", "data-viz": "数据可视化", "code-mvp": "代码 MVP", research: "研究", general: "通用",
@@ -11,6 +12,11 @@ const SAFETY_LABEL: Record<McpPreset["safety"], string> = { local: "本地", net
 const inputCls =
   "w-full rounded-lg border border-line bg-panel px-3 py-2 text-[13.5px] outline-none focus:border-accent/50";
 const labelCls = "mb-1 mt-3 block text-[12.5px] font-medium text-ink-2 first:mt-0";
+export const INTEGRATIONS_UPDATED_EVENT = "aiteam:integrations-updated";
+
+function notifyIntegrationsUpdated() {
+  window.dispatchEvent(new Event(INTEGRATIONS_UPDATED_EVENT));
+}
 
 interface McpServerInfo {
   id: string;
@@ -23,6 +29,11 @@ interface McpServerInfo {
   env_keys?: string[];
   enabled: number;
   has_token: boolean;
+}
+
+interface TaskTestState {
+  text: string;
+  taskId?: string;
 }
 
 /** 把 "KEY=VALUE" 多行文本解析为对象（值里允许含 =，按首个 = 切分） */
@@ -41,7 +52,8 @@ function parseEnvLines(text: string): Record<string, string> {
 }
 
 /** MCP 插件管理（Osaurus 插件面 / Helio 集成面的 v0） */
-export function McpTab() {
+export function McpTab({ onOpenTask }: { onOpenTask?: (taskId: string) => void }) {
+  const ws = useWorkspace();
   const [servers, setServers] = useState<McpServerInfo[]>([]);
   const [name, setName] = useState("");
   const [kind, setKind] = useState<"http" | "stdio">("http");
@@ -54,6 +66,7 @@ export function McpTab() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [testResult, setTestResult] = useState<Record<string, string>>({});
+  const [taskTestResult, setTaskTestResult] = useState<Record<string, TaskTestState>>({});
   const [presets, setPresets] = useState<McpPreset[]>([]);
   const [showCatalog, setShowCatalog] = useState(false);
 
@@ -108,6 +121,7 @@ export function McpTab() {
       if (!res.ok) throw new Error((await res.json())?.error ?? "添加失败");
       setName(""); setUrl(""); setToken(""); setCommand(""); setArgs(""); setEnvText(""); setSafety("local");
       await load();
+      notifyIntegrationsUpdated();
     } catch (e: any) {
       setError(e?.message ?? "添加失败");
     } finally {
@@ -122,6 +136,7 @@ export function McpTab() {
       body: JSON.stringify({ enabled: !s.enabled }),
     });
     await load();
+    notifyIntegrationsUpdated();
   }
 
   async function test(s: McpServerInfo) {
@@ -131,9 +146,27 @@ export function McpTab() {
     setTestResult((r) => ({ ...r, [s.id]: res.ok ? `✓ ${body.tools} 个工具` : `✗ ${body.error ?? "失败"}` }));
   }
 
+  async function runTaskTest(s: McpServerInfo) {
+    setTaskTestResult((r) => ({ ...r, [s.id]: { text: "能力演练中…" } }));
+    try {
+      const out = await ws.runMcpTaskTest(s.id);
+      const checks = [
+        out.checks.connected ? `${out.checks.tools} 工具` : "未连接",
+        out.checks.source_document_created ? "来源文档" : out.checks.converted ? "已转换" : "无来源文档",
+        out.task.status,
+      ].join(" / ");
+      setTaskTestResult((r) => ({ ...r, [s.id]: { text: `${out.ok ? "通过" : "未通过"} · ${checks} · ${out.latency_ms}ms`, taskId: out.task.id } }));
+      await load();
+      notifyIntegrationsUpdated();
+    } catch (e: any) {
+      setTaskTestResult((r) => ({ ...r, [s.id]: { text: `失败：${String(e?.message ?? e).slice(0, 160)}` } }));
+    }
+  }
+
   async function remove(id: string) {
     await fetch(`${API_BASE}/mcp-servers/${id}`, { method: "DELETE" });
     await load();
+    notifyIntegrationsUpdated();
   }
 
   return (
@@ -212,6 +245,13 @@ export function McpTab() {
                 <button onClick={() => void test(s)} className="rounded px-1.5 text-[12px] text-ink-2 hover:bg-sel">
                   测试
                 </button>
+                <button
+                  onClick={() => void runTaskTest(s)}
+                  className="rounded px-1.5 text-[12px] text-ink-2 hover:bg-sel"
+                  title="创建一条 MCP 能力演练任务，记录工具、交付、验收事件；markitdown 会生成来源文档"
+                >
+                  能力演练
+                </button>
                 <button onClick={() => void remove(s.id)} className="rounded px-1 text-ink-3 hover:bg-sel hover:text-red-500">
                   ✕
                 </button>
@@ -219,6 +259,20 @@ export function McpTab() {
               {testResult[s.id] && (
                 <div className={`mt-1 pl-6 font-mono text-[11px] ${testResult[s.id].startsWith("✓") ? "text-green-600" : "text-ink-3"}`}>
                   {testResult[s.id]}
+                </div>
+              )}
+              {taskTestResult[s.id] && (
+                <div className={`mt-1 flex items-center gap-2 pl-6 font-mono text-[11px] ${taskTestResult[s.id].text.startsWith("通过") ? "text-green-600" : "text-ink-3"}`}>
+                  <span className="min-w-0 flex-1 truncate">能力演练：{taskTestResult[s.id].text}</span>
+                  {taskTestResult[s.id].taskId && (
+                    <button
+                      onClick={() => onOpenTask?.(taskTestResult[s.id]!.taskId!)}
+                      className="shrink-0 rounded px-1.5 font-sans text-[12px] text-accent hover:bg-accent-soft"
+                      title="打开该 MCP 演练任务详情"
+                    >
+                      打开任务
+                    </button>
+                  )}
                 </div>
               )}
             </div>
@@ -295,7 +349,8 @@ interface SkillInfo {
 }
 
 /** 技能管理（Osaurus：横切的工作方法，启用后注入所有同事） */
-export function SkillsTab() {
+export function SkillsTab({ onOpenTask }: { onOpenTask?: (taskId: string) => void }) {
+  const ws = useWorkspace();
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
@@ -304,6 +359,7 @@ export function SkillsTab() {
   const [trigger, setTrigger] = useState("");
   const [whenToUse, setWhenToUse] = useState("");
   const [error, setError] = useState("");
+  const [taskTestResult, setTaskTestResult] = useState<Record<string, TaskTestState>>({});
 
   const load = () =>
     fetch(`${API_BASE}/skills`)
@@ -321,6 +377,7 @@ export function SkillsTab() {
       body: JSON.stringify({ enabled: !s.enabled }),
     });
     await load();
+    notifyIntegrationsUpdated();
   }
 
   async function create() {
@@ -344,11 +401,31 @@ export function SkillsTab() {
     }
     setName(""); setDesc(""); setContent(""); setTrigger(""); setWhenToUse(""); setError(""); setCreating(false);
     await load();
+    notifyIntegrationsUpdated();
   }
 
   async function remove(id: string) {
     await fetch(`${API_BASE}/skills/${id}`, { method: "DELETE" });
     await load();
+    notifyIntegrationsUpdated();
+  }
+
+  async function runTaskTest(s: SkillInfo) {
+    setTaskTestResult((r) => ({ ...r, [s.id]: { text: "演练中…" } }));
+    try {
+      const out = await ws.runSkillTaskTest(s.id);
+      const checks = [
+        out.checks.enabled ? "已启用" : "未启用",
+        out.checks.read_hint ? "索引" : "无索引",
+        out.checks.body_loaded ? "正文" : "无正文",
+        out.task.status,
+      ].join(" / ");
+      setTaskTestResult((r) => ({ ...r, [s.id]: { text: `${out.ok ? "通过" : "未通过"} · ${checks}`, taskId: out.task.id } }));
+      await load();
+      notifyIntegrationsUpdated();
+    } catch (e: any) {
+      setTaskTestResult((r) => ({ ...r, [s.id]: { text: `失败：${String(e?.message ?? e).slice(0, 160)}` } }));
+    }
   }
 
   return (
@@ -372,12 +449,33 @@ export function SkillsTab() {
                 {s.when_to_use || s.desc}
               </span>
               <span className="font-mono text-[10.5px] text-ink-3">{(s.body || s.content).length} 字</span>
+              <button
+                onClick={() => void runTaskTest(s)}
+                className="rounded px-1.5 text-[12px] text-ink-2 hover:bg-sel"
+                title="创建一条技能演练任务，验证技能索引、read_skill 正文读取和报告交付"
+              >
+                演练
+              </button>
               {!s.builtin && (
                 <button onClick={() => void remove(s.id)} className="rounded px-1 text-ink-3 hover:bg-sel hover:text-red-500">
                   ✕
                 </button>
               )}
             </div>
+            {taskTestResult[s.id] && (
+              <div className={`mt-1 flex items-center gap-2 pl-6 font-mono text-[11px] ${taskTestResult[s.id].text.startsWith("通过") ? "text-green-600" : "text-ink-3"}`}>
+                <span className="min-w-0 flex-1 truncate">技能演练：{taskTestResult[s.id].text}</span>
+                {taskTestResult[s.id].taskId && (
+                  <button
+                    onClick={() => onOpenTask?.(taskTestResult[s.id]!.taskId!)}
+                    className="shrink-0 rounded px-1.5 font-sans text-[12px] text-accent hover:bg-accent-soft"
+                    title="打开该技能演练任务详情"
+                  >
+                    打开任务
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         ))}
       </div>

@@ -142,15 +142,19 @@ export function mcpToolPrefixReady(prefix: string): boolean {
   return conn.tools.some((t) => (bare === "" ? true : wildcard ? t.name.startsWith(bare) : t.name === bare));
 }
 
-/**
- * 引擎审批门：仅当该 MCP 工具所属 server 的 safety 为 **exec**（本地执行/写盘，高 blast radius）时返回该 server，
- * 强制改走 request_approval。network（如联网搜索/抓取，读为主、只发查询）不拦截——否则每次搜索都要人工放行、体验崩坏；
- * network 仅在 UI 标徽章提示。local 不拦截。registry 安装时带入 safety。
- */
-export function mcpSafetyGate(name: string): McpServer | null {
+export function mcpServerForTool(name: string): McpServer | null {
   const mt = name.match(/^mcp__(.+?)__(.+)$/);
   if (!mt) return null;
-  const server = listMcpServers().find((s) => sanitizeName(s.name) === mt[1] && Boolean(s.enabled));
+  return listMcpServers().find((s) => sanitizeName(s.name) === mt[1] && Boolean(s.enabled)) ?? null;
+}
+
+/**
+ * 引擎审批门第一层：exec（本地执行/写盘，高 blast radius）始终强制改走 request_approval。
+ * network 不在这里一刀切，否则普通搜索会被频繁打断；带来源文档的任务和严格模式在
+ * engine.mcpRequiresApprovalForTask 中继续拦截，防止源材料被静默外发。
+ */
+export function mcpSafetyGate(name: string): McpServer | null {
+  const server = mcpServerForTool(name);
   if (!server) return null;
   return server.safety === "exec" ? server : null;
 }

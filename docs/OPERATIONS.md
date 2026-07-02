@@ -47,6 +47,25 @@ npm run dev      # 前端 Vite http://localhost:5173（热更新）+ 后端并�
 
 ---
 
+## 2.1 桌面客户端（Electron MVP）
+
+当前桌面端是 **Electron 壳 + 本机 Express 服务 + SQLite 数据目录**，入口仍是 `/aiteam/`，但具备客户端能力：原生菜单、托盘、通知、deep link、原生文件选择上传。
+
+```bash
+npm run desktop          # build 后启动桌面壳
+npm run desktop:smoke    # 静态检查 + 实际启动 server/dist 访问 /aiteam/
+npm run desktop:pack     # 生成 Electron Builder dir 预览包（未签名，含 Node sidecar + 服务端生产依赖）
+npm run pack:verify --workspace desktop  # 将包内 Resources 复制到 /tmp 后启动验证
+```
+
+边界：
+- 开发运行时优先使用当前 Node 运行 `server/dist/index.js`，避免 Electron Node 与 `better-sqlite3` 原生模块 ABI 不匹配。
+- `desktop:pack` 会先生成 `desktop/.runtime`，只放 `server/dist`、`web/dist`、Node sidecar 和服务端生产依赖；`desktop/.runtime` 与 `desktop/release` 都是生成物，不提交。
+- `desktop:pack` 仍是开发者预览包配置；普通用户发行版还需要签名、公证、安装器、自动更新、崩溃日志。
+- 桌面端数据默认在 OS app-data 下；Web/服务端部署路径不变。
+
+---
+
 ## 3. 访问与登录
 
 - 地址：`http://<host>:<PORT>/aiteam/`（前缀固定 `/aiteam/`）。
@@ -120,7 +139,7 @@ npm run dev      # 前端 Vite http://localhost:5173（热更新）+ 后端并�
 
 ## 8. 测试与验证
 
-- 机制级回归（Mock、零 token、不调真模型）：`npm test`（= `node scripts/regression.mjs`）。当前 **46 通过 / 1 跳过**（跳过项为可选 MCP `server-everything`，需本地装）。
+- 机制级回归（Mock、零 token、不调真模型）：`npm test`（= `node scripts/regression.mjs`）。当前 **60 通过 / 1 跳过**（跳过项为可选 MCP `server-everything`，需本地装；用例数随版本递增，以实测为准）。
 - 真模型端到端测试清单：见 [TESTING.md](TESTING.md)。
 
 ---

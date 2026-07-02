@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useWorkspace } from "../store";
 import { API_BASE } from "../api";
 import { AgentAvatar } from "./Avatar";
+import { BrandMark } from "./Brand";
 
 function ThemeToggle() {
   const [dark, setDark] = useState(() => {
@@ -121,10 +122,8 @@ export function Sidebar({
   return (
     <aside className="flex h-full w-[250px] shrink-0 flex-col border-r border-line bg-panel">
       <div className="flex items-center gap-2 px-4 py-3.5">
-        <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-accent text-sm font-semibold text-white">
-          A
-        </div>
-        <span className="font-semibold tracking-tight">AITeam</span>
+        <BrandMark size={28} />
+        <span className="font-semibold">AiTeam</span>
         {ws.mockMode && (
           <span className="ml-auto rounded-full bg-line px-2 py-0.5 text-[11px] text-ink-2" title="未配置 ANTHROPIC_API_KEY">
             Mock
