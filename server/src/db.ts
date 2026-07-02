@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { nanoid } from "nanoid";
 import { currentOwner } from "./ownerScope.js";
+import { decryptSecret, encryptSecret } from "./secrets.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // AITEAM_DATA_DIR：测试/多实例可指向隔离目录；不设则用默认 server/data
@@ -238,6 +239,19 @@ addColumnIfMissing("skills", "version", "version INTEGER NOT NULL DEFAULT 1");  
 addColumnIfMissing("mcp_servers", "safety", "safety TEXT NOT NULL DEFAULT 'local'");  // local | network | exec
 addColumnIfMissing("mcp_servers", "env_json", "env_json TEXT NOT NULL DEFAULT '{}'"); // stdio 子进程环境变量（如 BOCHA_API_KEY），值含密钥→sanitize 只暴露 key 名
 db.exec(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '')`);
+// 存量明文凭证迁移（幂等）：auth_token / env_json 落库一律密文，库文件单独泄漏不再等于凭证泄漏。
+// 读取侧统一走 decryptSecret（兼容前缀判断），此处只负责把老行重写为密文。
+for (const row of db.prepare("SELECT id, auth_token, env_json FROM mcp_servers").all() as {
+  id: string;
+  auth_token: string;
+  env_json: string;
+}[]) {
+  const token = encryptSecret(row.auth_token);
+  const env = row.env_json && row.env_json !== "{}" ? encryptSecret(row.env_json) : row.env_json;
+  if (token !== row.auth_token || env !== row.env_json) {
+    db.prepare("UPDATE mcp_servers SET auth_token = ?, env_json = ? WHERE id = ?").run(token, env, row.id);
+  }
+}
 // 用户表（standalone 多用户登录）：全局表，不带 owner_id（owner = user:<id> 由此派生）
 db.exec(`CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
@@ -691,10 +705,10 @@ export function createMcpServer(s: {
     name: s.name,
     kind: s.kind,
     url: s.url ?? "",
-    auth_token: s.auth_token ?? "",
+    auth_token: encryptSecret(s.auth_token ?? ""),
     command: s.command ?? "",
     args_json: JSON.stringify(s.args ?? []),
-    env_json: JSON.stringify(s.env ?? {}),
+    env_json: Object.keys(s.env ?? {}).length > 0 ? encryptSecret(JSON.stringify(s.env)) : "{}",
     safety: s.safety ?? "local",
     enabled: 1,
     created_at: now(),
@@ -714,7 +728,8 @@ export function deleteMcpServer(id: string) {
 /** 从 env_json 取变量名列表（不含值）——供前端展示"已设哪些 env key"而不泄露密钥值。 */
 function envKeyNames(envJson: string): string[] {
   try {
-    const parsed = JSON.parse(envJson || "{}");
+    // env_json 落库是密文（见 encryptSecret），取 key 名前先解；密钥不匹配时宁可回空列表也不炸接口
+    const parsed = JSON.parse(decryptSecret(envJson || "{}") || "{}");
     return parsed && typeof parsed === "object" ? Object.keys(parsed) : [];
   } catch {
     return [];

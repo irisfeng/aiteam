@@ -54,7 +54,7 @@ import { seedForOwner } from "./seed.js";
 import { AGENT_TEMPLATES, getTemplate } from "./agents/templates.js";
 import multer from "multer";
 import { withOwner, ownerFromUserId } from "./ownerScope.js";
-import { dropConnection, testMcpServer, callMcpTool, mcpToolPrefixReady, mcpToolName } from "./agents/mcp.js";
+import { dropConnection, testMcpServer, callMcpTool, mcpToolPrefixReady, mcpToolName, stdioAllowedCommands, stdioCommandAllowed } from "./agents/mcp.js";
 import { UPLOAD_MAX_BYTES, TEXT_EXTS, DOC_EXTS, extOf, withTempFile, persistTemplateBinary, readTemplateBinary, removeTemplateBinary } from "./uploads.js";
 import { parseTemplate, applyTemplateEdits, type TemplateEdit, type ImageEdit } from "./pptx-template.js";
 import {
@@ -234,6 +234,12 @@ api.post("/mcp-servers", requireAdmin, (req, res) => {
   const { name, kind, url, auth_token, command, args, safety, env } = req.body ?? {};
   if (!name) return res.status(400).json({ error: "name required" });
   if (kind === "stdio" && !command) return res.status(400).json({ error: "command required for stdio" });
+  // stdio = 以服务进程身份起子进程，命令必须过白名单（连接层还有二次防御，这里提前给可读报错）
+  if (kind === "stdio" && !stdioCommandAllowed(String(command))) {
+    return res.status(400).json({
+      error: `stdio 命令不在白名单（${stdioAllowedCommands().join("/")}）；自部署可用 AITEAM_MCP_STDIO_ALLOW 环境变量扩展`,
+    });
+  }
   if (kind !== "stdio" && !url) return res.status(400).json({ error: "url required for http" });
   // 环境变量（stdio MCP 的密钥，如 BOCHA_API_KEY）：仅收非空字符串键值对
   const envObj: Record<string, string> = {};

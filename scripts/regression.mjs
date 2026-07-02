@@ -681,8 +681,9 @@ check(
     `图片位=${!!picSlot} media=${mediaN} ct=${/Extension="png"/i.test(ctI)} master改=${masterMI.length}`);
 }
 
-// ENV1 stdio MCP 环境变量：值入库（仅服务端），sanitize 只回 key 名、绝不下发值（博查 BOCHA_API_KEY 用例）
+// ENV1 stdio MCP 环境变量：密文入库（库文件泄漏≠凭证泄漏），sanitize 只回 key 名、绝不下发值（博查 BOCHA_API_KEY 用例）
 {
+  const { decryptSecret, isEncryptedSecret } = await import(join(root, "server/dist/secrets.js"));
   const s = db.createMcpServer({ name: "envtest", kind: "stdio", command: "true", args: [], env: { BOCHA_API_KEY: "sk-secret-xyz" } });
   const raw = db.getMcpServer(s.id);
   const san = db.sanitizeMcpServer(raw);
@@ -690,8 +691,9 @@ check(
   const ok =
     Array.isArray(san.env_keys) && san.env_keys.includes("BOCHA_API_KEY") &&        // 暴露 key 名
     san.env_json === undefined && !JSON.stringify(san).includes("sk-secret-xyz") && // 不泄露值
-    JSON.parse(raw.env_json).BOCHA_API_KEY === "sk-secret-xyz";                      // 值确实入库
-  check("ENV1", "stdio MCP 环境变量：值入库 + sanitize 只回 key 名不下发值", ok);
+    isEncryptedSecret(raw.env_json) && !raw.env_json.includes("sk-secret-xyz") &&   // 落库是密文，不含明文值
+    JSON.parse(decryptSecret(raw.env_json)).BOCHA_API_KEY === "sk-secret-xyz";      // 服务端可解回原值
+  check("ENV1", "stdio MCP 环境变量：密文入库 + 服务端可解 + sanitize 只回 key 名不下发值", ok);
 }
 
 // DEDUP1 跨插件检索去重签名：不同搜索插件的 query/search_query 同句 → 同签名（会被去重）；非检索类(uri/urls) → null
@@ -723,6 +725,10 @@ check(
 // ---------------------------------------------------------------------------
 // Phase 2：拉起服务，走 HTTP API（聊天/引用/文档/技能/MCP/用量/导出/模板/频道）
 // ---------------------------------------------------------------------------
+// G1 的 everything server 不在 stdio 默认白名单内——用运维扩展口放行（同时覆盖"白名单可扩展"这条路径）
+process.env.AITEAM_MCP_STDIO_ALLOW = [process.env.AITEAM_MCP_STDIO_ALLOW, "mcp-server-everything"]
+  .filter(Boolean)
+  .join(",");
 const server = spawn("node", [join(root, "server/dist/index.js")], {
   env: { ...process.env, PORT: String(PORT) },
   stdio: "ignore",
@@ -1281,6 +1287,14 @@ try {
     const test = await J(`/mcp-servers/${bad.id}/test`, { method: "POST" });
     await J(`/mcp-servers/${bad.id}`, { method: "DELETE" });
     check("G2", "MCP 容错：坏端点测试报错且不悬挂", !test.ok && Date.now() - t0 < 90000, `耗时${Date.now() - t0}ms`);
+  }
+
+  // WL1 stdio 命令白名单：任意命令（bash）建档被 400 拒绝；白名单内命令（npx）可入库
+  {
+    const bad = await J("/mcp-servers", { method: "POST", body: JSON.stringify({ name: "wl-bad", kind: "stdio", command: "bash", args: "-c id" }) });
+    const good = (await J("/mcp-servers", { method: "POST", body: JSON.stringify({ name: "wl-good", kind: "stdio", command: "npx", args: "-y some-mcp" }) })).body;
+    if (good?.id) await J(`/mcp-servers/${good.id}`, { method: "DELETE" });
+    check("WL1", "stdio 白名单：bash 建档拒绝（400）+ npx 放行", !bad.ok && Boolean(good?.id), `badErr=${bad.body?.error?.slice(0, 40) ?? "?"}`);
   }
 
   // G1 MCP 真连接（本地 stdio everything server；未安装则跳过）
