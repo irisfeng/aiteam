@@ -149,6 +149,9 @@ export function TaskDetailDrawer({
 
   async function closeTask() {
     if (closeDisabled) return;
+    // 未交付评审的任务保留人类关闭权（唯一的取消/清理路径），但要显式确认这是"取消归档"而非验收通过。
+    if (task.status !== "review" &&
+      !window.confirm(`任务「${task.title}」尚未交付评审。\n确认关闭 = 取消并归档该任务（不代表验收通过）。`)) return;
     setClosing(true);
     try {
       await ws.moveTask(task, "done");

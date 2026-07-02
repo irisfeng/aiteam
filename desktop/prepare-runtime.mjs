@@ -37,6 +37,9 @@ writeFileSync(join(runtimeServer, "package.json"), `${JSON.stringify({
   dependencies: serverPkg.dependencies,
 }, null, 2)}\n`);
 
-run("npm", ["install", "--omit=dev", "--package-lock=false", "--no-audit", "--no-fund"], runtimeServer);
-run("node", ["-e", "require('better-sqlite3'); console.log('runtime better-sqlite3 ok')"], runtimeServer);
+// win32 上 npm 是 npm.cmd，spawnSync 不经 shell 解析不到裸 "npm"。
+const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
+run(npmCmd, ["install", "--omit=dev", "--package-lock=false", "--no-audit", "--no-fund"], runtimeServer);
+// 原生模块冒烟必须用实际打包进 runtime 的 node 二进制，PATH 上的 node ABI 可能不同。
+run(nodeBinary, ["-e", "require('better-sqlite3'); console.log('runtime better-sqlite3 ok')"], runtimeServer);
 run(runtimeNodeBin, ["--version"], runtime);

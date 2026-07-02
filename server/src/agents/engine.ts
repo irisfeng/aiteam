@@ -32,6 +32,7 @@ import {
   getTask,
   insertMessage,
   listAgents,
+  listApprovals,
   listChannels,
   listDocuments,
   listMessages,
@@ -252,6 +253,17 @@ class OpenAICompatStream extends EventEmitter {
 
   private async run(): Promise<Anthropic.Message> {
     const tools = (this.params.tools ?? []).map(openAiToolFromAnthropic).filter(Boolean);
+    // 无超时的 fetch 会让无响应的供应商把任务循环/演练挂死；超时经同一 controller 中止（含 body 读取）。
+    const timeoutMs = Math.max(1000, Number(process.env.AITEAM_PROVIDER_TIMEOUT_MS) || 120_000);
+    const timer = setTimeout(() => this.controller.abort(), timeoutMs);
+    try {
+      return await this.request(tools);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async request(tools: any[]): Promise<Anthropic.Message> {
     const res = await fetch(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       signal: this.controller.signal,
@@ -281,11 +293,18 @@ class OpenAICompatStream extends EventEmitter {
       this.emit("text", text);
     }
     for (const tc of msg.tool_calls ?? []) {
+      // 模型可能产出非法 JSON 参数；不能让整轮 finalMessage() 抛掉，转成可继续的工具入参错误。
+      let input: unknown = {};
+      try {
+        input = JSON.parse(tc.function?.arguments || "{}");
+      } catch {
+        input = { __invalid_arguments: String(tc.function?.arguments ?? "").slice(0, 2000) };
+      }
       content.push({
         type: "tool_use",
         id: tc.id,
         name: tc.function?.name ?? "",
-        input: JSON.parse(tc.function?.arguments || "{}"),
+        input,
       } as Anthropic.ToolUseBlock);
     }
     return {
@@ -577,6 +596,12 @@ export function mcpRequiresApprovalForTask(task: Pick<Task, "source_doc_ids"> | 
   if (server?.safety !== "network") return false;
   if (process.env.AITEAM_APPROVE_NETWORK_MCP === "1") return true;
   return Boolean(task && taskHasSourceDocs(task));
+}
+
+/** 任务级网络外发授权：本任务下已有用户批准的 action 审批 → 二级审批门放行（授权范围限本任务）。 */
+export function taskHasApprovedNetworkGrant(taskId: string | null | undefined): boolean {
+  if (!taskId) return false;
+  return listApprovals().some((a) => a.ref_id === taskId && a.status === "approved" && a.kind === "action");
 }
 
 /** 任务被指派（或创建时即带负责人）后调用。依赖未满足的任务会等依赖交付后自动开工。 */
@@ -1700,6 +1725,7 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
     }
     case "update_task": {
       if (input.status === "done") return "错误：关单（done）是 human-only 操作，请提请用户在看板上确认关闭。";
+      if (input.status === "blocked") return "错误：blocked 状态必须通过 request_clarification 进入（否则任务会卡住且没有恢复路径）。";
       const prev = getTask(String(input.task_id));
       if (!prev) return `错误：找不到任务 ${input.task_id}`;
       const assignee = findAgentByName(input.assignee);
@@ -1780,6 +1806,8 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
         agent_id: agent.id,
         title: String(input.title ?? "").slice(0, 200),
         payload: String(input.details ?? ""),
+        // 关联任务：批准后 taskHasApprovedNetworkGrant 才查得到，网络插件二级审批门才能打开。
+        ref_id: ctx.taskId ?? null,
       });
       broadcast({ type: "approval:upsert", payload: approval });
       if (ctx.taskId) {
@@ -2123,7 +2151,10 @@ async function llmLoop(
             // 高危插件（exec/network）：引擎层硬拦截（非提示词），强制改走 request_approval 审批门。
             result = `⛔ 插件「${gated.name}」属高危（${gated.safety === "exec" ? "本地执行" : "外发数据"}），不能直接调用。请改用 request_approval 提交本次动作的完整内容与目的，经用户批准后再执行。`;
             audit(channel.id, `⛔ ${agent.name} 试图直接调用高危插件「${gated.name}」(${gated.safety})，已拦截——须走审批门`);
-          } else if (mcpRequiresApprovalForTask(ctx.taskId ? getTask(ctx.taskId) : undefined, tu.name)) {
+          } else if (
+            mcpRequiresApprovalForTask(ctx.taskId ? getTask(ctx.taskId) : undefined, tu.name) &&
+            !taskHasApprovedNetworkGrant(ctx.taskId)
+          ) {
             const server = mcpServerForTool(tu.name);
             result = `⛔ 插件「${server?.name ?? tu.name}」会向外部网络发送数据；当前任务绑定了来源文档或启用了严格网络审批，必须先用 request_approval 说明要外发的查询/内容和目的，经用户批准后再执行。`;
             audit(channel.id, `⛔ ${agent.name} 试图在带来源文档的任务中调用网络插件「${server?.name ?? tu.name}」，已拦截——须走审批门`);

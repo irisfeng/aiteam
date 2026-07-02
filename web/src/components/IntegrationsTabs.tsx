@@ -67,6 +67,7 @@ export function McpTab({ onOpenTask }: { onOpenTask?: (taskId: string) => void }
   const [error, setError] = useState("");
   const [testResult, setTestResult] = useState<Record<string, string>>({});
   const [taskTestResult, setTaskTestResult] = useState<Record<string, TaskTestState>>({});
+  const [taskTestBusy, setTaskTestBusy] = useState<Record<string, boolean>>({});
   const [presets, setPresets] = useState<McpPreset[]>([]);
   const [showCatalog, setShowCatalog] = useState(false);
 
@@ -147,6 +148,8 @@ export function McpTab({ onOpenTask }: { onOpenTask?: (taskId: string) => void }
   }
 
   async function runTaskTest(s: McpServerInfo) {
+    if (taskTestBusy[s.id]) return;
+    setTaskTestBusy((r) => ({ ...r, [s.id]: true }));
     setTaskTestResult((r) => ({ ...r, [s.id]: { text: "能力演练中…" } }));
     try {
       const out = await ws.runMcpTaskTest(s.id);
@@ -160,6 +163,8 @@ export function McpTab({ onOpenTask }: { onOpenTask?: (taskId: string) => void }
       notifyIntegrationsUpdated();
     } catch (e: any) {
       setTaskTestResult((r) => ({ ...r, [s.id]: { text: `失败：${String(e?.message ?? e).slice(0, 160)}` } }));
+    } finally {
+      setTaskTestBusy((r) => ({ ...r, [s.id]: false }));
     }
   }
 
@@ -247,10 +252,11 @@ export function McpTab({ onOpenTask }: { onOpenTask?: (taskId: string) => void }
                 </button>
                 <button
                   onClick={() => void runTaskTest(s)}
-                  className="rounded px-1.5 text-[12px] text-ink-2 hover:bg-sel"
+                  disabled={Boolean(taskTestBusy[s.id])}
+                  className="rounded px-1.5 text-[12px] text-ink-2 hover:bg-sel disabled:opacity-40"
                   title="创建一条 MCP 能力演练任务，记录工具、交付、验收事件；markitdown 会生成来源文档"
                 >
-                  能力演练
+                  {taskTestBusy[s.id] ? "演练中…" : "能力演练"}
                 </button>
                 <button onClick={() => void remove(s.id)} className="rounded px-1 text-ink-3 hover:bg-sel hover:text-red-500">
                   ✕
@@ -360,6 +366,7 @@ export function SkillsTab({ onOpenTask }: { onOpenTask?: (taskId: string) => voi
   const [whenToUse, setWhenToUse] = useState("");
   const [error, setError] = useState("");
   const [taskTestResult, setTaskTestResult] = useState<Record<string, TaskTestState>>({});
+  const [taskTestBusy, setTaskTestBusy] = useState<Record<string, boolean>>({});
 
   const load = () =>
     fetch(`${API_BASE}/skills`)
@@ -411,6 +418,8 @@ export function SkillsTab({ onOpenTask }: { onOpenTask?: (taskId: string) => voi
   }
 
   async function runTaskTest(s: SkillInfo) {
+    if (taskTestBusy[s.id]) return;
+    setTaskTestBusy((r) => ({ ...r, [s.id]: true }));
     setTaskTestResult((r) => ({ ...r, [s.id]: { text: "演练中…" } }));
     try {
       const out = await ws.runSkillTaskTest(s.id);
@@ -425,6 +434,8 @@ export function SkillsTab({ onOpenTask }: { onOpenTask?: (taskId: string) => voi
       notifyIntegrationsUpdated();
     } catch (e: any) {
       setTaskTestResult((r) => ({ ...r, [s.id]: { text: `失败：${String(e?.message ?? e).slice(0, 160)}` } }));
+    } finally {
+      setTaskTestBusy((r) => ({ ...r, [s.id]: false }));
     }
   }
 
@@ -451,10 +462,11 @@ export function SkillsTab({ onOpenTask }: { onOpenTask?: (taskId: string) => voi
               <span className="font-mono text-[10.5px] text-ink-3">{(s.body || s.content).length} 字</span>
               <button
                 onClick={() => void runTaskTest(s)}
-                className="rounded px-1.5 text-[12px] text-ink-2 hover:bg-sel"
+                disabled={Boolean(taskTestBusy[s.id])}
+                className="rounded px-1.5 text-[12px] text-ink-2 hover:bg-sel disabled:opacity-40"
                 title="创建一条技能演练任务，验证技能索引、read_skill 正文读取和报告交付"
               >
-                演练
+                {taskTestBusy[s.id] ? "演练中…" : "演练"}
               </button>
               {!s.builtin && (
                 <button onClick={() => void remove(s.id)} className="rounded px-1 text-ink-3 hover:bg-sel hover:text-red-500">

@@ -43,7 +43,9 @@ AiTeam may later delegate coding or local-runtime work to external agents such a
 
 ## Event Stream
 
-External agents send append-only events that map to `task_events`:
+External agents send append-only events that map to `task_events`. The adapter translates
+`metadata` (object) into the stored `metadata_json` (string) column; `created`/`claim`/`user_close`
+exist in the runtime union but are emitted by AiTeam itself, not by external runtimes:
 
 ```json
 {
@@ -70,17 +72,15 @@ Rules:
 
 When an external agent reaches a risky action, it must pause and create an AiTeam approval:
 
+与运行时 `Approval` 模型对齐：任务经 `ref_id` 关联（不是 `task_id` 字段），`payload` 入库为字符串
+（对象由适配层序列化）：
+
 ```json
 {
   "kind": "action",
-  "task_id": "task_123",
+  "ref_id": "task_123",
   "title": "Approve deployment to staging",
-  "payload": {
-    "action": "deploy",
-    "target": "staging",
-    "diff_summary": "3 files changed",
-    "rollback": "previous deployment remains available"
-  }
+  "payload": "{\"action\":\"deploy\",\"target\":\"staging\",\"diff_summary\":\"3 files changed\",\"rollback\":\"previous deployment remains available\"}"
 }
 ```
 

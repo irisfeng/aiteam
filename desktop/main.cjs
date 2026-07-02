@@ -283,37 +283,40 @@ ipcMain.handle("pick-file", async (_event, payload) => {
 });
 
 const gotLock = app.requestSingleInstanceLock();
-if (!gotLock) app.quit();
+if (!gotLock) {
+  // app.quit() 是异步的：不加 else 守卫，输家实例仍会注册 whenReady 并再起一个 server 子进程。
+  app.quit();
+} else {
+  app.on("second-instance", (_event, argv) => {
+    const link = argv.find((arg) => arg.startsWith("aiteam://"));
+    if (link) handleDeepLink(link);
+    else createWindow();
+  });
+  app.on("open-url", (event, url) => {
+    event.preventDefault();
+    handleDeepLink(url);
+  });
 
-app.on("second-instance", (_event, argv) => {
-  const link = argv.find((arg) => arg.startsWith("aiteam://"));
-  if (link) handleDeepLink(link);
-  else createWindow();
-});
-app.on("open-url", (event, url) => {
-  event.preventDefault();
-  handleDeepLink(url);
-});
+  app.whenReady().then(async () => {
+    try {
+      app.setAsDefaultProtocolClient("aiteam");
+    } catch {
+      /* protocol registration is best-effort */
+    }
+    await startServer();
+    createMenu();
+    createTray();
+    createWindow();
+  });
 
-app.whenReady().then(async () => {
-  try {
-    app.setAsDefaultProtocolClient("aiteam");
-  } catch {
-    /* protocol registration is best-effort */
-  }
-  await startServer();
-  createMenu();
-  createTray();
-  createWindow();
-});
+  app.on("before-quit", () => {
+    quitting = true;
+    if (serverProcess && !serverProcess.killed) serverProcess.kill("SIGTERM");
+  });
 
-app.on("before-quit", () => {
-  quitting = true;
-  if (serverProcess && !serverProcess.killed) serverProcess.kill("SIGTERM");
-});
+  app.on("window-all-closed", () => {
+    if (process.platform !== "darwin" && !keepRunning) app.quit();
+  });
 
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin" && !keepRunning) app.quit();
-});
-
-app.on("activate", () => createWindow());
+  app.on("activate", () => createWindow());
+}

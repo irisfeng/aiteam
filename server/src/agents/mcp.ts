@@ -32,6 +32,11 @@ function sanitizeName(s: string): string {
   return s.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 24) || "srv";
 }
 
+/** 与 mcpToolDefs 注册用同一套名字规则拼完整工具名；调用侧不要自己拼前缀（大小写/分隔符会对不上）。 */
+export function mcpToolName(serverName: string, tool: string): string {
+  return `mcp__${sanitizeName(serverName)}__${tool}`;
+}
+
 async function connect(server: McpServer): Promise<Connection> {
   const client = new Client({ name: "aiteam", version: "1.0.0" });
   if (server.kind === "stdio") {

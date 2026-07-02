@@ -126,7 +126,7 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
     modalsSource.includes("SiliconFlow GLM") &&
     modalsSource.includes("百炼 DashScope") &&
     modalsSource.includes("保存后立即跑任务演练") &&
-    modalsSource.includes("ws.runProviderTaskTest(saved.id)") &&
+    modalsSource.includes("runProviderTaskTest(saved.id)") &&
     modalsSource.includes("打开任务") &&
     modalsSource.includes("usage_summary") &&
     modalsSource.includes("billable") &&
