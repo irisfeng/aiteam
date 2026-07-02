@@ -728,6 +728,7 @@ const server = spawn("node", [join(root, "server/dist/index.js")], {
   stdio: "ignore",
 });
 let fakeOpenAiServer = null;
+let fakeOpenAiStreamHits = 0;
 const up = await waitFor(async () => {
   try {
     const r = await fetch(`${BASE}/auth/me`); // 未登录返回 401（仍表示服务已起）
@@ -797,11 +798,38 @@ fakeOpenAiServer = createServer((req, res) => {
     } else if (hasToolResult) {
       message = { role: "assistant", content: "Fake provider completed tool result follow-up." };
     }
+    const usage = { prompt_tokens: 7, completion_tokens: 5, total_tokens: 12 };
+    if (body.stream === true) {
+      // 真流式路径：模拟国内 OpenAI 兼容通道的 SSE 分片（含 stream_options.include_usage 的末尾 usage 块）
+      fakeOpenAiStreamHits++;
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+      const chunk = (delta, finish = null) => ({ id: "chatcmpl-regression", choices: [{ index: 0, delta, finish_reason: finish }] });
+      if (message.tool_calls?.length) {
+        const tc = message.tool_calls[0];
+        const args = tc.function.arguments;
+        const half = Math.ceil(args.length / 2);
+        send(chunk({ role: "assistant", tool_calls: [{ index: 0, id: tc.id, type: "function", function: { name: tc.function.name, arguments: "" } }] }));
+        send(chunk({ tool_calls: [{ index: 0, function: { arguments: args.slice(0, half) } }] }));
+        send(chunk({ tool_calls: [{ index: 0, function: { arguments: args.slice(half) } }] }));
+        send(chunk({}, "tool_calls"));
+      } else {
+        const text = String(message.content ?? "");
+        const half = Math.ceil(text.length / 2);
+        send(chunk({ role: "assistant", content: text.slice(0, half) }));
+        send(chunk({ content: text.slice(half) }));
+        send(chunk({}, "stop"));
+      }
+      send({ id: "chatcmpl-regression", choices: [], usage });
+      res.write("data: [DONE]\n\n");
+      res.end();
+      return;
+    }
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({
       id: "chatcmpl-regression",
       choices: [{ message, finish_reason: message.tool_calls?.length ? "tool_calls" : "stop" }],
-      usage: { prompt_tokens: 7, completion_tokens: 5, total_tokens: 12 },
+      usage,
     }));
   });
 });
@@ -1407,6 +1435,9 @@ try {
       tested.body.model === "fake-chat-model" &&
       tested.body.sample.includes("AiTeam 模型通道可用"),
       `protocol=${tested.body.protocol} model=${tested.body.model} sample=${tested.body.sample}`);
+    check("P1S", "OpenAI 兼容真流式：请求带 stream=true，SSE 分片文本/工具参数被正确拼装",
+      fakeOpenAiStreamHits > 0 && tested.body.sample === "AiTeam 模型通道可用：fake-chat-model",
+      `streamHits=${fakeOpenAiStreamHits} sample=${tested.body.sample}`);
   }
 
   {

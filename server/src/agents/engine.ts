@@ -253,72 +253,153 @@ class OpenAICompatStream extends EventEmitter {
 
   private async run(): Promise<Anthropic.Message> {
     const tools = (this.params.tools ?? []).map(openAiToolFromAnthropic).filter(Boolean);
-    // 无超时的 fetch 会让无响应的供应商把任务循环/演练挂死；超时经同一 controller 中止（含 body 读取）。
-    const timeoutMs = Math.max(1000, Number(process.env.AITEAM_PROVIDER_TIMEOUT_MS) || 120_000);
-    const timer = setTimeout(() => this.controller.abort(), timeoutMs);
+    // 空闲超时：连续 timeoutMs 无任何字节到达才中止——流式响应总时长可以远超单次超时，但静默挂死会被切断。
+    this.touchIdle();
     try {
       return await this.request(tools);
     } finally {
-      clearTimeout(timer);
+      if (this.idleTimer) clearTimeout(this.idleTimer);
     }
   }
 
-  private async request(tools: any[]): Promise<Anthropic.Message> {
-    const res = await fetch(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly idleTimeoutMs = Math.max(1000, Number(process.env.AITEAM_PROVIDER_TIMEOUT_MS) || 120_000);
+
+  private touchIdle() {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => this.controller.abort(), this.idleTimeoutMs);
+  }
+
+  private post(body: string) {
+    return fetch(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       signal: this.controller.signal,
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${this.apiKey}`,
       },
-      body: JSON.stringify({
-        model: this.params.model,
-        messages: this.toOpenAIMessages(),
-        max_tokens: this.params.max_tokens,
-        ...(tools.length ? { tools, tool_choice: "auto" } : {}),
-      }),
+      body,
     });
+  }
+
+  private requestBody(tools: any[], stream: boolean) {
+    return JSON.stringify({
+      model: this.params.model,
+      messages: this.toOpenAIMessages(),
+      max_tokens: this.params.max_tokens,
+      ...(tools.length ? { tools, tool_choice: "auto" } : {}),
+      ...(stream ? { stream: true, stream_options: { include_usage: true } } : {}),
+    });
+  }
+
+  private async request(tools: any[]): Promise<Anthropic.Message> {
+    // 真流式优先（DeepSeek/硅基流动/百炼等国内主流兼容通道都支持 SSE）；
+    // 个别网关会对 stream/stream_options 报 4xx——降级为一次性响应重试。
+    let res = await this.post(this.requestBody(tools, true));
+    if (!res.ok && res.status >= 400 && res.status < 500 && !this.controller.signal.aborted) {
+      res = await this.post(this.requestBody(tools, false));
+    }
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       const err = new Error(`OpenAI-compatible provider HTTP ${res.status}: ${body.slice(0, 500)}`) as Error & { status?: number };
       err.status = res.status;
       throw err;
     }
+    // 简单网关可能忽略 stream 参数直接回 JSON，按实际 content-type 分流
+    const contentType = res.headers.get("content-type") ?? "";
+    if (contentType.includes("text/event-stream")) return this.consumeSse(res);
+
     const json = await res.json() as any;
     const msg = json.choices?.[0]?.message ?? {};
-    const content: Anthropic.Message["content"] = [];
-    if (msg.content) {
-      const text = String(msg.content);
-      content.push({ type: "text", text } as Anthropic.TextBlock);
-      this.emit("text", text);
+    const text = msg.content ? String(msg.content) : "";
+    if (text) this.emit("text", text);
+    return this.buildMessage(
+      json.id,
+      text,
+      (msg.tool_calls ?? []).map((tc: any) => ({ id: tc.id ?? "", name: tc.function?.name ?? "", args: tc.function?.arguments ?? "" })),
+      { input_tokens: json.usage?.prompt_tokens ?? 0, output_tokens: json.usage?.completion_tokens ?? 0 },
+    );
+  }
+
+  /** 逐行解析 SSE：content 增量实时 emit("text")（前端由此获得逐字流），tool_calls 按 index 累积参数分片。 */
+  private async consumeSse(res: Response): Promise<Anthropic.Message> {
+    if (!res.body) throw new Error("OpenAI-compatible provider returned empty SSE body");
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let id = "";
+    let text = "";
+    const toolCalls: { id: string; name: string; args: string }[] = [];
+    let usage = { input_tokens: 0, output_tokens: 0 };
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      this.touchIdle();
+      buf += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n")) !== -1) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line.startsWith("data:")) continue;
+        const data = line.slice(5).trim();
+        if (!data || data === "[DONE]") continue;
+        let chunk: any;
+        try {
+          chunk = JSON.parse(data);
+        } catch {
+          continue; // 半包或注释行，忽略
+        }
+        if (chunk.id) id = chunk.id;
+        if (chunk.usage) {
+          usage = {
+            input_tokens: chunk.usage.prompt_tokens ?? 0,
+            output_tokens: chunk.usage.completion_tokens ?? 0,
+          };
+        }
+        const delta = chunk.choices?.[0]?.delta ?? {};
+        if (typeof delta.content === "string" && delta.content) {
+          text += delta.content;
+          this.emit("text", delta.content);
+        }
+        for (const tc of delta.tool_calls ?? []) {
+          const i = typeof tc.index === "number" ? tc.index : 0;
+          const slot = (toolCalls[i] ??= { id: "", name: "", args: "" });
+          if (tc.id) slot.id = tc.id;
+          if (tc.function?.name) slot.name += tc.function.name;
+          if (tc.function?.arguments) slot.args += tc.function.arguments;
+        }
+      }
     }
-    for (const tc of msg.tool_calls ?? []) {
+    return this.buildMessage(id, text, toolCalls.filter(Boolean), usage);
+  }
+
+  private buildMessage(
+    id: string | undefined,
+    text: string,
+    toolCalls: { id: string; name: string; args: string }[],
+    usage: { input_tokens: number; output_tokens: number },
+  ): Anthropic.Message {
+    const content: Anthropic.Message["content"] = [];
+    if (text) content.push({ type: "text", text } as Anthropic.TextBlock);
+    for (const tc of toolCalls) {
       // 模型可能产出非法 JSON 参数；不能让整轮 finalMessage() 抛掉，转成可继续的工具入参错误。
       let input: unknown = {};
       try {
-        input = JSON.parse(tc.function?.arguments || "{}");
+        input = JSON.parse(tc.args || "{}");
       } catch {
-        input = { __invalid_arguments: String(tc.function?.arguments ?? "").slice(0, 2000) };
+        input = { __invalid_arguments: tc.args.slice(0, 2000) };
       }
-      content.push({
-        type: "tool_use",
-        id: tc.id,
-        name: tc.function?.name ?? "",
-        input,
-      } as Anthropic.ToolUseBlock);
+      content.push({ type: "tool_use", id: tc.id, name: tc.name, input } as Anthropic.ToolUseBlock);
     }
     return {
-      id: json.id ?? `openai_${Date.now()}`,
+      id: id || `openai_${Date.now()}`,
       type: "message",
       role: "assistant",
       model: this.params.model,
       content,
-      stop_reason: (msg.tool_calls?.length ? "tool_use" : "end_turn") as Anthropic.Message["stop_reason"],
+      stop_reason: (toolCalls.length ? "tool_use" : "end_turn") as Anthropic.Message["stop_reason"],
       stop_sequence: null,
-      usage: {
-        input_tokens: json.usage?.prompt_tokens ?? 0,
-        output_tokens: json.usage?.completion_tokens ?? 0,
-      },
+      usage,
     } as Anthropic.Message;
   }
 }

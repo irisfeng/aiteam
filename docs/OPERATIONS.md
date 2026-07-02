@@ -139,7 +139,8 @@ npm run pack:verify --workspace desktop  # 将包内 Resources 复制到 /tmp �
 
 ## 8. 测试与验证
 
-- 机制级回归（Mock、零 token、不调真模型）：`npm test`（= `node scripts/regression.mjs`）。当前 **60 通过 / 1 跳过**（跳过项为可选 MCP `server-everything`，需本地装；用例数随版本递增，以实测为准）。
+- `AITEAM_PROVIDER_TIMEOUT_MS`：OpenAI 兼容通道的**空闲超时**（毫秒，默认 120000）。连续这么久收不到任何字节才中止；流式长回复不受总时长限制。
+- 机制级回归（Mock、零 token、不调真模型）：`npm test`（= `node scripts/regression.mjs`）。当前 **83 通过 / 1 跳过**（跳过项为可选 MCP `server-everything`，需本地装；用例数随版本递增，以实测为准）。
 - 真模型端到端测试清单：见 [TESTING.md](TESTING.md)。
 
 ---
