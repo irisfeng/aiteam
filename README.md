@@ -129,7 +129,7 @@ npm run pack:verify --workspace desktop  # 脱离源码树验证包内运行时
 ## 🧪 测试
 
 ```bash
-npm run build && npm test     # 机制级回归（Mock 模式，零 token，65 项）
+npm run build && npm test     # 机制级回归（Mock 模式，零 token，84 项）
 ```
 
 覆盖：项目 DAG 调度 / 计划把关 / 停止 / 预算护栏 / 断点恢复 / 验收防放水 / Helio 式多角色项目全链路（claim→阻塞输入→审批恢复→复核退回→返工交付→汇总→人类关闭）/ 产品内核心场景库（协作演练、调研报告、方案演示）/ 模型供应商连通性测试 / 文档版本归并 / 写入契约校验 / 技能相关性 / 鉴权（未登录 401、登录会话、member 门控 403、多用户隔离）/ pptx 解析与模板就地改文图 / 上传来源与定向润色 / MCP 环境变量与跨插件去重 / 用量归因 等。智能质量类用例需真实 key 人工执行，见 [docs/TESTING.md](docs/TESTING.md)。
