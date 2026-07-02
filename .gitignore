@@ -1,5 +1,8 @@
 node_modules/
 dist/
+desktop/.runtime/
+desktop/release/
+output/
 *.log
 .env
 server/data/

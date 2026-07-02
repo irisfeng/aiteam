@@ -6,7 +6,8 @@
  * 用法：npm run build && node scripts/regression.mjs
  */
 import { spawn, execSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -68,6 +69,95 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
   skillNames.has("信息图/封面/配图生成法") && skillNames.has("可验证规格法") && skillNames.has("文档解析能力"),
   `技能数=${db.listSkills().length}/${BUILTIN_SKILLS.length}`);
 
+{
+  const storeSource = readFileSync(join(root, "web/src/store.tsx"), "utf8");
+  const onboardingSource = readFileSync(join(root, "web/src/components/Onboarding.tsx"), "utf8");
+  const worklineSource = readFileSync(join(root, "web/src/components/WorklineOverview.tsx"), "utf8");
+  const tasksBoardSource = readFileSync(join(root, "web/src/components/TasksBoard.tsx"), "utf8");
+  const taskDetailSource = readFileSync(join(root, "web/src/components/TaskDetailDrawer.tsx"), "utf8");
+  const inboxSource = readFileSync(join(root, "web/src/components/InboxView.tsx"), "utf8");
+  const modalsSource = readFileSync(join(root, "web/src/components/Modals.tsx"), "utf8");
+  const defaultTasks = /view:\s*\{\s*kind:\s*"tasks"\s*\}/.test(storeSource);
+  const bootstrapKeepsView = /view:\s*keepValidView\(state\.view,\s*d\.channels\)/.test(storeSource);
+  const loadDoesNotForceChannel = !/const first = data\.channels\.find[\s\S]*?openChannel\(first\.id\)/.test(storeSource);
+  const onboardingTargetsWorkline =
+    onboardingSource.includes("从任务运行线开始") &&
+    onboardingSource.includes("onOpenTasks") &&
+    !onboardingSource.includes("自主闭环");
+  check("UX1", "首屏体验：默认落任务线，首次引导指向任务运行线而非泛欢迎/自主闭环文案",
+    defaultTasks && bootstrapKeepsView && loadDoesNotForceChannel && onboardingTargetsWorkline,
+    `defaultTasks=${defaultTasks} bootstrapKeepsView=${bootstrapKeepsView} loadNoChannel=${loadDoesNotForceChannel} onboarding=${onboardingTargetsWorkline}`);
+  const projectCloseCta =
+    worklineSource.includes("closableProject") &&
+    worklineSource.includes("确认关闭项目") &&
+    worklineSource.includes("closeReadyProject") &&
+    worklineSource.includes("approval.ref_id === project.id");
+  check("UX2", "任务运行线：项目全量交付且无待审批时，顶部下一步直接进入项目级人类关单",
+    projectCloseCta,
+    `projectCloseCta=${projectCloseCta}`);
+  const normalScenarioKeepsWorkline = !/else\s*\{\s*setOpenTask\(result\.tasks\[0\]/.test(tasksBoardSource);
+  check("UX3", "任务运行线：普通场景启动后停留在项目全局视图，不自动弹出单任务抽屉",
+    normalScenarioKeepsWorkline,
+    `normalScenarioKeepsWorkline=${normalScenarioKeepsWorkline}`);
+  const multiProviderLinkCheck =
+    worklineSource.includes("providersToTest") &&
+    worklineSource.includes("for (const provider of providersToTest)") &&
+    worklineSource.includes("ws.runProviderTaskTest(provider.id, runArg)") &&
+    worklineSource.includes("所有已配置模型") &&
+    worklineSource.includes("模型对比摘要") &&
+    worklineSource.includes("providerPassed") &&
+    worklineSource.includes("persistedLinkCheckResults") &&
+    worklineSource.includes("visibleLinkCheckResults") &&
+    worklineSource.includes("parseEventMeta") &&
+    worklineSource.includes("eventTypes.has(\"tool\")") &&
+    worklineSource.includes("eventTypes.has(\"verification\")") &&
+    worklineSource.includes("provider_task_test") &&
+    worklineSource.includes("usage_tracked") &&
+    worklineSource.includes("latency_ms") &&
+    worklineSource.includes("usage_summary") &&
+    worklineSource.includes("billable") &&
+    worklineSource.includes("estimated_cost") &&
+    worklineSource.includes("blockedWithoutPendingApproval") &&
+    worklineSource.includes("inputOrApprovalCount");
+  check("UX3B", "配置链路验收：所有已配置模型供应商逐个跑同构任务演练并汇入同一项目",
+    multiProviderLinkCheck,
+    `multiProviderLinkCheck=${multiProviderLinkCheck}`);
+  const providerSetupLoop =
+    modalsSource.includes("SiliconFlow GLM") &&
+    modalsSource.includes("百炼 DashScope") &&
+    modalsSource.includes("保存后立即跑任务演练") &&
+    modalsSource.includes("runProviderTaskTest(saved.id)") &&
+    modalsSource.includes("打开任务") &&
+    modalsSource.includes("usage_summary") &&
+    modalsSource.includes("billable") &&
+    modalsSource.includes("price_input_per_million") &&
+    modalsSource.includes("estimated_cost");
+  check("UX4", "模型配置体验：DeepSeek/SiliconFlow/百炼预设可保存后直接跑任务演练并跳转任务详情",
+    providerSetupLoop,
+    `providerSetupLoop=${providerSetupLoop}`);
+  const taskReviewEvidencePanel =
+    taskDetailSource.includes("人工复核清单") &&
+    taskDetailSource.includes("splitAcceptanceCriteria") &&
+    taskDetailSource.includes("deliveryEvidence") &&
+    taskDetailSource.includes("selfCheckEvidence") &&
+    taskDetailSource.includes("verificationEvidence") &&
+    taskDetailSource.includes("pendingApprovalCount") &&
+    taskDetailSource.includes("closeDisabled") &&
+    taskDetailSource.includes("先处理该任务的审批或输入");
+  check("UX5", "任务详情：人工复核清单把验收标准、交付证据、自查表、复核和审批状态放在同一处",
+    taskReviewEvidencePanel,
+    `reviewEvidencePanel=${taskReviewEvidencePanel}`);
+  const inboxResolutionLoop =
+    inboxSource.includes("resolveInboxApproval") &&
+    inboxSource.includes("setResolvingId") &&
+    inboxSource.includes("await ws.refreshWorkspace()") &&
+    inboxSource.includes("setOpenTask(linkedTask)") &&
+    inboxSource.includes("处理中…");
+  check("UX6", "收件箱：处理审批/输入后刷新工作区并回到关联任务详情",
+    inboxResolutionLoop,
+    `inboxResolutionLoop=${inboxResolutionLoop}`);
+}
+
 // C2 依赖调度 + 项目汇总
 {
   const project = db.createProject({ channel_id: ch.id, lead_agent_id: pm.id, title: "回归-DAG", goal: "依赖与汇总" });
@@ -95,6 +185,45 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
   engine.onPlanResolved(project.id, true);
   const ran = await waitFor(() => db.getTask(T.id).status === "review", 20000);
   check("C3", "计划把关：批准前不开工，批准后自动执行", held && ran, `批准前todo=${held}, 批准后review=${ran}`);
+}
+
+// HC1 任务认领：未分配任务可由 AI claim；已归属任务不可被其他同事抢占；结构化活动留痕
+{
+  const T = db.createTask({ channel_id: ch.id, title: "回归-认领", created_by: "user" });
+  const claimed = engine.claimTaskForAgent(eng, T.id, "回归测试接手");
+  const duplicate = engine.claimTaskForAgent(pm, T.id, "不应抢占");
+  const events = db.listTaskEvents(T.id);
+  const ok =
+    claimed.ok === true &&
+    duplicate.ok === false &&
+    db.getTask(T.id).assignee_agent_id === eng.id &&
+    events.some((e) => e.type === "claim" && e.agent_id === eng.id);
+  check("HC1", "任务认领：未分配可 claim、已归属防抢占、结构化 claim 事件留痕", ok,
+    `claimed=${claimed.ok} duplicate=${duplicate.ok} events=${events.map((e) => e.type).join(",")}`);
+}
+
+// HC2 阻塞/需要输入：AI 请求 clarification → 任务 blocked + pending approval；用户确认后恢复并自动交付
+{
+  const T = db.createTask({ channel_id: ch.id, title: "回归-阻塞恢复", assignee_agent_id: eng.id, created_by: "user" });
+  const req = engine.requestClarificationForTask(eng, T, "请选择输出语气", "没有语气选择会影响最终交付口径", "专业克制");
+  const dupReq = engine.requestClarificationForTask(eng, db.getTask(T.id), "重复问题", "不应新建", "不应覆盖");
+  const blocked = db.getTask(T.id).status === "blocked";
+  const approval = db.listApprovals().find((a) => a.id === req.approvalId);
+  const pending = approval?.kind === "clarification" && approval.status === "pending" && approval.ref_id === T.id && dupReq.approvalId === req.approvalId;
+  const userResponse = "使用正式但不生硬的产品评审语气";
+  db.updateApprovalPayload(req.approvalId, JSON.stringify({ ...JSON.parse(approval.payload), user_response: userResponse }, null, 2));
+  const resolved = db.resolveApproval(req.approvalId, true);
+  engine.onClarificationResolved(resolved, true);
+  const resumed = await waitFor(() => db.getTask(T.id).status === "review", 20000);
+  engine.onClarificationResolved(resolved, true);
+  await sleep(400);
+  const stillReview = db.getTask(T.id).status === "review";
+  const taskEvents = db.listTaskEvents(T.id);
+  const events = taskEvents.map((e) => e.type);
+  const carriedInput = db.getApproval(req.approvalId).payload.includes(userResponse) && taskEvents.some((e) => e.summary.includes(userResponse) || e.metadata_json.includes(userResponse));
+  check("HC2", "阻塞输入：clarification 使任务 blocked，用户确认后清阻塞并恢复自动执行",
+    blocked && pending && resumed && stillReview && carriedInput && events.includes("blocked") && events.includes("approval"),
+    `blocked=${blocked} pending=${pending} resumed=${resumed} stillReview=${stillReview} carriedInput=${carriedInput} events=${events.join(",")}`);
 }
 
 // C5 停止开关（排队前取消）
@@ -354,6 +483,25 @@ check(
     `before=${before} after=${after}`);
 }
 
+// CAP2 network MCP 审批门：普通检索不断流；绑定来源文档或严格开关时，必须先走审批，避免源材料静默外发
+{
+  const srv = db.createMcpServer({ name: "web-search-prime", kind: "http", url: "https://search.example/mcp", safety: "network" });
+  const tool = "mcp__web-search-prime__search";
+  const plain = db.createTask({ channel_id: ch.id, title: "回归-network-普通检索", assignee_agent_id: eng.id, created_by: "user" });
+  const src = db.createDocument({ channel_id: ch.id, agent_id: eng.id, title: "回归来源", kind: "source", content: "SensitiveSourceCAP2" });
+  const sourced = db.createTask({ channel_id: ch.id, title: "回归-network-来源任务", assignee_agent_id: eng.id, created_by: "user", source_doc_ids: [src.id] });
+  const beforeStrict = process.env.AITEAM_APPROVE_NETWORK_MCP;
+  const plainOk = engine.mcpRequiresApprovalForTask(db.getTask(plain.id), tool) === false;
+  const sourcedOk = engine.mcpRequiresApprovalForTask(db.getTask(sourced.id), tool) === true;
+  process.env.AITEAM_APPROVE_NETWORK_MCP = "1";
+  const strictOk = engine.mcpRequiresApprovalForTask(db.getTask(plain.id), tool) === true;
+  if (beforeStrict === undefined) delete process.env.AITEAM_APPROVE_NETWORK_MCP;
+  else process.env.AITEAM_APPROVE_NETWORK_MCP = beforeStrict;
+  db.deleteMcpServer(srv.id);
+  check("CAP2", "network MCP：普通任务可直连，来源任务/严格模式必须先审批", plainOk && sourcedOk && strictOk,
+    `plain=${plainOk} sourced=${sourcedOk} strict=${strictOk}`);
+}
+
 // DOC-HTML html 交付物：格式 + 防 XSS 校验（外链 script / 内联事件 / javascript: URI 全拒）
 {
   const v = engine.validateDocContent;
@@ -387,18 +535,21 @@ check(
 // VER-ROUTE 验收者按交付物类型路由：视觉物→设计审核 / 内容物→校对审核 / 退代码评审 / 兜底创建者·本人
 {
   const pick = engine.pickVerifier;
+  const explicit = engine.resolveTaskReviewer;
   const A = (id, name, role) => ({ id, name, role });
   const design = A("d", "设计审核", "视觉与版式把关");
   const content = A("c", "校对审核", "文字校对与事实核查");
   const code = A("k", "代码评审", "代码审查与质量把关");
-  const pm = A("p", "产品经理", "产品规划");
+  const product = A("p", "产品经理", "产品规划");
   const worker = A("w", "PPT 助手", "演示文稿制作");
+  const reviewerTask = db.createTask({ channel_id: ch.id, title: "回归-指定复核", assignee_agent_id: eng.id, reviewer_agent_id: pm.id, created_by: "user" });
   const ok =
-    pick([pm, code, content, design], "slides", null, worker).id === "d" && // 视觉物→设计审核
-    pick([pm, code, content, design], "report", null, worker).id === "c" && // 内容物→校对审核
-    pick([pm, code], "slides", null, worker).id === "k" &&                  // 无设计/校对→退代码评审
-    pick([pm], "slides", "p", worker).id === "p" &&                         // 都没有→任务创建者
-    pick([], "slides", null, worker).id === "w";                           // 空→本人(solo 自检)
+    pick([product, code, content, design], "slides", null, worker).id === "d" && // 视觉物→设计审核
+    pick([product, code, content, design], "report", null, worker).id === "c" && // 内容物→校对审核
+    pick([product, code], "slides", null, worker).id === "k" &&                  // 无设计/校对→退代码评审
+    pick([product], "slides", "p", worker).id === "p" &&                         // 都没有→任务创建者
+    pick([], "slides", null, worker).id === "w" &&                          // 空→本人(solo 自检)
+    explicit(reviewerTask, [design, content, code], "report", eng).id === pm.id; // 显式 reviewer 优先
   check("VER-ROUTE", "验收者按交付物类型路由：视觉→设计审核 / 内容→校对审核 / 退代码评审 / 兜底创建者·本人", ok);
 }
 
@@ -572,6 +723,7 @@ const server = spawn("node", [join(root, "server/dist/index.js")], {
   env: { ...process.env, PORT: String(PORT) },
   stdio: "ignore",
 });
+let fakeOpenAiServer = null;
 const up = await waitFor(async () => {
   try {
     const r = await fetch(`${BASE}/auth/me`); // 未登录返回 401（仍表示服务已起）
@@ -602,6 +754,56 @@ const J = async (path, init = {}) => {
   return { ok: res.ok, body: await res.json().catch(() => ({})) };
 };
 
+fakeOpenAiServer = createServer((req, res) => {
+  let raw = "";
+  req.on("data", (d) => { raw += d; });
+  req.on("end", () => {
+    if (req.method !== "POST" || req.url !== "/v1/chat/completions") {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+      return;
+    }
+    const body = JSON.parse(raw || "{}");
+    const messages = Array.isArray(body.messages) ? body.messages : [];
+    const toolMessages = messages.filter((m) => m.role === "tool");
+    const tools = Array.isArray(body.tools) ? body.tools.map((t) => t?.function?.name).filter(Boolean) : [];
+    const hasToolResult = toolMessages.length > 0;
+    const toolCall = (name, args) => ({
+      id: `call_${name}_${Date.now()}`,
+      type: "function",
+      function: { name, arguments: JSON.stringify(args) },
+    });
+    let message = { role: "assistant", content: `AiTeam 模型通道可用：${body.model}` };
+    if (tools.includes("submit_verdict") && !hasToolResult) {
+      message = {
+        role: "assistant",
+        content: null,
+        tool_calls: [toolCall("submit_verdict", { result: "pass", reasons: "fake verifier pass" })],
+      };
+    } else if (tools.includes("write_document") && !hasToolResult) {
+      message = {
+        role: "assistant",
+        content: null,
+        tool_calls: [toolCall("write_document", {
+          title: "Fake provider task delivery",
+          kind: "report",
+          content: "# Fake provider task delivery\n\nTL;DR: fake provider used write_document successfully.\n\n## 自查表\n- 验收标准 -> 满足 -> 本文档由工具写入。",
+        })],
+      };
+    } else if (hasToolResult) {
+      message = { role: "assistant", content: "Fake provider completed tool result follow-up." };
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      id: "chatcmpl-regression",
+      choices: [{ message, finish_reason: message.tool_calls?.length ? "tool_calls" : "stop" }],
+      usage: { prompt_tokens: 7, completion_tokens: 5, total_tokens: 12 },
+    }));
+  });
+});
+await new Promise((resolve) => fakeOpenAiServer.listen(0, "127.0.0.1", resolve));
+const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
+
 try {
   // AUTH2 角色门控 + 多用户隔离：注册第二个用户(member)，应被挡在 admin 配置外、且看不到管理员的频道
   {
@@ -631,6 +833,342 @@ try {
     check("B1", "聊天管线：@路由 → 流式应答落库", replied);
   }
 
+  // HC3 任务状态 API：blocked 只能由 clarification 流进入；待处理输入/审批不能被关单绕过
+  {
+    enterOwner(ownerFromUserId(testUser.id));
+    const t1 = db.createTask({ channel_id: ch.id, title: "回归-状态机-普通", assignee_agent_id: eng.id, created_by: "user" });
+    const manualBlocked = await J(`/tasks/${t1.id}`, { method: "PATCH", body: JSON.stringify({ status: "blocked" }) });
+    const t2 = db.createTask({ channel_id: ch.id, title: "回归-状态机-阻塞", assignee_agent_id: eng.id, created_by: "user" });
+    const req = engine.requestClarificationForTask(eng, t2, "确认是否关闭", "仍有待处理输入时不能直接关单。", "继续等待");
+    db.db.pragma("wal_checkpoint(FULL)");
+    const blockedToReview = await J(`/tasks/${t2.id}`, { method: "PATCH", body: JSON.stringify({ status: "review" }) });
+    const blockedToDonePending = await J(`/tasks/${t2.id}`, { method: "PATCH", body: JSON.stringify({ status: "done" }) });
+    await J(`/approvals/${req.approvalId}/resolve`, { method: "POST", body: JSON.stringify({ approve: false }) });
+    db.db.pragma("wal_checkpoint(FULL)");
+    const blockedToDoneResolved = await J(`/tasks/${t2.id}`, { method: "PATCH", body: JSON.stringify({ status: "done" }) });
+    check("HC3", "任务状态 API：禁止手工进入 blocked、禁止 blocked→review、禁止待输入时关单、处理后可关闭",
+      !manualBlocked.ok &&
+      !blockedToReview.ok &&
+      !blockedToDonePending.ok &&
+      blockedToDonePending.body.error === "task has pending approvals" &&
+      blockedToDoneResolved.ok &&
+      blockedToDoneResolved.body.status === "done",
+      `manualBlocked=${manualBlocked.ok} blockedToReview=${blockedToReview.ok} pendingClose=${blockedToDonePending.ok} resolvedClose=${blockedToDoneResolved.ok}`);
+  }
+
+  // HC3C clarification HTTP 闭环：用户输入必须随审批一起持久化，并进入任务活动日志
+  {
+    const task = db.createTask({ channel_id: ch.id, title: "回归-HTTP-输入恢复", assignee_agent_id: eng.id, created_by: "user" });
+    const req = engine.requestClarificationForTask(eng, task, "请选择引用口径", "需要用户确认引用范围。", "只引用上传材料");
+    const response = "允许引用上传材料和本频道已确认结论，不访问外网。";
+    const resolved = await J(`/approvals/${req.approvalId}/resolve`, { method: "POST", body: JSON.stringify({ approve: true, response }) });
+    const resumed = await waitFor(() => db.getTask(task.id).status === "review", 20000);
+    const freshApproval = db.getApproval(req.approvalId);
+    const events = db.listTaskEvents(task.id);
+    const ok =
+      resolved.ok &&
+      resolved.body.status === "approved" &&
+      freshApproval.payload.includes(response) &&
+      resumed &&
+      events.some((e) => e.type === "approval" && (e.summary.includes(response) || e.metadata_json.includes(response)));
+    check("HC3C", "clarification HTTP 闭环：用户输入随审批保存，恢复后进入任务活动日志",
+      ok,
+      `resolved=${resolved.ok} status=${resolved.body.status} resumed=${resumed} events=${events.map((e) => e.type).join(",")}`);
+  }
+
+  // HC3B 复核人责任链：显式 reviewer 创建/修改/清空都必须进入结构化任务事件，避免 UI 责任链不可审计
+  {
+    const created = (await J("/tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        channel_id: ch.id,
+        title: "回归-复核人留痕",
+        description: "验证显式复核人变更会写入任务活动日志。",
+        reviewer_agent_id: pm.id,
+      }),
+    })).body;
+    const changed = await J(`/tasks/${created.id}`, { method: "PATCH", body: JSON.stringify({ reviewer_agent_id: eng.id }) });
+    const cleared = await J(`/tasks/${created.id}`, { method: "PATCH", body: JSON.stringify({ reviewer_agent_id: null }) });
+    const events = (await J(`/tasks/${created.id}/events`)).body;
+    const verificationSummaries = events.filter((e) => e.type === "verification").map((e) => e.summary);
+    const ok =
+      changed.ok &&
+      cleared.ok &&
+      verificationSummaries.some((s) => s.includes("用户指定复核人") && s.includes(pm.name)) &&
+      verificationSummaries.some((s) => s.includes("用户指定复核人") && s.includes(eng.name)) &&
+      verificationSummaries.some((s) => s.includes("用户恢复自动复核"));
+    check("HC3B", "复核人责任链：创建/修改/清空 reviewer 都写结构化 verification 事件",
+      ok,
+      `events=${events.map((e) => e.type).join(",")} summaries=${verificationSummaries.join(" | ")}`);
+  }
+
+  // HC4 Helio-style 全链路：频道里的多角色项目 → claim → clarification → 用户确认恢复 → reviewer 退回一次 → 返工再交付 → Lead 汇总 → 人类关闭
+  {
+    const reviewer = agents.find((a) => a.id !== eng.id && a.id !== pm.id) ?? pm;
+    const project = db.createProject({
+      channel_id: ch.id,
+      lead_agent_id: pm.id,
+      title: "回归-Helio式协作",
+      goal: "验证 AI 同事在同一频道/任务/审计线里协作，风险动作等人类确认，最终由人类关闭。",
+      status: "running",
+    });
+    const tClaim = db.createTask({
+      channel_id: ch.id,
+      project_id: project.id,
+      title: "HC4-未分配任务由 AI 认领并交付",
+      created_by: "user",
+      reviewer_agent_id: reviewer.id,
+      acceptance_criteria: "必须有交付物，并进入待评审。",
+    });
+    const tClarify = db.createTask({
+      channel_id: ch.id,
+      project_id: project.id,
+      title: "HC4-需要用户输入后交付",
+      created_by: "user",
+      assignee_agent_id: eng.id,
+      reviewer_agent_id: reviewer.id,
+      acceptance_criteria: "必须先等待用户确认，再恢复并交付。",
+    });
+    const tGate = db.createTask({
+      channel_id: ch.id,
+      project_id: project.id,
+      title: "HC4-最终检查闸门",
+      created_by: "user",
+      reviewer_agent_id: reviewer.id,
+      acceptance_criteria: "前两项复核通过后才执行，用于触发项目最终汇总。",
+    });
+
+    const claimed = engine.claimTaskForAgent(eng, tClaim.id, "Helio-style 原子认领");
+    if (claimed.ok) engine.onTaskAssigned(claimed.task);
+    const claimDelivered = await waitFor(() => db.getTask(tClaim.id).status === "review", 20000);
+
+    const clarReq = engine.requestClarificationForTask(
+      eng,
+      db.getTask(tClarify.id),
+      "请选择本次输出口径",
+      "没有口径选择会导致交付物不可验收。",
+      "专业克制，面向产品评审"
+    );
+    const blocked = db.getTask(tClarify.id).status === "blocked";
+    const clarificationResponse = "专业克制，面向产品评审，并明确引用用户确认口径";
+    db.updateApprovalPayload(clarReq.approvalId, JSON.stringify({
+      question: "请选择本次输出口径",
+      context: "没有口径选择会导致交付物不可验收。",
+      proposed_default: "专业克制，面向产品评审",
+      user_response: clarificationResponse,
+    }, null, 2));
+    const approval = db.resolveApproval(clarReq.approvalId, true);
+    engine.onClarificationResolved(approval, true);
+    const afterClarification = await waitFor(() => db.getTask(tClarify.id).status === "review", 20000);
+
+    const revised = await J(`/tasks/${tClarify.id}/revise`, {
+      method: "POST",
+      body: JSON.stringify({ reason: "复核发现缺少人类确认口径引用，请补充后重新交付。" }),
+    });
+    const reDelivered = await waitFor(() => {
+      const t = db.getTask(tClarify.id);
+      return t.status === "review" && t.revision_count >= 1;
+    }, 20000);
+
+    const gateClaim = engine.claimTaskForAgent(pm, tGate.id, "前置任务已过复核，执行最终检查");
+    if (gateClaim.ok) engine.onTaskAssigned(gateClaim.task);
+    const summarized = await waitFor(() => {
+      const p = db.getProject(project.id);
+      return p.status === "review" && Boolean(p.summary_doc_id);
+    }, 30000);
+
+    const closed = await J(`/projects/${project.id}/close`, { method: "POST" });
+    const finalProject = db.getProject(project.id);
+    const finalTasks = db.listTasks().filter((t) => t.project_id === project.id);
+    const events = finalTasks.flatMap((t) => db.listTaskEvents(t.id));
+    const types = new Set(events.map((e) => e.type));
+    const ok =
+      claimed.ok &&
+      claimDelivered &&
+      blocked &&
+      approval?.status === "approved" &&
+      afterClarification &&
+      revised.ok &&
+      reDelivered &&
+      gateClaim.ok &&
+      summarized &&
+      closed.ok &&
+      finalProject.status === "done" &&
+      finalTasks.every((t) => t.status === "done") &&
+      ["claim", "blocked", "approval", "verification", "handoff", "delivery", "user_close"].every((x) => types.has(x)) &&
+      events.some((e) => e.metadata_json.includes(clarificationResponse) || e.summary.includes(clarificationResponse));
+    check("HC4", "Helio式核心场景：多角色项目 claim→阻塞输入→审批恢复→复核退回→返工交付→汇总→人类关闭",
+      ok,
+      `claim=${claimed.ok} blocked=${blocked} approved=${approval?.status} revise=${revised.ok} redeliver=${reDelivered} summary=${summarized} close=${closed.ok} events=${[...types].join(",")}`);
+  }
+
+  // HC4B human-only 关单硬门：服务端不能被绕过 UI 直接关闭未交付项目或仍有待审批的项目
+  {
+    const project = db.createProject({
+      channel_id: ch.id,
+      lead_agent_id: pm.id,
+      title: "回归-项目关单硬门",
+      goal: "验证项目关闭必须等待所有任务交付且审批清零。",
+      status: "running",
+    });
+    const task = db.createTask({
+      channel_id: ch.id,
+      project_id: project.id,
+      title: "HC4B-未交付不能关项目",
+      created_by: "user",
+      assignee_agent_id: eng.id,
+      reviewer_agent_id: pm.id,
+    });
+    const closeBeforeDelivery = await J(`/projects/${project.id}/close`, { method: "POST" });
+    const stayedOpen = db.getTask(task.id).status === "todo" && db.getProject(project.id).status !== "done";
+    db.updateTask(task.id, { status: "review" });
+    const approval = db.createApproval({
+      channel_id: ch.id,
+      agent_id: eng.id,
+      title: "HC4B-待审批",
+      payload: "仍有待审批动作时，项目不能被关闭。",
+      kind: "action",
+      ref_id: task.id,
+    });
+    const closeWithApproval = await J(`/projects/${project.id}/close`, { method: "POST" });
+    const stillReview = db.getTask(task.id).status === "review" && db.getProject(project.id).status !== "done";
+    db.resolveApproval(approval.id, false);
+    const projectApproval = db.createApproval({
+      channel_id: ch.id,
+      agent_id: pm.id,
+      title: "HC4B-项目计划审批",
+      payload: "项目级计划审批未处理时，项目不能被关闭。",
+      kind: "plan",
+      ref_id: project.id,
+    });
+    const closeWithProjectApproval = await J(`/projects/${project.id}/close`, { method: "POST" });
+    const projectStillReview = db.getTask(task.id).status === "review" && db.getProject(project.id).status !== "done";
+    db.resolveApproval(projectApproval.id, true);
+    const closeAfterResolved = await J(`/projects/${project.id}/close`, { method: "POST" });
+    const finalTask = db.getTask(task.id);
+    const finalProject = db.getProject(project.id);
+    const ok =
+      !closeBeforeDelivery.ok &&
+      closeBeforeDelivery.body.error === "project has unfinished tasks" &&
+      stayedOpen &&
+      !closeWithApproval.ok &&
+      closeWithApproval.body.error === "project has pending approvals" &&
+      stillReview &&
+      !closeWithProjectApproval.ok &&
+      closeWithProjectApproval.body.error === "project has pending approvals" &&
+      projectStillReview &&
+      closeAfterResolved.ok &&
+      finalTask.status === "done" &&
+      finalProject.status === "done";
+    check("HC4B", "项目关单硬门：未交付/待审批项目不能通过 API 绕过人类验收直接关闭",
+      ok,
+      `unfinishedBlocked=${!closeBeforeDelivery.ok} taskApprovalBlocked=${!closeWithApproval.ok} projectApprovalBlocked=${!closeWithProjectApproval.ok} final=${finalProject.status}/${finalTask.status}`);
+  }
+
+  // HC5 产品内协作演练入口：HTTP 启动三步项目，任务带 DAG/负责人/复核人，活动日志结构化可观测，最终进入待评审汇总
+  {
+    const started = await J(`/scenarios/helio-core/start`, { method: "POST", body: JSON.stringify({ channel_id: ch.id }) });
+    const project = started.body.project;
+    const tasks = started.body.tasks ?? [];
+    const projectReviewed = await waitFor(() => db.getProject(project.id)?.status === "review", 30000);
+    const latestTasks = db.listTasks().filter((t) => t.project_id === project.id);
+    const allDelivered = latestTasks.length === 3 && latestTasks.every((t) => t.status === "review");
+    const deps = latestTasks.map((t) => JSON.parse(t.depends_on || "[]"));
+    const hasDag = deps.some((d) => d.length === 1) && deps.some((d) => d.length === 2);
+    const events = latestTasks.flatMap((t) => db.listTaskEvents(t.id));
+    const types = new Set(events.map((e) => e.type));
+    const ok =
+      started.ok &&
+      project?.status === "running" &&
+      tasks.length === 3 &&
+      latestTasks.every((t) => t.assignee_agent_id && t.reviewer_agent_id) &&
+      hasDag &&
+      types.has("created") &&
+      types.has("claim") &&
+      types.has("delivery") &&
+      projectReviewed &&
+      allDelivered;
+    check("HC5", "产品内协作演练入口：HTTP 启动三步 DAG 项目，结构化审计，自动交付并进入项目待评审",
+      ok,
+      `start=${started.ok} tasks=${tasks.length} dag=${hasDag} review=${projectReviewed} delivered=${allDelivered} events=${[...types].join(",")}`);
+  }
+
+  // HC5C 场景复用：同频道同场景未关闭时，重复点击不应创建重复项目和重复子任务
+  {
+    const first = await J(`/scenarios/solution-deck/start`, { method: "POST", body: JSON.stringify({ channel_id: ch.id }) });
+    const project = first.body.project;
+    const firstTasks = first.body.tasks ?? [];
+    const second = await J(`/scenarios/solution-deck/start`, { method: "POST", body: JSON.stringify({ channel_id: ch.id }) });
+    const secondTasks = second.body.tasks ?? [];
+    const projects = db.listProjects().filter((p) => p.channel_id === ch.id && p.title === project.title);
+    const tasks = db.listTasks().filter((t) => t.project_id === project.id);
+    const ok =
+      first.ok &&
+      second.ok &&
+      second.body.reused === true &&
+      second.body.project?.id === project.id &&
+      projects.length === 1 &&
+      firstTasks.length === 4 &&
+      secondTasks.length === 4 &&
+      tasks.length === 4;
+    check("HC5C", "场景复用：同频道同场景未关闭时重复启动只返回现有项目，不创建重复任务",
+      ok,
+      `reused=${second.body.reused} projects=${projects.length} firstTasks=${firstTasks.length} secondTasks=${secondTasks.length} storedTasks=${tasks.length}`);
+  }
+
+  {
+    const started = await J(`/scenarios/helio-core/start`, { method: "POST", body: JSON.stringify({ channel_id: ch.id, acceptance: true }) });
+    const project = started.body.project;
+    const projectReviewed = await waitFor(() => db.getProject(project.id)?.status === "review", 30000);
+    const latestTasks = db.listTasks().filter((t) => t.project_id === project.id);
+    const events = latestTasks.flatMap((t) => db.listTaskEvents(t.id));
+    const startupEvents = events.filter((e) => e.type === "created" || e.type === "claim");
+    const acceptanceEvents = startupEvents.length > 0 && startupEvents.every((e) => {
+      try {
+        return JSON.parse(e.metadata_json || "{}").acceptance === true;
+      } catch {
+        return false;
+      }
+    });
+    check("HC5B", "端到端验收入口：创建可恢复识别的闭环验收项目并进入待复核",
+      started.ok &&
+      project?.title?.startsWith("闭环验收") &&
+      latestTasks.length === 3 &&
+      projectReviewed &&
+      latestTasks.every((t) => t.status === "review") &&
+      acceptanceEvents,
+      `title=${project?.title} tasks=${latestTasks.length} review=${projectReviewed} acceptanceEvents=${acceptanceEvents}`);
+  }
+
+  // HC6 场景库：不只一个 demo，产品内可选择调研/方案等核心工作流模板
+  {
+    const catalog = await J("/scenarios");
+    const ids = new Set((catalog.body ?? []).map((s) => s.id));
+    const started = await J(`/scenarios/research-report/start`, { method: "POST", body: JSON.stringify({ channel_id: ch.id }) });
+    const project = started.body.project;
+    const tasks = started.body.tasks ?? [];
+    const projectReviewed = await waitFor(() => db.getProject(project.id)?.status === "review", 30000);
+    const latestTasks = db.listTasks().filter((t) => t.project_id === project.id);
+    const deps = latestTasks.map((t) => JSON.parse(t.depends_on || "[]").length);
+    const events = latestTasks.flatMap((t) => db.listTaskEvents(t.id));
+    const scenarioTagged = events.some((e) => {
+      try { return JSON.parse(e.metadata_json || "{}").scenario === "research-report"; } catch { return false; }
+    });
+    const ok =
+      catalog.ok &&
+      ["helio-core", "research-report", "solution-deck"].every((id) => ids.has(id)) &&
+      started.ok &&
+      tasks.length === 4 &&
+      latestTasks.every((t) => t.assignee_agent_id && t.reviewer_agent_id) &&
+      deps.filter((n) => n === 0).length === 1 &&
+      deps.filter((n) => n >= 1).length === 3 &&
+      projectReviewed &&
+      scenarioTagged;
+    check("HC6", "场景库：协作演练/调研报告/方案演示可发现，调研报告场景生成四步 DAG 并进入待评审",
+      ok,
+      `catalog=${[...ids].join(",")} tasks=${tasks.length} deps=${deps.join(",")} review=${projectReviewed} tagged=${scenarioTagged}`);
+  }
+
   // G4 引用回复
   {
     const m1 = (await J(`/channels/${ch.id}/messages`, { method: "POST", body: JSON.stringify({ content: "被引用的原文" }) })).body;
@@ -658,6 +1196,22 @@ try {
     check("G3", `技能：内置${BUILTIN_SKILLS.length} + 启停 + 自定义增删 + v2字段(trigger/when_to_use/kind)透传`,
       skills.length === BUILTIN_SKILLS.length && toggled.enabled === 1 && fieldsOk && after.length === skills.length,
       `before=${skills.length} after=${after.length} fields=${fieldsOk}`);
+  }
+
+  {
+    const skills = (await J("/skills")).body;
+    const skill = skills.find((s) => s.name === "交付自查清单") ?? skills[0];
+    const result = (await J(`/skills/${skill.id}/task-test`, { method: "POST" })).body;
+    const eventTypes = new Set((result.events ?? []).map((e) => e.type));
+    check("SK6", "技能演练接口：启用技能→read_skill 证据→报告交付→待评审",
+      result.ok === true &&
+      result.task?.status === "review" &&
+      result.docs?.some((d) => d.kind === "report" && d.content.includes("read_skill")) &&
+      eventTypes.has("tool") &&
+      eventTypes.has("delivery") &&
+      eventTypes.has("verification") &&
+      result.checks?.body_loaded === true,
+      `ok=${result.ok} status=${result.task?.status} docs=${result.docs?.length ?? 0} events=${[...eventTypes].join(",")}`);
   }
 
   // REG1 预设目录：可读非空 + registry 静态无 token + mcp_servers 回吐脱敏（auth_token 不下发前端）
@@ -730,10 +1284,20 @@ try {
       const sample = join(testDataDir, "md1-sample.html");
       writeFileSync(sample, "<html><body><h1>季度报告</h1><p>营收 <b>1200万</b></p></body></html>");
       const out = await callMcpTool("mcp__markitdown__convert_to_markdown", { uri: "file://" + sample });
+      const taskTest = (await J(`/mcp-servers/${s.id}/task-test`, { method: "POST" })).body;
+      const taskEventTypes = new Set((taskTest.events ?? []).map((e) => e.type));
       await J(`/mcp-servers/${s.id}`, { method: "DELETE" });
       check("MD1", "markitdown 端到端：注册→列工具→convert_to_markdown 转出 Markdown",
         test.ok && test.body.tools > 0 && out.includes("# 季度报告") && out.includes("**1200万**"),
         `tools=${test.body.tools}`);
+      check("MD2", "MCP 能力演练：markitdown 连接→工具事件→来源文档→验收待评审",
+        taskTest.ok === true &&
+        taskTest.task?.status === "review" &&
+        taskTest.docs?.some((d) => d.kind === "source" && d.content.includes("AiTeam MCP 演练")) &&
+        taskEventTypes.has("tool") &&
+        taskEventTypes.has("delivery") &&
+        taskEventTypes.has("verification"),
+        `ok=${taskTest.ok} status=${taskTest.task?.status} docs=${taskTest.docs?.length ?? 0} events=${[...taskEventTypes].join(",")}`);
     }
   }
 
@@ -796,12 +1360,191 @@ try {
     check("Q2", "图像生成配置：保存/读取/清除，key 永不下发", saved.has_key && got.model.includes("seedream") && !leak && offAgain);
   }
 
-  // Q3 强通道标志 is_strong 全链路
+  // Q3 强通道标志 + 成本估算价格字段全链路
   {
-    const prov = (await J("/providers", { method: "POST", body: JSON.stringify({ name: "回归strong", api_key: "sk-s", default_model: "m-pro", is_strong: true }) })).body;
-    const off = (await J(`/providers/${prov.id}`, { method: "PATCH", body: JSON.stringify({ is_strong: false }) })).body;
+    const prov = (await J("/providers", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "回归strong",
+        api_key: "sk-s",
+        default_model: "m-pro",
+        is_strong: true,
+        price_input_per_million: 1.25,
+        price_output_per_million: 4.5,
+        price_currency: "cny",
+      }),
+    })).body;
+    const off = (await J(`/providers/${prov.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ is_strong: false, price_output_per_million: 3.25, price_currency: "USD" }),
+    })).body;
     await J(`/providers/${prov.id}`, { method: "DELETE" });
-    check("Q3", "强通道标志：创建/编辑往返", prov.is_strong === 1 && off.is_strong === 0);
+    check("Q3", "强通道标志和价格字段：创建/编辑往返",
+      prov.is_strong === 1 &&
+      prov.price_input_per_million === 1.25 &&
+      prov.price_output_per_million === 4.5 &&
+      prov.price_currency === "CNY" &&
+      off.is_strong === 0 &&
+      off.price_input_per_million === 1.25 &&
+      off.price_output_per_million === 3.25 &&
+      off.price_currency === "USD");
+  }
+
+  {
+    const prov = (await J("/providers", {
+      method: "POST",
+      body: JSON.stringify({ name: "回归OpenAI兼容", api_key: "sk-local", base_url: fakeOpenAiBase, default_model: "fake-chat-model" }),
+    })).body;
+    const tested = await J(`/providers/${prov.id}/test`, { method: "POST" });
+    await J(`/providers/${prov.id}`, { method: "DELETE" });
+    check("Q4", "模型供应商测试：OpenAI-compatible Base URL/Key/模型名最小连通验证",
+      tested.ok &&
+      tested.body.protocol === "openai-compatible" &&
+      tested.body.model === "fake-chat-model" &&
+      tested.body.sample.includes("AiTeam 模型通道可用"),
+      `protocol=${tested.body.protocol} model=${tested.body.model} sample=${tested.body.sample}`);
+  }
+
+  {
+    const prov = (await J("/providers", {
+      method: "POST",
+      body: JSON.stringify({ name: "回归OpenAI工具循环", api_key: "sk-local", base_url: fakeOpenAiBase, default_model: "fake-chat-model", is_strong: true }),
+    })).body;
+    const worker = (await J("/agents", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "回归工具同事",
+        emoji: "🧪",
+        role: "模型工具循环回归",
+        system_prompt: "你是回归测试同事。收到任务后必须使用 write_document 交付，并接受 submit_verdict 验收。",
+        provider_id: prov.id,
+        model: "fake-chat-model",
+      }),
+    })).body;
+    const task = (await J("/tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        channel_id: ch.id,
+        title: "回归-真实通道工具循环",
+        description: "用 OpenAI-compatible fake provider 走工具调用并写入交付物。",
+        acceptance_criteria: "必须通过 write_document 写入 report 交付物，并进入待评审。",
+        assignee_agent_id: worker.id,
+      }),
+    })).body;
+    const delivered = await waitFor(async () => {
+      const tasks = (await J("/tasks")).body;
+      return tasks.some((t) => t.id === task.id && t.status === "review");
+    }, 30000);
+    const docs = (await J("/documents")).body.filter((d) => d.task_id === task.id);
+    const events = (await J(`/tasks/${task.id}/events`)).body;
+    const usage = (await J("/usage")).body;
+    await J(`/providers/${prov.id}`, { method: "DELETE" });
+    const eventTypes = new Set(events.map((e) => e.type));
+    const usageTracked = usage.recent?.some((r) => r.model === "fake-chat-model" && String(r.snippet || "").includes("Fake provider"));
+    check("Q5", "模型供应商任务循环：OpenAI-compatible 工具调用→write_document→验收→待评审+用量归因",
+      delivered &&
+      docs.some((d) => d.kind === "report" && d.content.includes("fake provider used write_document")) &&
+      eventTypes.has("tool") &&
+      eventTypes.has("delivery") &&
+      eventTypes.has("verification") &&
+      usageTracked,
+      `delivered=${delivered} docs=${docs.length} events=${[...eventTypes].join(",")} usage=${Boolean(usageTracked)}`);
+  }
+
+  {
+    const prov = (await J("/providers", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "回归任务演练供应商",
+        api_key: "sk-local",
+        base_url: fakeOpenAiBase,
+        default_model: "fake-chat-model",
+        is_strong: true,
+        price_input_per_million: 1,
+        price_output_per_million: 2,
+        price_currency: "USD",
+      }),
+    })).body;
+    const result = (await J(`/providers/${prov.id}/task-test`, { method: "POST" })).body;
+    const taskEvents = result.task?.id ? (await J(`/tasks/${result.task.id}/events`)).body : [];
+    await J(`/providers/${prov.id}`, { method: "DELETE" });
+    const eventTypes = new Set((result.events ?? []).map((e) => e.type));
+    const persistedResultEvent = taskEvents.find((e) => {
+      try {
+        const meta = JSON.parse(e.metadata_json || "{}");
+        return meta.provider_task_test === true &&
+          typeof meta.latency_ms === "number" &&
+          meta.checks?.usage_tracked === true &&
+          typeof meta.usage_summary?.billable === "number" &&
+          meta.usage_summary.billable > 0 &&
+          typeof meta.usage_summary?.estimated_cost === "number" &&
+          meta.usage_summary.estimated_cost > 0 &&
+          meta.usage_summary.price_currency === "USD";
+      } catch {
+        return false;
+      }
+    });
+    check("Q6", "模型供应商任务演练接口：配置页可验证工具调用→交付→验收→用量归因",
+      result.ok === true &&
+      result.task?.status === "review" &&
+      result.docs?.some((d) => d.kind === "report" && d.content.includes("fake provider used write_document")) &&
+      eventTypes.has("tool") &&
+      eventTypes.has("delivery") &&
+      eventTypes.has("verification") &&
+      result.checks?.usage_tracked === true &&
+      result.usage_summary?.estimated_cost > 0 &&
+      Boolean(persistedResultEvent),
+      `ok=${result.ok} status=${result.task?.status} docs=${result.docs?.length ?? 0} events=${[...eventTypes].join(",")} usage=${result.checks?.usage_tracked} billable=${result.usage_summary?.billable} cost=${result.usage_summary?.estimated_cost} persisted=${Boolean(persistedResultEvent)}`);
+  }
+
+  {
+    const started = await J("/link-checks", { method: "POST", body: JSON.stringify({ channel_id: ch.id }) });
+    const project = started.body.project;
+    const prov = (await J("/providers", {
+      method: "POST",
+      body: JSON.stringify({ name: "回归链路验收供应商", api_key: "sk-local", base_url: fakeOpenAiBase, default_model: "fake-chat-model", is_strong: true }),
+    })).body;
+    const providerResult = (await J(`/providers/${prov.id}/task-test`, {
+      method: "POST",
+      body: JSON.stringify({ channel_id: ch.id, project_id: project.id }),
+    })).body;
+    const skills = (await J("/skills")).body;
+    const skill = skills.find((s) => s.name === "交付自查清单") ?? skills[0];
+    const skillResult = (await J(`/skills/${skill.id}/task-test`, {
+      method: "POST",
+      body: JSON.stringify({ channel_id: ch.id, project_id: project.id }),
+    })).body;
+    let mcpResult = null;
+    let mcpServer = null;
+    try {
+      execSync("command -v markitdown-mcp", { stdio: "ignore" });
+      mcpServer = (await J("/mcp-servers", {
+        method: "POST",
+        body: JSON.stringify({ name: "markitdown", kind: "stdio", command: "markitdown-mcp", args: "", safety: "local" }),
+      })).body;
+      mcpResult = (await J(`/mcp-servers/${mcpServer.id}/task-test`, {
+        method: "POST",
+        body: JSON.stringify({ channel_id: ch.id, project_id: project.id }),
+      })).body;
+    } catch { /* markitdown-mcp is optional in this combined project check */ }
+    const tasksBeforeClose = (await J("/tasks")).body.filter((t) => t.project_id === project.id);
+    const allReview = tasksBeforeClose.length >= 2 && tasksBeforeClose.every((t) => t.status === "review");
+    const closed = (await J(`/projects/${project.id}/close`, { method: "POST" })).body;
+    const tasksAfterClose = (await J("/tasks")).body.filter((t) => t.project_id === project.id);
+    if (mcpServer) await J(`/mcp-servers/${mcpServer.id}`, { method: "DELETE" });
+    await J(`/providers/${prov.id}`, { method: "DELETE" });
+    check("LC1", "配置链路验收项目：模型/MCP/Skills 演练任务归入同项目并可人工关单",
+      project?.id &&
+      providerResult.ok === true &&
+      providerResult.task?.project_id === project.id &&
+      skillResult.ok === true &&
+      skillResult.task?.project_id === project.id &&
+      (!mcpResult || (mcpResult.ok === true && mcpResult.task?.project_id === project.id)) &&
+      allReview &&
+      closed.project?.status === "done" &&
+      tasksAfterClose.length === tasksBeforeClose.length &&
+      tasksAfterClose.every((t) => t.status === "done"),
+      `project=${project?.id} tasks=${tasksBeforeClose.length} provider=${providerResult.task?.project_id === project.id} skill=${skillResult.task?.project_id === project.id} mcp=${mcpResult ? mcpResult.task?.project_id === project.id : "skip"} closed=${closed.project?.status}`);
   }
 
   // 用量 / 导出 / 模板幂等 / 频道管理 / 记忆 / 供应商脱敏
@@ -829,6 +1572,7 @@ try {
   }
 } finally {
   server.kill();
+  fakeOpenAiServer?.close();
   rmSync(testDataDir, { recursive: true, force: true });
 }
 

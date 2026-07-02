@@ -63,6 +63,18 @@ CREATE TABLE IF NOT EXISTS tasks (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS task_events (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL DEFAULT '',
+  task_id TEXT NOT NULL,
+  channel_id TEXT,
+  project_id TEXT,
+  agent_id TEXT,
+  type TEXT NOT NULL,
+  summary TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS approvals (
   id TEXT PRIMARY KEY,
   owner_id TEXT NOT NULL DEFAULT '',
@@ -150,7 +162,7 @@ function addColumnIfMissing(table: string, column: string, ddl: string) {
   if (!cols.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
 }
 // owner_id：每用户工作区隔离（旧库无此列则补上，归到空 owner 桶，需要时迁移）
-for (const t of ["agents", "channels", "messages", "tasks", "approvals", "documents", "routines", "projects"]) {
+for (const t of ["agents", "channels", "messages", "tasks", "task_events", "approvals", "documents", "routines", "projects"]) {
   addColumnIfMissing(t, "owner_id", "owner_id TEXT NOT NULL DEFAULT ''");
 }
 // owner 索引必须在 owner_id 列补好之后建（旧库 messages 升级前没有该列，建在 schema 块里会报 no such column）
@@ -170,7 +182,14 @@ addColumnIfMissing("messages", "reply_to", "reply_to TEXT");
 addColumnIfMissing("providers", "light_model", "light_model TEXT NOT NULL DEFAULT ''");
 addColumnIfMissing("tasks", "model_tier", "model_tier TEXT NOT NULL DEFAULT 'standard'");
 addColumnIfMissing("tasks", "source_doc_ids", "source_doc_ids TEXT NOT NULL DEFAULT '[]'"); // 定向润色：本任务以这些文档为"来源"做受限改写（grounding，非依赖产物）
+addColumnIfMissing("tasks", "reviewer_agent_id", "reviewer_agent_id TEXT");
+addColumnIfMissing("tasks", "blocked_approval_id", "blocked_approval_id TEXT");
 addColumnIfMissing("providers", "is_strong", "is_strong INTEGER NOT NULL DEFAULT 0");
+addColumnIfMissing("providers", "price_input_per_million", "price_input_per_million REAL NOT NULL DEFAULT 0");
+addColumnIfMissing("providers", "price_output_per_million", "price_output_per_million REAL NOT NULL DEFAULT 0");
+addColumnIfMissing("providers", "price_currency", "price_currency TEXT NOT NULL DEFAULT 'USD'");
+db.exec(`CREATE INDEX IF NOT EXISTS idx_task_events_task ON task_events(owner_id, task_id, created_at)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_task_events_owner ON task_events(owner_id, created_at)`);
 // 旧库迁移：早期 agents 是全局 UNIQUE(name)；多用户化后应为 UNIQUE(owner_id,name)。
 // CREATE TABLE IF NOT EXISTS 不会替换已存在表的约束 → 重建表，否则新用户 seed 撞全局唯一名导致 bootstrap 崩。
 (function migrateAgentsUnique() {
@@ -257,6 +276,10 @@ export interface Provider {
   web_tools: number;
   /** 强通道标志：无官方 key 时，验收/汇总（preferStrong）优先走该供应商的 default_model */
   is_strong: number;
+  /** 可选价格：每 100 万输入/输出 token 的单价；0 = 未配置，不估算金额 */
+  price_input_per_million: number;
+  price_output_per_million: number;
+  price_currency: string;
   is_official: number;
   created_at: number;
 }
@@ -296,7 +319,7 @@ export interface McpServer {
   /** stdio 子进程环境变量 JSON（如 {"BOCHA_API_KEY":"..."}）；含密钥，sanitize 只回 key 名不回值 */
   env_json: string;
   enabled: number;
-  /** local=本地无副作用 | network=外发数据(读为主，不拦截) | exec=本地执行/写盘（受引擎审批门约束） */
+  /** local=本地无副作用 | network=外发数据（来源任务/严格模式需审批） | exec=本地执行/写盘（始终需审批） */
   safety: "local" | "network" | "exec";
   created_at: number;
 }
@@ -328,8 +351,10 @@ export interface Task {
   channel_id: string | null;
   title: string;
   description: string;
-  status: "todo" | "doing" | "review" | "done";
+  status: "todo" | "doing" | "review" | "blocked" | "done";
   assignee_agent_id: string | null;
+  reviewer_agent_id: string | null;
+  blocked_approval_id: string | null;
   created_by: string;
   acceptance_criteria: string;
   /** JSON: 依赖的任务 id 数组；全部交付（review/done）后本任务才会自动开工 */
@@ -365,13 +390,37 @@ export interface Approval {
   agent_id: string;
   title: string;
   payload: string;
-  /** action = 高风险动作审批；plan = 项目计划把关 */
-  kind: "action" | "plan";
-  /** plan 类审批关联的 project id */
+  /** action = 高风险动作审批；plan = 项目计划把关；clarification = 任务阻塞后向用户要输入 */
+  kind: "action" | "plan" | "clarification";
+  /** plan 关联 project id；clarification 关联 task id；action 可关联工具/任务 id */
   ref_id: string | null;
   status: "pending" | "approved" | "rejected";
   created_at: number;
   resolved_at: number | null;
+}
+
+export interface TaskEvent {
+  id: string;
+  owner_id: string;
+  task_id: string;
+  channel_id: string | null;
+  project_id: string | null;
+  agent_id: string | null;
+  type:
+    | "created"
+    | "claim"
+    | "start"
+    | "tool"
+    | "blocked"
+    | "handoff"
+    | "delivery"
+    | "verification"
+    | "approval"
+    | "user_close"
+    | "failure";
+  summary: string;
+  metadata_json: string;
+  created_at: number;
 }
 
 const now = () => Date.now();
@@ -424,6 +473,9 @@ export function createProvider(p: {
   max_tokens?: number;
   web_tools?: boolean;
   is_strong?: boolean;
+  price_input_per_million?: number;
+  price_output_per_million?: number;
+  price_currency?: string;
 }): Provider {
   const provider: Provider = {
     id: nanoid(10),
@@ -435,17 +487,20 @@ export function createProvider(p: {
     max_tokens: p.max_tokens && p.max_tokens > 0 ? p.max_tokens : 16000,
     web_tools: p.web_tools ? 1 : 0,
     is_strong: p.is_strong ? 1 : 0,
+    price_input_per_million: p.price_input_per_million && p.price_input_per_million > 0 ? p.price_input_per_million : 0,
+    price_output_per_million: p.price_output_per_million && p.price_output_per_million > 0 ? p.price_output_per_million : 0,
+    price_currency: p.price_currency?.trim().slice(0, 12).toUpperCase() || "USD",
     is_official: 0,
     created_at: now(),
   };
   db.prepare(
-    "INSERT INTO providers (id, name, base_url, api_key, default_model, light_model, max_tokens, web_tools, is_strong, is_official, created_at) VALUES (@id, @name, @base_url, @api_key, @default_model, @light_model, @max_tokens, @web_tools, @is_strong, @is_official, @created_at)"
+    "INSERT INTO providers (id, name, base_url, api_key, default_model, light_model, max_tokens, web_tools, is_strong, price_input_per_million, price_output_per_million, price_currency, is_official, created_at) VALUES (@id, @name, @base_url, @api_key, @default_model, @light_model, @max_tokens, @web_tools, @is_strong, @price_input_per_million, @price_output_per_million, @price_currency, @is_official, @created_at)"
   ).run(provider);
   return provider;
 }
 export function updateProvider(
   id: string,
-  fields: Partial<Pick<Provider, "name" | "base_url" | "default_model" | "light_model" | "max_tokens" | "web_tools" | "is_strong">> & {
+  fields: Partial<Pick<Provider, "name" | "base_url" | "default_model" | "light_model" | "max_tokens" | "web_tools" | "is_strong" | "price_input_per_million" | "price_output_per_million" | "price_currency">> & {
     /** 留空 = 保持原 key 不变 */
     api_key?: string;
   }
@@ -458,7 +513,7 @@ export function updateProvider(
     api_key: fields.api_key ? fields.api_key : cur.api_key,
   };
   db.prepare(
-    "UPDATE providers SET name = @name, base_url = @base_url, api_key = @api_key, default_model = @default_model, light_model = @light_model, max_tokens = @max_tokens, web_tools = @web_tools, is_strong = @is_strong WHERE id = @id"
+    "UPDATE providers SET name = @name, base_url = @base_url, api_key = @api_key, default_model = @default_model, light_model = @light_model, max_tokens = @max_tokens, web_tools = @web_tools, is_strong = @is_strong, price_input_per_million = @price_input_per_million, price_output_per_million = @price_output_per_million, price_currency = @price_currency WHERE id = @id"
   ).run(next);
   return next;
 }
@@ -477,6 +532,9 @@ export function sanitizeProvider(p: Provider) {
     max_tokens: p.max_tokens,
     web_tools: p.web_tools,
     is_strong: p.is_strong,
+    price_input_per_million: p.price_input_per_million,
+    price_output_per_million: p.price_output_per_million,
+    price_currency: p.price_currency,
     is_official: p.is_official,
     has_key: Boolean(p.api_key),
   };
@@ -902,6 +960,8 @@ export function createTask(t: {
   description?: string;
   status?: Task["status"];
   assignee_agent_id?: string | null;
+  reviewer_agent_id?: string | null;
+  blocked_approval_id?: string | null;
   created_by?: string;
   acceptance_criteria?: string;
   depends_on?: string[];
@@ -917,6 +977,8 @@ export function createTask(t: {
     description: t.description ?? "",
     status: t.status ?? "todo",
     assignee_agent_id: t.assignee_agent_id ?? null,
+    reviewer_agent_id: t.reviewer_agent_id ?? null,
+    blocked_approval_id: t.blocked_approval_id ?? null,
     created_by: t.created_by ?? "user",
     acceptance_criteria: t.acceptance_criteria ?? "",
     depends_on: JSON.stringify(t.depends_on ?? []),
@@ -928,7 +990,7 @@ export function createTask(t: {
     updated_at: now(),
   };
   db.prepare(
-    "INSERT INTO tasks (id, owner_id, channel_id, title, description, status, assignee_agent_id, created_by, acceptance_criteria, depends_on, model_tier, source_doc_ids, project_id, revision_count, created_at, updated_at) VALUES (@id, @owner_id, @channel_id, @title, @description, @status, @assignee_agent_id, @created_by, @acceptance_criteria, @depends_on, @model_tier, @source_doc_ids, @project_id, @revision_count, @created_at, @updated_at)"
+    "INSERT INTO tasks (id, owner_id, channel_id, title, description, status, assignee_agent_id, reviewer_agent_id, blocked_approval_id, created_by, acceptance_criteria, depends_on, model_tier, source_doc_ids, project_id, revision_count, created_at, updated_at) VALUES (@id, @owner_id, @channel_id, @title, @description, @status, @assignee_agent_id, @reviewer_agent_id, @blocked_approval_id, @created_by, @acceptance_criteria, @depends_on, @model_tier, @source_doc_ids, @project_id, @revision_count, @created_at, @updated_at)"
   ).run(task);
   return task;
 }
@@ -937,7 +999,15 @@ export function updateTask(
   fields: Partial<
     Pick<
       Task,
-      "title" | "description" | "status" | "assignee_agent_id" | "channel_id" | "acceptance_criteria" | "revision_count"
+      | "title"
+      | "description"
+      | "status"
+      | "assignee_agent_id"
+      | "reviewer_agent_id"
+      | "blocked_approval_id"
+      | "channel_id"
+      | "acceptance_criteria"
+      | "revision_count"
     >
   >
 ): Task | undefined {
@@ -945,7 +1015,7 @@ export function updateTask(
   if (!cur) return undefined;
   const next: Task = { ...cur, ...fields, updated_at: now() };
   db.prepare(
-    "UPDATE tasks SET title = @title, description = @description, status = @status, assignee_agent_id = @assignee_agent_id, channel_id = @channel_id, acceptance_criteria = @acceptance_criteria, revision_count = @revision_count, updated_at = @updated_at WHERE id = @id"
+    "UPDATE tasks SET title = @title, description = @description, status = @status, assignee_agent_id = @assignee_agent_id, reviewer_agent_id = @reviewer_agent_id, blocked_approval_id = @blocked_approval_id, channel_id = @channel_id, acceptance_criteria = @acceptance_criteria, revision_count = @revision_count, updated_at = @updated_at WHERE id = @id"
   ).run(next);
   return next;
 }
@@ -956,6 +1026,44 @@ export function taskDependsOn(task: Task): string[] {
   } catch {
     return [];
   }
+}
+
+export function listTaskEvents(taskId?: string): TaskEvent[] {
+  const owner = currentOwner();
+  if (taskId) {
+    return db
+      .prepare("SELECT * FROM task_events WHERE owner_id = ? AND task_id = ? ORDER BY created_at ASC, rowid ASC")
+      .all(owner, taskId) as TaskEvent[];
+  }
+  return db
+    .prepare("SELECT * FROM task_events WHERE owner_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 500")
+    .all(owner) as TaskEvent[];
+}
+export function createTaskEvent(e: {
+  task_id: string;
+  channel_id?: string | null;
+  project_id?: string | null;
+  agent_id?: string | null;
+  type: TaskEvent["type"];
+  summary: string;
+  metadata?: unknown;
+}): TaskEvent {
+  const event: TaskEvent = {
+    id: nanoid(10),
+    owner_id: currentOwner(),
+    task_id: e.task_id,
+    channel_id: e.channel_id ?? null,
+    project_id: e.project_id ?? null,
+    agent_id: e.agent_id ?? null,
+    type: e.type,
+    summary: e.summary,
+    metadata_json: JSON.stringify(e.metadata ?? {}),
+    created_at: now(),
+  };
+  db.prepare(
+    "INSERT INTO task_events (id, owner_id, task_id, channel_id, project_id, agent_id, type, summary, metadata_json, created_at) VALUES (@id, @owner_id, @task_id, @channel_id, @project_id, @agent_id, @type, @summary, @metadata_json, @created_at)"
+  ).run(event);
+  return event;
 }
 
 // ---- projects（每用户私有）----
@@ -1025,6 +1133,9 @@ export function closeProject(projectId: string): { project: Project | undefined;
 export function listApprovals(): Approval[] {
   return db.prepare("SELECT * FROM approvals WHERE owner_id = ? ORDER BY created_at DESC").all(currentOwner()) as Approval[];
 }
+export function getApproval(id: string): Approval | undefined {
+  return db.prepare("SELECT * FROM approvals WHERE id = ? AND owner_id = ?").get(id, currentOwner()) as Approval | undefined;
+}
 export function createApproval(a: {
   channel_id?: string | null;
   agent_id: string;
@@ -1052,10 +1163,18 @@ export function createApproval(a: {
   return approval;
 }
 export function resolveApproval(id: string, approve: boolean): Approval | undefined {
-  const cur = db.prepare("SELECT * FROM approvals WHERE id = ? AND owner_id = ?").get(id, currentOwner()) as Approval | undefined;
+  const cur = getApproval(id);
   if (!cur || cur.status !== "pending") return cur;
   const next: Approval = { ...cur, status: approve ? "approved" : "rejected", resolved_at: now() };
   db.prepare("UPDATE approvals SET status = ?, resolved_at = ? WHERE id = ?").run(next.status, next.resolved_at, id);
+  return next;
+}
+
+export function updateApprovalPayload(id: string, payload: string): Approval | undefined {
+  const cur = getApproval(id);
+  if (!cur) return undefined;
+  const next: Approval = { ...cur, payload };
+  db.prepare("UPDATE approvals SET payload = ? WHERE id = ? AND owner_id = ?").run(payload, id, currentOwner());
   return next;
 }
 

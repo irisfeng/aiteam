@@ -1,0 +1,16 @@
+{
+  "name": "desktop",
+  "private": true,
+  "version": "0.1.0",
+  "main": "main.cjs",
+  "scripts": {
+    "pack": "node prepare-runtime.mjs && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --dir --config electron-builder.yml",
+    "pack:verify": "node verify-packaged-runtime.mjs",
+    "start": "electron .",
+    "smoke": "node smoke.mjs"
+  },
+  "devDependencies": {
+    "electron": "35.7.5",
+    "electron-builder": "^26.15.3"
+  }
+}

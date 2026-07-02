@@ -1,0 +1,37 @@
+appId: im.aiteam.desktop
+productName: AiTeam
+directories:
+  output: release
+asar: true
+files:
+  - main.cjs
+  - preload.cjs
+  - package.json
+extraResources:
+  - from: .runtime/server
+    to: server
+    filter:
+      - dist/**/*
+      - package.json
+  - from: .runtime/server/node_modules
+    to: server/node_modules
+    filter:
+      - "**/*"
+  - from: .runtime/node
+    to: node
+    filter:
+      - "**/*"
+  - from: .runtime/web
+    to: web
+    filter:
+      - dist/**/*
+mac:
+  identity: null
+  target:
+    - dir
+win:
+  target:
+    - dir
+linux:
+  target:
+    - dir

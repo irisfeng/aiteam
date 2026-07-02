@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { api, type Bootstrap } from "./api";
-import type { Agent, AgentStatus, Approval, Channel, Doc, Message, Project, Provider, Task, View } from "./types";
+import type { Agent, AgentStatus, Approval, Channel, Doc, Message, Project, Provider, Task, TaskEvent, View } from "./types";
 
 interface State {
   ready: boolean;
@@ -21,6 +21,7 @@ interface State {
   agents: Agent[];
   channels: Channel[];
   tasks: Task[];
+  taskEvents: TaskEvent[];
   approvals: Approval[];
   documents: Doc[];
   projects: Project[];
@@ -33,6 +34,7 @@ interface State {
 
 type Action =
   | { type: "bootstrap"; data: Bootstrap }
+  | { type: "bootstrap:merge"; data: Bootstrap }
   | { type: "auth:set"; authed: boolean; info?: { allow_signup: boolean; needs_setup: boolean } }
   | { type: "view"; view: View }
   | { type: "messages"; channelId: string; messages: Message[] }
@@ -41,10 +43,11 @@ type Action =
   | { type: "message:done"; id: string; channelId: string; content: string; usage: string | null }
   | { type: "agent:status"; status: AgentStatus }
   | { type: "task:upsert"; task: Task }
+  | { type: "task:event"; event: TaskEvent }
   | { type: "doc:upsert"; doc: Doc }
   | { type: "doc:delete"; ids: string[] }
   | { type: "project:upsert"; project: Project }
-  | { type: "providers:set"; providers: Provider[] }
+  | { type: "providers:set"; providers: Provider[]; mockMode?: boolean }
   | { type: "approval:upsert"; approval: Approval }
   | { type: "channel:new"; channel: Channel }
   | { type: "channel:update"; channel: Channel }
@@ -61,6 +64,7 @@ const initial: State = {
   agents: [],
   channels: [],
   tasks: [],
+  taskEvents: [],
   approvals: [],
   documents: [],
   projects: [],
@@ -78,11 +82,20 @@ function upsertBy<T extends { id: string }>(list: T[], item: T): T[] {
   return next;
 }
 
+function notifyDesktop(title: string, body: string, target?: string) {
+  const bridge = (window as unknown as Window).aiteamDesktop;
+  bridge?.notify?.({ title, body, ...(target ? { target } : {}) });
+}
+
+function keepValidView(view: View, channels: Channel[]): View {
+  if (view.kind !== "channel") return view;
+  return channels.some((c) => c.id === view.id) ? view : { kind: "tasks" };
+}
+
 function reducer(state: State, action: Action): State {
   switch (action.type) {
     case "bootstrap": {
       const d = action.data;
-      const firstChannel = d.channels.find((c) => c.kind === "channel") ?? d.channels[0];
       return {
         ...state,
         ready: true,
@@ -92,11 +105,28 @@ function reducer(state: State, action: Action): State {
         agents: d.agents,
         channels: d.channels,
         tasks: d.tasks,
+        taskEvents: [...(d.task_events ?? [])].sort((a, b) => a.created_at - b.created_at),
         approvals: d.approvals,
         documents: d.documents ?? [],
         projects: d.projects ?? [],
         providers: d.providers ?? [],
-        view: firstChannel ? { kind: "channel", id: firstChannel.id } : state.view,
+        view: keepValidView(state.view, d.channels),
+      };
+    }
+    case "bootstrap:merge": {
+      const d = action.data;
+      return {
+        ...state,
+        user: d.user,
+        mockMode: d.mock_mode,
+        agents: d.agents,
+        channels: d.channels,
+        tasks: d.tasks,
+        taskEvents: [...(d.task_events ?? [])].sort((a, b) => a.created_at - b.created_at),
+        approvals: d.approvals,
+        documents: d.documents ?? [],
+        projects: d.projects ?? [],
+        providers: d.providers ?? [],
       };
     }
     case "auth:set":
@@ -145,6 +175,13 @@ function reducer(state: State, action: Action): State {
     }
     case "task:upsert":
       return { ...state, tasks: upsertBy(state.tasks, action.task) };
+    case "task:event":
+      return {
+        ...state,
+        taskEvents: state.taskEvents.some((e) => e.id === action.event.id)
+          ? state.taskEvents
+          : [...state.taskEvents, action.event].sort((a, b) => a.created_at - b.created_at),
+      };
     case "doc:upsert":
       return { ...state, documents: upsertBy(state.documents, action.doc) };
     case "doc:delete":
@@ -152,7 +189,11 @@ function reducer(state: State, action: Action): State {
     case "project:upsert":
       return { ...state, projects: upsertBy(state.projects, action.project) };
     case "providers:set":
-      return { ...state, providers: action.providers };
+      return {
+        ...state,
+        providers: action.providers,
+        ...(action.mockMode !== undefined ? { mockMode: action.mockMode } : {}),
+      };
     case "approval:upsert":
       return { ...state, approvals: upsertBy(state.approvals, action.approval) };
     case "channel:new":
@@ -201,13 +242,26 @@ interface Store extends State {
     model?: string;
     provider_id?: string | null;
   }) => Promise<void>;
-  createProvider: (data: import("./api").ProviderInput) => Promise<void>;
-  updateProvider: (id: string, data: import("./api").ProviderInput) => Promise<void>;
+  createTask: (data: {
+    title: string;
+    description?: string;
+    channel_id?: string | null;
+    assignee_agent_id?: string | null;
+    reviewer_agent_id?: string | null;
+  }) => Promise<Task>;
+  updateTask: (id: string, data: Partial<Pick<Task, "title" | "description" | "status" | "assignee_agent_id" | "reviewer_agent_id">>) => Promise<Task>;
+  createProvider: (data: import("./api").ProviderInput) => Promise<Provider>;
+  updateProvider: (id: string, data: import("./api").ProviderInput) => Promise<Provider>;
   deleteProvider: (id: string) => Promise<void>;
+  runProviderTaskTest: (id: string, data?: { channel_id?: string | null; project_id?: string | null }) => Promise<import("./api").ProviderTaskTestResult>;
+  runMcpTaskTest: (id: string, data?: { channel_id?: string | null; project_id?: string | null }) => Promise<import("./api").McpTaskTestResult>;
+  runSkillTaskTest: (id: string, data?: { channel_id?: string | null; project_id?: string | null }) => Promise<import("./api").SkillTaskTestResult>;
   moveTask: (task: Task, status: Task["status"]) => Promise<void>;
+  startScenario: (id: string, data?: { channel_id?: string | null; acceptance?: boolean }) => Promise<{ project: Project; tasks: Task[] }>;
   closeProject: (projectId: string) => Promise<void>;
   deleteDocument: (id: string) => Promise<void>;
-  resolveApproval: (id: string, approve: boolean) => Promise<void>;
+  resolveApproval: (id: string, approve: boolean, response?: string) => Promise<void>;
+  refreshWorkspace: () => Promise<void>;
   agentById: (id: string | null) => Agent | undefined;
 }
 
@@ -220,9 +274,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const loadWorkspace = useCallback(async () => {
     const data = await api.bootstrap();
     dispatch({ type: "bootstrap", data });
-    const first = data.channels.find((c) => c.kind === "channel") ?? data.channels[0];
-    if (first) openChannel(first.id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -272,6 +323,30 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
             break;
           case "task:upsert":
             dispatch({ type: "task:upsert", task: payload });
+            if (payload?.status === "review") {
+              notifyDesktop(
+                "AiTeam 任务待评审",
+                payload.title ?? "有任务提交到待评审",
+                payload.id ? `aiteam://task/${payload.id}` : undefined
+              );
+            }
+            if (payload?.status === "blocked") {
+              notifyDesktop(
+                "AiTeam 任务等待输入",
+                payload.title ?? "有任务被阻塞",
+                payload.id ? `aiteam://task/${payload.id}` : undefined
+              );
+            }
+            break;
+          case "task:event":
+            dispatch({ type: "task:event", event: payload });
+            if (["blocked", "failure", "delivery", "user_close"].includes(payload?.type)) {
+              notifyDesktop(
+                "AiTeam 任务动态",
+                payload?.summary ?? "任务状态已更新",
+                payload?.task_id ? `aiteam://task/${payload.task_id}` : undefined
+              );
+            }
             break;
           case "doc:upsert":
             dispatch({ type: "doc:upsert", doc: payload });
@@ -284,6 +359,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
             break;
           case "approval:upsert":
             dispatch({ type: "approval:upsert", approval: payload });
+            if (payload?.status === "pending") {
+              notifyDesktop(
+                "AiTeam 待审批",
+                payload.title ?? "有新的审批请求",
+                payload.id ? `aiteam://approval/${payload.id}` : undefined
+              );
+            }
             break;
           case "channel:new":
             dispatch({ type: "channel:new", channel: payload });
@@ -362,6 +444,18 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         const agent = await api.createAgent(data);
         dispatch({ type: "agent:new", agent });
       },
+      createTask: async (data) => {
+        const task = await api.createTask(data);
+        const fresh = await api.bootstrap();
+        dispatch({ type: "bootstrap:merge", data: fresh });
+        return task;
+      },
+      updateTask: async (id, data) => {
+        const task = await api.updateTask(id, data);
+        const fresh = await api.bootstrap();
+        dispatch({ type: "bootstrap:merge", data: fresh });
+        return task;
+      },
       installTemplate: async (templateId) => {
         const agent = await api.createAgentFromTemplate(templateId);
         dispatch({ type: "agent:new", agent });
@@ -369,32 +463,83 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       },
       createProvider: async (data) => {
         const provider = await api.createProvider(data);
-        dispatch({ type: "providers:set", providers: [...state.providers, provider] });
+        const fresh = await api.bootstrap();
+        dispatch({ type: "providers:set", providers: fresh.providers, mockMode: fresh.mock_mode });
+        return provider;
       },
       updateProvider: async (id, data) => {
         const provider = await api.updateProvider(id, data);
-        dispatch({ type: "providers:set", providers: state.providers.map((p) => (p.id === id ? provider : p)) });
+        const fresh = await api.bootstrap();
+        dispatch({ type: "providers:set", providers: fresh.providers, mockMode: fresh.mock_mode });
+        return provider;
       },
       deleteProvider: async (id) => {
         await api.deleteProvider(id);
-        dispatch({ type: "providers:set", providers: state.providers.filter((p) => p.id !== id) });
+        const fresh = await api.bootstrap();
+        dispatch({ type: "providers:set", providers: fresh.providers, mockMode: fresh.mock_mode });
+      },
+      runProviderTaskTest: async (id, data) => {
+        const result = await api.runProviderTaskTest(id, data ?? {});
+        const fresh = await api.bootstrap();
+        dispatch({ type: "bootstrap:merge", data: fresh });
+        return result;
+      },
+      runMcpTaskTest: async (id, data) => {
+        const result = await api.runMcpTaskTest(id, data ?? {});
+        const fresh = await api.bootstrap();
+        dispatch({ type: "bootstrap:merge", data: fresh });
+        return result;
+      },
+      runSkillTaskTest: async (id, data) => {
+        const result = await api.runSkillTaskTest(id, data ?? {});
+        const fresh = await api.bootstrap();
+        dispatch({ type: "bootstrap:merge", data: fresh });
+        return result;
       },
       moveTask: async (task, status) => {
-        const next = await api.updateTask(task.id, { status });
-        dispatch({ type: "task:upsert", task: next });
+        await api.updateTask(task.id, { status });
+        const fresh = await api.bootstrap();
+        dispatch({ type: "bootstrap:merge", data: fresh });
+      },
+      startScenario: async (id, data) => {
+        const result = await api.startScenario(id, data ?? {});
+        dispatch({ type: "project:upsert", project: result.project });
+        for (const task of result.tasks) dispatch({ type: "task:upsert", task });
+        const fresh = await api.bootstrap();
+        for (const task of fresh.tasks) dispatch({ type: "task:upsert", task });
+        for (const event of fresh.task_events ?? []) dispatch({ type: "task:event", event });
+        for (const item of fresh.approvals) dispatch({ type: "approval:upsert", approval: item });
+        for (const doc of fresh.documents ?? []) dispatch({ type: "doc:upsert", doc });
+        for (const project of fresh.projects ?? []) dispatch({ type: "project:upsert", project });
+        return result;
       },
       closeProject: async (projectId) => {
-        const { project, tasks } = await api.closeProject(projectId);
-        for (const t of tasks) dispatch({ type: "task:upsert", task: t });
-        dispatch({ type: "project:upsert", project });
+        await api.closeProject(projectId);
+        const fresh = await api.bootstrap();
+        dispatch({ type: "bootstrap:merge", data: fresh });
       },
       deleteDocument: async (id) => {
         const { deleted } = await api.deleteDocument(id);
         dispatch({ type: "doc:delete", ids: deleted });
       },
-      resolveApproval: async (id, approve) => {
-        const approval = await api.resolveApproval(id, approve);
+      resolveApproval: async (id, approve, response) => {
+        const approval = await api.resolveApproval(id, approve, response);
         dispatch({ type: "approval:upsert", approval });
+        const fresh = await api.bootstrap();
+        dispatch({ type: "bootstrap:merge", data: fresh });
+        if (approval.kind === "clarification" && approve) {
+          for (const delay of [1200, 3500]) {
+            window.setTimeout(() => {
+              void api.bootstrap()
+                .then((later) => dispatch({ type: "bootstrap:merge", data: later }))
+                .catch(() => undefined);
+            }, delay);
+          }
+        }
+      },
+      refreshWorkspace: async () => {
+        const fresh = await api.bootstrap();
+        dispatch({ type: "bootstrap:merge", data: fresh });
       },
       agentById: (id) => (id ? state.agents.find((a) => a.id === id) : undefined),
     }),

@@ -1,22 +1,54 @@
-import { useState } from "react";
+import { Suspense, lazy, useEffect, useMemo, useState } from "react";
 import { useWorkspace } from "../store";
 import type { Doc, Task } from "../types";
-import { api, API_BASE } from "../api";
-import { DocViewerModal } from "./DocsView";
+import { API_BASE } from "../api";
+import { TaskDetailDrawer } from "./TaskDetailDrawer";
+import { WorklineOverview } from "./WorklineOverview";
+import type { SettingsTab } from "./Modals";
+
+const DocViewerModal = lazy(() => import("./DocsView").then((m) => ({ default: m.DocViewerModal })));
 
 const COLUMNS: { key: Task["status"]; label: string }[] = [
   { key: "todo", label: "待办" },
   { key: "doing", label: "进行中" },
+  { key: "blocked", label: "等待输入" },
   { key: "review", label: "待评审" },
   { key: "done", label: "完成" },
 ];
+const COLUMN_LABEL = Object.fromEntries(COLUMNS.map((c) => [c.key, c.label])) as Record<Task["status"], string>;
+const ACCEPTANCE_PROJECT_PREFIX = "闭环验收";
+const PROJECT_STATUS_TONE: Record<Task["status"], string> = {
+  todo: "bg-slate-400",
+  doing: "bg-accent",
+  blocked: "bg-red-500",
+  review: "bg-blue-500",
+  done: "bg-emerald-500",
+};
 
-function TaskCard({ task, onOpenDoc }: { task: Task; onOpenDoc: (doc: Doc) => void }) {
+function prevStatus(task: Task): Task["status"] | null {
+  if (task.status === "doing" || task.status === "review") return "todo";
+  if (task.status === "done") return "review";
+  return null;
+}
+
+function nextStatus(task: Task): Task["status"] | null {
+  if (task.status === "doing") return "review";
+  if (task.status === "review") return "done";
+  return null;
+}
+
+function TaskCard({ task, onOpenDoc, onOpenTask }: { task: Task; onOpenDoc: (doc: Doc) => void; onOpenTask: (task: Task) => void }) {
   const ws = useWorkspace();
   const creator = task.created_by === "user" ? null : ws.agentById(task.created_by);
   const doc = ws.documents.find((d) => d.task_id === task.id);
-  const idx = COLUMNS.findIndex((c) => c.key === task.status);
+  const prev = prevStatus(task);
+  const next = nextStatus(task);
   const project = ws.projects.find((p) => p.id === task.project_id);
+  const events = ws.taskEvents.filter((e) => e.task_id === task.id);
+  const latest = events.at(-1);
+  const hasPendingApproval = ws.approvals.some(
+    (a) => a.status === "pending" && (a.ref_id === task.id || a.id === task.blocked_approval_id),
+  );
   let depCount = 0;
   try {
     depCount = (JSON.parse(task.depends_on) as string[]).length;
@@ -57,26 +89,54 @@ function TaskCard({ task, onOpenDoc }: { task: Task; onOpenDoc: (doc: Doc) => vo
       {task.description && (
         <div className="mt-1 line-clamp-3 whitespace-pre-wrap text-[12.5px] text-ink-2">{task.description}</div>
       )}
-      <div className="mt-2 flex items-center gap-1.5">
-        <select
-          value={task.assignee_agent_id ?? ""}
-          onChange={(e) => void api.updateTask(task.id, { assignee_agent_id: e.target.value || null })}
-          className="max-w-[140px] rounded-full border border-line bg-sel px-1.5 py-0.5 text-[11.5px] text-ink-2 outline-none"
-          title="指派给 AI 同事后会自动开工"
+      {latest && (
+        <button
+          onClick={() => onOpenTask(task)}
+          className="mt-2 flex w-full items-center gap-1.5 rounded-md bg-sel/80 px-2 py-1 text-left text-[11.5px] text-ink-3 hover:text-ink"
+          title={latest.summary}
         >
-          <option value="">未分配</option>
-          {ws.agents.map((a) => (
-            <option key={a.id} value={a.id}>
-              {a.emoji} {a.name}
-            </option>
-          ))}
-        </select>
-        {creator && (
-          <span className="text-[11px] text-ink-3" title={`由 ${creator.name} 创建`}>
-            {creator.emoji} 创建
-          </span>
-        )}
-        <span className="ml-auto flex gap-0.5">
+          <span className="shrink-0 font-mono text-[10px]">{events.length} evt</span>
+          <span className="min-w-0 flex-1 truncate">{latest.summary}</span>
+        </button>
+      )}
+      <div className="mt-2 space-y-1.5">
+        <div className="grid grid-cols-2 gap-1.5">
+          <select
+            value={task.assignee_agent_id ?? ""}
+            onChange={(e) => void ws.updateTask(task.id, { assignee_agent_id: e.target.value || null })}
+            disabled={task.status === "done"}
+            className="min-w-0 rounded-full border border-line bg-sel px-1.5 py-0.5 text-[11.5px] text-ink-2 outline-none disabled:opacity-50"
+            title="指派给 AI 同事后会自动开工"
+          >
+            <option value="">未分配</option>
+            {ws.agents.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.emoji} {a.name}
+              </option>
+            ))}
+          </select>
+          <select
+            value={task.reviewer_agent_id ?? ""}
+            onChange={(e) => void ws.updateTask(task.id, { reviewer_agent_id: e.target.value || null })}
+            disabled={task.status === "done"}
+            className="min-w-0 rounded-full border border-line bg-sel px-1.5 py-0.5 text-[11.5px] text-ink-2 outline-none disabled:opacity-50"
+            title="指定复核人；留空则系统按交付物类型自动选择"
+          >
+            <option value="">自动复核</option>
+            {ws.agents.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.emoji} {a.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="flex min-h-6 items-center gap-1.5">
+          {creator && (
+            <span className="truncate text-[11px] text-ink-3" title={`由 ${creator.name} 创建`}>
+              {creator.emoji} 创建
+            </span>
+          )}
+          <span className="ml-auto flex shrink-0 gap-0.5">
           {task.status === "doing" && (
             <button
               onClick={() => void fetch(`${API_BASE}/tasks/${task.id}/stop`, { method: "POST" })}
@@ -86,25 +146,38 @@ function TaskCard({ task, onOpenDoc }: { task: Task; onOpenDoc: (doc: Doc) => vo
               ⏹
             </button>
           )}
-          {idx > 0 && (
+          <button
+            onClick={() => onOpenTask(task)}
+            className="rounded px-1 text-ink-3 hover:bg-sel hover:text-ink"
+            title="打开任务详情"
+          >
+            详情
+          </button>
+          {prev && (
             <button
-              onClick={() => void ws.moveTask(task, COLUMNS[idx - 1].key)}
+              onClick={() => void ws.moveTask(task, prev)}
               className="rounded px-1 text-ink-3 hover:bg-sel hover:text-ink"
-              title={`移到「${COLUMNS[idx - 1].label}」`}
+              title={`移到「${COLUMN_LABEL[prev]}」`}
             >
               ←
             </button>
           )}
-          {idx < COLUMNS.length - 1 && (
+          {next && (
             <button
-              onClick={() => void ws.moveTask(task, COLUMNS[idx + 1].key)}
-              className="rounded px-1 text-ink-3 hover:bg-sel hover:text-ink"
-              title={`移到「${COLUMNS[idx + 1].label}」${COLUMNS[idx + 1].key === "done" ? "（关单是 human-only）" : ""}`}
+              onClick={() => void ws.moveTask(task, next)}
+              disabled={next === "done" && hasPendingApproval}
+              className="rounded px-1 text-ink-3 hover:bg-sel hover:text-ink disabled:opacity-40"
+              title={
+                next === "done" && hasPendingApproval
+                  ? "先在收件箱处理该任务的审批/输入，再关闭"
+                  : `移到「${COLUMN_LABEL[next]}」${next === "done" ? "（关单是 human-only）" : ""}`
+              }
             >
               →
             </button>
           )}
-        </span>
+          </span>
+        </div>
       </div>
       {doc && (
         <button
@@ -128,24 +201,58 @@ function ProjectGroup({
   columnTasks,
   column,
   onOpenDoc,
+  onOpenTask,
 }: {
   projectId: string;
   columnTasks: Task[];
   column: Task["status"];
   onOpenDoc: (doc: Doc) => void;
+  onOpenTask: (task: Task) => void;
 }) {
   const ws = useWorkspace();
   const project = ws.projects.find((p) => p.id === projectId);
   const [open, setOpen] = useState(false);
   const [closing, setClosing] = useState(false);
   const allTasks = ws.tasks.filter((t) => t.project_id === projectId);
+  const projectDocs = ws.documents
+    .filter((d) => d.task_id && allTasks.some((t) => t.id === d.task_id))
+    .sort((a, b) => b.created_at - a.created_at);
+  const summaryDoc = project?.summary_doc_id ? ws.documents.find((d) => d.id === project.summary_doc_id) : undefined;
+  const featuredDoc = summaryDoc ?? projectDocs[0];
+  const taskIds = new Set(allTasks.map((t) => t.id));
+  const pendingApprovals = ws.approvals.filter(
+    (a) => a.status === "pending" && (a.ref_id === projectId || (a.ref_id ? taskIds.has(a.ref_id) : false)),
+  );
+  const projectEvents = ws.taskEvents
+    .filter((e) => e.task_id && taskIds.has(e.task_id))
+    .sort((a, b) => a.created_at - b.created_at);
+  const revisionTotal = allTasks.reduce((sum, t) => sum + (t.revision_count ?? 0), 0);
   const delivered = allTasks.filter((t) => t.status === "review" || t.status === "done").length;
   const allDelivered = allTasks.length > 0 && allTasks.every((t) => t.status === "review" || t.status === "done");
-  const canClose = column === "review" && allDelivered && project?.status !== "done";
+  const closeBlockedByApproval = column === "review" && allDelivered && pendingApprovals.length > 0 && project?.status !== "done";
+  const canClose = column === "review" && allDelivered && pendingApprovals.length === 0 && project?.status !== "done";
+  const statusCounts = Object.fromEntries(COLUMNS.map((c) => [c.key, allTasks.filter((t) => t.status === c.key).length])) as Record<Task["status"], number>;
+  const progressPct = allTasks.length > 0 ? Math.round((delivered / allTasks.length) * 100) : 0;
+  const nextHint =
+    statusCounts.blocked > 0
+      ? `${statusCounts.blocked} 个任务等待输入`
+      : statusCounts.review > 0
+        ? `${statusCounts.review} 个交付待复核/关闭`
+        : statusCounts.doing > 0
+          ? `${statusCounts.doing} 个任务正在执行`
+          : statusCounts.todo > 0
+            ? `${statusCounts.todo} 个任务待认领或依赖解锁`
+            : project?.status === "done"
+              ? "项目已关闭"
+              : "等待最终关闭";
 
   async function close() {
     if (closing) return;
-    if (!window.confirm(`确认关闭项目「${project?.title ?? "项目"}」？\n将把它的 ${allTasks.length} 个任务一并归入「完成」。`)) return;
+    if (!window.confirm(
+      `确认关闭项目「${project?.title ?? "项目"}」？\n` +
+      `将把 ${allTasks.length} 个已交付任务归入「完成」。\n` +
+      `交付物 ${projectDocs.length} 个，返工 ${revisionTotal} 次，活动事件 ${projectEvents.length} 条。`
+    )) return;
     setClosing(true);
     try {
       await ws.closeProject(projectId);
@@ -167,6 +274,82 @@ function ProjectGroup({
           {column === "review" ? `${delivered}/${allTasks.length} 已交付` : `${columnTasks.length} 卡`}
         </span>
       </button>
+      {allTasks.length > 0 && (
+        <div className="px-2.5 pb-2">
+          <div className="mb-1 flex items-center gap-2 text-[10.5px] text-ink-3">
+            <span className="font-mono">{progressPct}%</span>
+            <span className="min-w-0 flex-1 truncate">{nextHint}</span>
+          </div>
+          <div className="flex h-1.5 overflow-hidden rounded-full bg-sel" title={`项目进度：${delivered}/${allTasks.length} 已交付`}>
+            {COLUMNS.map((c) => {
+              const count = statusCounts[c.key];
+              if (count === 0) return null;
+              return (
+                <span
+                  key={c.key}
+                  className={PROJECT_STATUS_TONE[c.key]}
+                  style={{ flex: count }}
+                  title={`${c.label}: ${count}`}
+                />
+              );
+            })}
+          </div>
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            {COLUMNS.filter((c) => statusCounts[c.key] > 0).map((c) => (
+              <span key={c.key} className="rounded bg-sel px-1.5 py-px text-[10px] text-ink-3">
+                {c.label} {statusCounts[c.key]}
+              </span>
+            ))}
+          </div>
+          {featuredDoc && (
+            <button
+              onClick={() => onOpenDoc(featuredDoc)}
+              className="mt-2 flex w-full items-center justify-between rounded-md bg-accent-soft px-2 py-1.5 text-left text-[11.5px] text-ink-2 hover:text-accent"
+              title={featuredDoc.title}
+            >
+              <span className="min-w-0 truncate">{summaryDoc ? "最终汇总" : "最新交付物"}：{featuredDoc.title}</span>
+              <span className="ml-2 shrink-0 rounded bg-panel px-1 py-px font-mono text-[10px] text-ink-3">
+                {projectDocs.length}
+              </span>
+            </button>
+          )}
+          {allDelivered && (
+            <div className="mt-2 rounded-md border border-line bg-paper/70 px-2 py-1.5">
+              <div className="mb-1 flex items-center justify-between gap-2 text-[11px] font-medium text-ink-2">
+                <span>验收摘要</span>
+                <span className={pendingApprovals.length > 0 ? "text-amber-600" : "text-emerald-600"}>
+                  {pendingApprovals.length > 0 ? "仍有待处理" : "可人工关单"}
+                </span>
+              </div>
+              <div className="grid grid-cols-4 gap-1 text-center text-[10.5px] text-ink-3">
+                <span className="rounded bg-sel px-1 py-1" title="当前版本交付物数量">
+                  交付 {projectDocs.length}
+                </span>
+                <span className="rounded bg-sel px-1 py-1" title="复核退回累计次数">
+                  返工 {revisionTotal}
+                </span>
+                <span className={`rounded px-1 py-1 ${pendingApprovals.length > 0 ? "bg-amber-50 text-amber-700 dark:bg-amber-950/20 dark:text-amber-300" : "bg-sel"}`}>
+                  审批 {pendingApprovals.length}
+                </span>
+                <span className="rounded bg-sel px-1 py-1" title="结构化任务活动日志数量">
+                  事件 {projectEvents.length}
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+      {closeBlockedByApproval && (
+        <div className="px-2.5 pb-2">
+          <button
+            onClick={() => ws.setView({ kind: "inbox" })}
+            className="w-full rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[12px] font-medium text-amber-800 hover:bg-amber-100 dark:border-amber-900/60 dark:bg-amber-950/20 dark:text-amber-300"
+            title="项目还有待处理审批或输入，必须先处理后才能关闭"
+          >
+            先处理 {pendingApprovals.length} 个审批/输入
+          </button>
+        </div>
+      )}
       {canClose && (
         <div className="px-2.5 pb-2">
           <button
@@ -182,7 +365,7 @@ function ProjectGroup({
       {open && (
         <div className="flex flex-col gap-2 border-t border-line p-2">
           {columnTasks.map((t) => (
-            <TaskCard key={t.id} task={t} onOpenDoc={onOpenDoc} />
+            <TaskCard key={t.id} task={t} onOpenDoc={onOpenDoc} onOpenTask={onOpenTask} />
           ))}
         </div>
       )}
@@ -190,36 +373,138 @@ function ProjectGroup({
   );
 }
 
-export function TasksBoard() {
+export function TasksBoard({
+  deepTaskId,
+  onDeepTaskConsumed,
+  onOpenSettings,
+}: {
+  deepTaskId?: string | null;
+  onDeepTaskConsumed?: () => void;
+  onOpenSettings?: (tab: SettingsTab) => void;
+}) {
   const ws = useWorkspace();
   const [title, setTitle] = useState("");
   const [assignee, setAssignee] = useState("");
   const [openDoc, setOpenDoc] = useState<Doc | null>(null);
+  const [openTask, setOpenTask] = useState<Task | null>(null);
+  const [scenarioBusy, setScenarioBusy] = useState(false);
+  const [activeScenarioId, setActiveScenarioId] = useState("");
+  const [scenarioError, setScenarioError] = useState("");
+  const [acceptanceProjectId, setAcceptanceProjectId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!deepTaskId) return;
+    const task = ws.tasks.find((t) => t.id === deepTaskId);
+    if (!task) return;
+    setOpenTask(task);
+    onDeepTaskConsumed?.();
+  }, [deepTaskId, onDeepTaskConsumed, ws.tasks]);
 
   async function addTask() {
     const t = title.trim();
     if (!t) return;
-    await api.createTask({ title: t, assignee_agent_id: assignee || null });
+    await ws.createTask({ title: t, assignee_agent_id: assignee || null });
     setTitle("");
+  }
+
+  const latestAcceptanceProject = [...ws.projects]
+    .filter((p) => p.title.startsWith(ACCEPTANCE_PROJECT_PREFIX))
+    .sort((a, b) => {
+      const aOpen = a.status === "done" ? 0 : 1;
+      const bOpen = b.status === "done" ? 0 : 1;
+      return bOpen - aOpen || b.updated_at - a.updated_at;
+    })[0];
+  const acceptanceProject = (acceptanceProjectId ? ws.projects.find((p) => p.id === acceptanceProjectId) : undefined) ?? latestAcceptanceProject;
+  const acceptanceTasks = useMemo(
+    () => (acceptanceProject ? ws.tasks.filter((t) => t.project_id === acceptanceProject.id) : []),
+    [acceptanceProject, ws.tasks],
+  );
+  const acceptanceDelivered = acceptanceTasks.filter((t) => t.status === "review" || t.status === "done").length;
+  const acceptanceDone = acceptanceTasks.filter((t) => t.status === "done").length;
+  const acceptanceRun = acceptanceProject
+    ? {
+        title: acceptanceProject.title,
+        total: acceptanceTasks.length,
+        delivered: acceptanceDelivered,
+        done: acceptanceDone,
+        status: (acceptanceTasks.length > 0 && acceptanceDone === acceptanceTasks.length
+          ? "done"
+          : acceptanceTasks.length > 0 && acceptanceDelivered === acceptanceTasks.length
+            ? "review"
+            : "running") as "running" | "review" | "done",
+      }
+    : null;
+
+  function openAcceptanceReview() {
+    const task = acceptanceTasks.find((t) => t.status === "review") ?? acceptanceTasks.find((t) => t.status === "done") ?? acceptanceTasks[0];
+    if (task) setOpenTask(task);
+  }
+
+  async function closeAcceptanceProject() {
+    if (!acceptanceProject) return;
+    const ids = new Set(acceptanceTasks.map((t) => t.id));
+    const blockedByApproval = ws.approvals.some(
+      (a) => a.status === "pending" && (a.ref_id === acceptanceProject.id || (a.ref_id ? ids.has(a.ref_id) : false)),
+    );
+    if (blockedByApproval) {
+      window.alert("该验收项目还有待处理的审批/输入，请先在收件箱处理后再关闭。");
+      return;
+    }
+    if (!window.confirm(`确认关闭验收项目「${acceptanceProject.title}」？\n这会把本轮验收任务归档为完成。`)) return;
+    await ws.closeProject(acceptanceProject.id);
+  }
+
+  async function runOrOpenAcceptance() {
+    if (acceptanceRun && acceptanceRun.status !== "done") {
+      openAcceptanceReview();
+      return;
+    }
+    await startCoreScenario("helio-core", "acceptance");
+  }
+
+  async function startCoreScenario(id = "helio-core", mode: "normal" | "acceptance" = "normal") {
+    if (scenarioBusy) return;
+    const view = ws.view;
+    const channel =
+      view.kind === "channel"
+        ? ws.channels.find((c) => c.id === view.id)
+        : ws.channels.find((c) => c.kind === "channel") ?? ws.channels[0];
+    if (!channel) return;
+    setScenarioBusy(true);
+    setActiveScenarioId(mode === "acceptance" ? "acceptance" : id);
+    setScenarioError("");
+    try {
+      const result = await ws.startScenario(id, { channel_id: channel.id, ...(mode === "acceptance" ? { acceptance: true } : {}) });
+      if (mode === "acceptance") {
+        setAcceptanceProjectId(result.project.id);
+        const taskToReview = result.tasks.find((t) => t.status === "review") ?? result.tasks.find((t) => t.status === "done") ?? result.tasks[0];
+        if (taskToReview) setOpenTask(taskToReview);
+      }
+    } catch (e: any) {
+      setScenarioError(e?.message ?? "启动失败");
+    } finally {
+      setScenarioBusy(false);
+      setActiveScenarioId("");
+    }
   }
 
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col">
-      <header className="flex items-center gap-3 border-b border-line px-5 py-3">
+      <header className="flex flex-wrap items-center gap-3 border-b border-line px-4 py-3 sm:px-5">
         <h1 className="text-[15px] font-semibold">任务</h1>
-        <span className="text-[12px] text-ink-3">指派给 AI 同事即自动开工：调研 → 交付文档 → 转待评审</span>
-        <div className="ml-auto flex items-center gap-2">
+        <span className="min-w-0 flex-1 text-[12px] text-ink-3">指派给 AI 同事即自动开工：调研 → 交付文档 → 转待评审</span>
+        <div className="flex w-full flex-wrap items-center gap-2 lg:ml-auto lg:w-auto">
           <input
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && void addTask()}
             placeholder="快速新建任务…"
-            className="w-52 rounded-lg border border-line bg-panel px-3 py-1.5 text-[13px] outline-none focus:border-accent/50"
+            className="min-w-0 flex-1 rounded-lg border border-line bg-panel px-3 py-1.5 text-[13px] outline-none focus:border-accent/50 sm:flex-none sm:w-52"
           />
           <select
             value={assignee}
             onChange={(e) => setAssignee(e.target.value)}
-            className="rounded-lg border border-line bg-panel px-2 py-1.5 text-[13px] text-ink-2 outline-none"
+            className="min-w-28 flex-1 rounded-lg border border-line bg-panel px-2 py-1.5 text-[13px] text-ink-2 outline-none sm:flex-none"
           >
             <option value="">不指派</option>
             {ws.agents.map((a) => (
@@ -237,7 +522,20 @@ export function TasksBoard() {
           </button>
         </div>
       </header>
-      <div className="grid flex-1 grid-cols-4 gap-3 overflow-y-auto p-4">
+      <WorklineOverview
+        className="border-b border-line px-4 py-3"
+        onOpenTask={setOpenTask}
+        onStartScenario={(id) => void startCoreScenario(id)}
+        onRunAcceptance={() => void runOrOpenAcceptance()}
+        acceptanceRun={acceptanceRun}
+        onOpenAcceptanceReview={openAcceptanceReview}
+        onCloseAcceptanceProject={() => void closeAcceptanceProject()}
+        activeScenarioId={activeScenarioId}
+        scenarioBusy={scenarioBusy}
+        scenarioError={scenarioError}
+        onOpenSettings={onOpenSettings}
+      />
+      <div className="grid flex-1 grid-cols-[repeat(5,minmax(190px,1fr))] gap-3 overflow-auto p-4">
         {COLUMNS.map((col) => {
           const tasks = ws.tasks.filter((t) => t.status === col.key);
           // 同一项目的子任务收进折叠组卡；无项目的单任务平铺。保留列内出现顺序。
@@ -269,10 +567,11 @@ export function TasksBoard() {
                     columnTasks={grouped.get(pid)!}
                     column={col.key}
                     onOpenDoc={setOpenDoc}
+                    onOpenTask={setOpenTask}
                   />
                 ))}
                 {loose.map((t) => (
-                  <TaskCard key={t.id} task={t} onOpenDoc={setOpenDoc} />
+                  <TaskCard key={t.id} task={t} onOpenDoc={setOpenDoc} onOpenTask={setOpenTask} />
                 ))}
                 {tasks.length === 0 && <div className="px-2 py-4 text-center text-[12px] text-ink-3">空</div>}
               </div>
@@ -280,7 +579,19 @@ export function TasksBoard() {
           );
         })}
       </div>
-      {openDoc && <DocViewerModal doc={openDoc} onClose={() => setOpenDoc(null)} />}
+      {openDoc && (
+        <Suspense fallback={null}>
+          <DocViewerModal doc={openDoc} onClose={() => setOpenDoc(null)} />
+        </Suspense>
+      )}
+      {openTask && (
+        <TaskDetailDrawer
+          task={ws.tasks.find((t) => t.id === openTask.id) ?? openTask}
+          onClose={() => setOpenTask(null)}
+          onOpenDoc={setOpenDoc}
+          onOpenTask={setOpenTask}
+        />
+      )}
     </div>
   );
 }

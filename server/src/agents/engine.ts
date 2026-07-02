@@ -1,6 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { EventEmitter } from "node:events";
 import {
   Agent,
+  Approval,
   Channel,
   Message,
   Routine,
@@ -18,7 +20,9 @@ import {
   createDocument,
   createProject,
   createTask,
+  createTaskEvent,
   getAgent,
+  getApproval,
   getChannel,
   getDocument,
   getMemory,
@@ -28,9 +32,11 @@ import {
   getTask,
   insertMessage,
   listAgents,
+  listApprovals,
   listChannels,
   listDocuments,
   listMessages,
+  listTaskEvents,
   listInFlightTasksAllOwners,
   listRoutinesAllOwners,
   listTasks,
@@ -42,7 +48,7 @@ import {
 import { broadcast } from "../bus.js";
 import { currentOwner, withOwner } from "../ownerScope.js";
 import { parseSlides, slidesManifest } from "../pptx.js";
-import { callMcpTool, isMcpTool, mcpToolDefs, mcpToolPrefixReady, mcpSafetyGate, searchQuerySignature } from "./mcp.js";
+import { callMcpTool, isMcpTool, mcpToolDefs, mcpToolPrefixReady, mcpSafetyGate, mcpServerForTool, searchQuerySignature } from "./mcp.js";
 import { IMAGE_TOOL, generateImage, imageGenAvailable } from "./images.js";
 import { getSkillTemplate } from "../registry.js";
 
@@ -149,9 +155,11 @@ export function isMock(): boolean {
   return !envClient && !listProviders().some((p) => p.api_key);
 }
 
+type RuntimeClient = Anthropic | OpenAICompatClient;
+
 /** 单次运行的模型通道：client、是否官方（决定服务端工具/缓存可用性）、模型与输出上限。 */
 interface Runtime {
-  client: Anthropic | null;
+  client: RuntimeClient | null;
   official: boolean;
   /** 是否启用 Anthropic 服务端联网工具（官方恒可用；兼容端点按 provider.web_tools） */
   webTools: boolean;
@@ -159,6 +167,197 @@ interface Runtime {
   providerId: string | null;
   model: string;
   maxTokens: number;
+}
+
+function textFromAnthropicContent(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((b: any) => b?.type === "text")
+    .map((b: any) => b.text ?? "")
+    .join("\n");
+}
+
+function openAiToolFromAnthropic(tool: Anthropic.ToolUnion) {
+  const t = tool as any;
+  if (!t?.name || !t?.input_schema) return null;
+  return {
+    type: "function",
+    function: {
+      name: t.name,
+      description: t.description ?? "",
+      parameters: t.input_schema,
+    },
+  };
+}
+
+class OpenAICompatStream extends EventEmitter {
+  private finalPromise: Promise<Anthropic.Message>;
+  private controller = new AbortController();
+
+  constructor(
+    private readonly baseUrl: string,
+    private readonly apiKey: string,
+    private readonly params: Anthropic.MessageCreateParams
+  ) {
+    super();
+    this.finalPromise = this.run();
+  }
+
+  abort() {
+    this.controller.abort();
+  }
+
+  finalMessage() {
+    return this.finalPromise;
+  }
+
+  private toOpenAIMessages() {
+    const out: any[] = [];
+    const systemText = textFromAnthropicContent(this.params.system);
+    if (systemText) out.push({ role: "system", content: systemText });
+    for (const m of this.params.messages as Anthropic.MessageParam[]) {
+      const content = m.content as any;
+      if (typeof content === "string") {
+        out.push({ role: m.role, content });
+        continue;
+      }
+      if (!Array.isArray(content)) {
+        out.push({ role: m.role, content: "" });
+        continue;
+      }
+      const toolResults = content.filter((b: any) => b?.type === "tool_result");
+      if (m.role === "user" && toolResults.length > 0) {
+        for (const tr of toolResults) {
+          out.push({ role: "tool", tool_call_id: tr.tool_use_id, content: textFromAnthropicContent(tr.content) || String(tr.content ?? "") });
+        }
+        continue;
+      }
+      const toolUses = content.filter((b: any) => b?.type === "tool_use");
+      if (m.role === "assistant" && toolUses.length > 0) {
+        out.push({
+          role: "assistant",
+          content: textFromAnthropicContent(content) || null,
+          tool_calls: toolUses.map((tu: any) => ({
+            id: tu.id,
+            type: "function",
+            function: { name: tu.name, arguments: JSON.stringify(tu.input ?? {}) },
+          })),
+        });
+        continue;
+      }
+      out.push({ role: m.role, content: textFromAnthropicContent(content) });
+    }
+    return out;
+  }
+
+  private async run(): Promise<Anthropic.Message> {
+    const tools = (this.params.tools ?? []).map(openAiToolFromAnthropic).filter(Boolean);
+    // 无超时的 fetch 会让无响应的供应商把任务循环/演练挂死；超时经同一 controller 中止（含 body 读取）。
+    const timeoutMs = Math.max(1000, Number(process.env.AITEAM_PROVIDER_TIMEOUT_MS) || 120_000);
+    const timer = setTimeout(() => this.controller.abort(), timeoutMs);
+    try {
+      return await this.request(tools);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async request(tools: any[]): Promise<Anthropic.Message> {
+    const res = await fetch(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      signal: this.controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: this.params.model,
+        messages: this.toOpenAIMessages(),
+        max_tokens: this.params.max_tokens,
+        ...(tools.length ? { tools, tool_choice: "auto" } : {}),
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      const err = new Error(`OpenAI-compatible provider HTTP ${res.status}: ${body.slice(0, 500)}`) as Error & { status?: number };
+      err.status = res.status;
+      throw err;
+    }
+    const json = await res.json() as any;
+    const msg = json.choices?.[0]?.message ?? {};
+    const content: Anthropic.Message["content"] = [];
+    if (msg.content) {
+      const text = String(msg.content);
+      content.push({ type: "text", text } as Anthropic.TextBlock);
+      this.emit("text", text);
+    }
+    for (const tc of msg.tool_calls ?? []) {
+      // 模型可能产出非法 JSON 参数；不能让整轮 finalMessage() 抛掉，转成可继续的工具入参错误。
+      let input: unknown = {};
+      try {
+        input = JSON.parse(tc.function?.arguments || "{}");
+      } catch {
+        input = { __invalid_arguments: String(tc.function?.arguments ?? "").slice(0, 2000) };
+      }
+      content.push({
+        type: "tool_use",
+        id: tc.id,
+        name: tc.function?.name ?? "",
+        input,
+      } as Anthropic.ToolUseBlock);
+    }
+    return {
+      id: json.id ?? `openai_${Date.now()}`,
+      type: "message",
+      role: "assistant",
+      model: this.params.model,
+      content,
+      stop_reason: (msg.tool_calls?.length ? "tool_use" : "end_turn") as Anthropic.Message["stop_reason"],
+      stop_sequence: null,
+      usage: {
+        input_tokens: json.usage?.prompt_tokens ?? 0,
+        output_tokens: json.usage?.completion_tokens ?? 0,
+      },
+    } as Anthropic.Message;
+  }
+}
+
+class OpenAICompatClient {
+  messages = {
+    create: async (params: Anthropic.MessageCreateParamsNonStreaming) => {
+      const stream = new OpenAICompatStream(this.baseUrl, this.apiKey, params as Anthropic.MessageCreateParams);
+      return stream.finalMessage();
+    },
+    stream: (params: Anthropic.MessageCreateParams) => new OpenAICompatStream(this.baseUrl, this.apiKey, params),
+  };
+
+  constructor(private readonly apiKey: string, private readonly baseUrl: string) {}
+}
+
+function providerUsesOpenAICompat(baseUrl: string): boolean {
+  const u = baseUrl.toLowerCase();
+  if (!u) return false;
+  if (u.includes("anthropic")) return false;
+  return u.includes("compatible-mode/v1") || u.includes("siliconflow") || /\/v1\/?$/.test(u);
+}
+
+function providerProtocol(baseUrl: string): "anthropic-compatible" | "openai-compatible" {
+  return providerUsesOpenAICompat(baseUrl) ? "openai-compatible" : "anthropic-compatible";
+}
+
+function runtimeFromProvider(p: NonNullable<ReturnType<typeof getProvider>>, agentModel: string, light = false): Runtime {
+  const openaiCompat = providerUsesOpenAICompat(p.base_url);
+  return {
+    client: openaiCompat
+      ? new OpenAICompatClient(p.api_key, p.base_url)
+      : new Anthropic({ apiKey: p.api_key, baseURL: p.base_url || undefined }),
+    official: !p.base_url,
+    webTools: openaiCompat ? false : !p.base_url || Boolean(p.web_tools),
+    providerId: p.id,
+    model: light ? p.light_model || p.default_model || agentModel : agentModel || p.default_model || "claude-opus-4-8",
+    maxTokens: p.max_tokens || 16000,
+  };
 }
 
 /**
@@ -200,14 +399,8 @@ interface RuntimeOpts {
  */
 function resolveRuntime(agent: Agent, opts: RuntimeOpts = {}): Runtime {
   const light = opts.tier === "light";
-  const fromProvider = (p: NonNullable<ReturnType<typeof getProvider>>, agentModel: string): Runtime => ({
-    client: new Anthropic({ apiKey: p.api_key, baseURL: p.base_url || undefined }),
-    official: !p.base_url, // 自定义 base_url 一律按"非官方"做缓存等门控
-    webTools: !p.base_url || Boolean(p.web_tools),
-    providerId: p.id,
-    model: light ? p.light_model || p.default_model || agentModel : agentModel || p.default_model || "claude-opus-4-8",
-    maxTokens: p.max_tokens || 16000,
-  });
+  const fromProvider = (p: NonNullable<ReturnType<typeof getProvider>>, agentModel: string): Runtime =>
+    runtimeFromProvider(p, agentModel, light);
   if (opts.preferStrong) {
     if (envClient) {
       return {
@@ -256,10 +449,11 @@ interface RunCtx {
   taskId: string | null;
   createdDocIds: string[];
   verdict: { result: "pass" | "revise"; reasons: string } | null;
+  halted: "blocked" | null;
 }
 
 function newCtx(agent: Agent, channel: Channel, kind: RunCtx["kind"], taskId: string | null = null): RunCtx {
-  return { agent, channel, kind, taskId, createdDocIds: [], verdict: null };
+  return { agent, channel, kind, taskId, createdDocIds: [], verdict: null, halted: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -388,10 +582,32 @@ function depsSatisfied(task: Task): boolean {
   });
 }
 
+function taskHasSourceDocs(task: Pick<Task, "source_doc_ids">): boolean {
+  try {
+    const ids = JSON.parse(task.source_doc_ids || "[]");
+    return Array.isArray(ids) && ids.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+export function mcpRequiresApprovalForTask(task: Pick<Task, "source_doc_ids"> | undefined, toolName: string): boolean {
+  const server = mcpServerForTool(toolName);
+  if (server?.safety !== "network") return false;
+  if (process.env.AITEAM_APPROVE_NETWORK_MCP === "1") return true;
+  return Boolean(task && taskHasSourceDocs(task));
+}
+
+/** 任务级网络外发授权：本任务下已有用户批准的 action 审批 → 二级审批门放行（授权范围限本任务）。 */
+export function taskHasApprovedNetworkGrant(taskId: string | null | undefined): boolean {
+  if (!taskId) return false;
+  return listApprovals().some((a) => a.ref_id === taskId && a.status === "approved" && a.kind === "action");
+}
+
 /** 任务被指派（或创建时即带负责人）后调用。依赖未满足的任务会等依赖交付后自动开工。 */
 export function onTaskAssigned(task: Task) {
   if (!task.assignee_agent_id) return;
-  if (task.status === "review" || task.status === "done") return;
+  if (task.status === "review" || task.status === "done" || task.status === "blocked") return;
   if (runningTasks.has(task.id)) return;
   if (!depsSatisfied(task)) return; // 依赖交付时由 onTaskDelivered 解锁
   const agent = getAgent(task.assignee_agent_id);
@@ -423,6 +639,7 @@ export function onTaskAssigned(task: Task) {
       // 失败的任务不能卡在 doing：退回待办，重新指派负责人即可重试
       const t = getTask(task.id);
       if (t && t.status === "doing") setTaskStatus(task.id, "todo");
+      if (t) emitTaskEvent(t, "failure", `${agent.name} 处理任务失败，任务退回待办`, { error: String(err?.message ?? err).slice(0, 300) }, agent.id);
       if (t?.channel_id)
         audit(t.channel_id, `⚠️ ${agent.name} 处理任务「${task.title}」失败：${err?.message ?? err}。任务已退回待办，重新指派负责人即可重试。`);
     }))
@@ -483,9 +700,23 @@ function setTaskStatus(taskId: string, statusValue: Task["status"]): Task | unde
   return t;
 }
 
+function emitTaskEvent(task: Task, type: Parameters<typeof createTaskEvent>[0]["type"], summary: string, metadata?: unknown, agentId?: string | null) {
+  const event = createTaskEvent({
+    task_id: task.id,
+    channel_id: task.channel_id,
+    project_id: task.project_id,
+    agent_id: agentId ?? task.assignee_agent_id,
+    type,
+    summary,
+    metadata,
+  });
+  broadcast({ type: "task:event", payload: event });
+  return event;
+}
+
 async function runTaskWork(agent: Agent, taskId: string) {
   let task = getTask(taskId);
-  if (!task || task.status === "done" || task.status === "review") return;
+  if (!task || task.status === "done" || task.status === "review" || task.status === "blocked") return;
   if (cancelledTasks.delete(taskId)) {
     if (task.channel_id) audit(task.channel_id, `⏹ 任务「${task.title}」已被用户停止（未开工）`);
     return;
@@ -506,6 +737,7 @@ async function runTaskWork(agent: Agent, taskId: string) {
   }
 
   audit(channel.id, `🚀 ${agent.name} 开始处理任务「${task.title}」${task.model_tier === "light" ? "（⚡ 轻量通道）" : ""}`);
+  emitTaskEvent(task, "start", `${agent.name} 开始处理任务`, { model_tier: task.model_tier }, agent.id);
   setTaskStatus(task.id, "doing");
 
   let feedback: string | null = null; // 上一轮验收意见（返工时注入）
@@ -516,9 +748,12 @@ async function runTaskWork(agent: Agent, taskId: string) {
     const prompt = feedback ? buildReworkBrief(task, channel, feedback) : buildWorkBrief(task, channel);
     await streamRun(ctx, prompt, MAX_WORK_ITERATIONS, 0, { tier: task.model_tier === "light" ? "light" : "standard" });
     lastDocIds = ctx.createdDocIds.length > 0 ? ctx.createdDocIds : lastDocIds;
+    const afterRun = getTask(task.id);
+    if (ctx.halted === "blocked" || afterRun?.status === "blocked") return;
 
     if (cancelledTasks.delete(task.id)) {
       setTaskStatus(task.id, "todo");
+      emitTaskEvent(task, "handoff", "用户停止了运行，任务退回待办", undefined, agent.id);
       audit(channel.id, `⏹ 任务「${task.title}」已被用户停止，退回待办`);
       return;
     }
@@ -547,6 +782,7 @@ async function runTaskWork(agent: Agent, taskId: string) {
     const review = after.status === "review" ? after : setTaskStatus(task.id, "review");
     if (review) {
       audit(channel.id, `📦 ${agent.name} 已交付任务「${review.title}」，转入待评审`);
+      emitTaskEvent(review, "delivery", `${agent.name} 已交付任务，转入待评审`, { doc_ids: lastDocIds }, agent.id);
       onTaskDelivered(review);
     }
   }
@@ -575,14 +811,23 @@ export function buildWorkBrief(task: Task, channel: Channel): string {
   const transcript = buildTranscript(channel.id, 20);
   // 目标链（借鉴 Paperclip）：让任务知道自己服务于什么目标
   const project = task.project_id ? getProject(task.project_id) : undefined;
+  const assigneeName = task.assignee_agent_id ? getAgent(task.assignee_agent_id)?.name ?? "未知" : "未分配";
+  const reviewerName = task.reviewer_agent_id ? getAgent(task.reviewer_agent_id)?.name ?? "未知" : "系统自动选择";
+  const recentEvents = listTaskEvents(task.id)
+    .slice(-8)
+    .map((e) => `- ${fmtTime(e.created_at)} [${e.type}] ${e.summary}`)
+    .join("\n");
   return [
     `你被指派了一个任务，请现在完成它。`,
     ``,
     project ? `所属项目：「${project.title}」—— 项目目标：${project.goal || "（见任务详情）"}\n你的任务是该目标的一环，交付物要服务于整体目标。` : "",
     `任务：${task.title}`,
     `详情：${task.description || "（无）"}`,
+    `负责人：${assigneeName}`,
+    `指定复核人：${reviewerName}`,
     task.acceptance_criteria ? `验收标准（交付物将被逐条核验）：\n${task.acceptance_criteria}` : "",
     `所在频道：#${channel.name}`,
+    recentEvents ? `最近任务活动：\n${recentEvents}` : "",
     depSection,
     sourceSection,
     polishMode
@@ -600,7 +845,8 @@ export function buildWorkBrief(task: Task, channel: Channel): string {
     `4. 交付前用 save_memory 记录至多 1 条本次任务沉淀的「核实过的事实」或「通用规则」（不要记流水账）；`,
     `5. 交付物正文一律结论先行（开头给核心结论 / TL;DR）、要点 MECE，关键事实与数据注明来源和检索日期；并在回复正文附「交付自查表」：逐条列出验收标准 → 满足 / 不满足 → 证据位置（章节或文档内定位），最后一句说明需要谁跟进什么；`,
     `6. 任务状态由系统管理，不要调用 update_task 改本任务状态；关单（done）只能由人类完成；`,
-    `7. 如发现衍生工作，可用 create_task 开新任务并指派给合适的同事。`,
+    `7. 如果你被明确委派但任务未归属你，先用 claim_task 接手；如果被事实、权限、选择或安全边界阻塞，调用 request_clarification 暂停任务并向用户要输入，不要烧迭代或假装完成；`,
+    `8. 如发现衍生工作，可用 create_task 开新任务并指派给合适的同事。`,
   ]
     .filter(Boolean)
     .map((line) => stripLoneSurrogates(line as string))
@@ -654,6 +900,11 @@ export function pickVerifier(
   return others.find((a) => a.id === createdBy) ?? others[0] ?? worker;
 }
 
+export function resolveTaskReviewer(task: Task, others: Agent[], kind: string | null | undefined, worker: Agent): Agent {
+  const explicit = task.reviewer_agent_id ? getAgent(task.reviewer_agent_id) : undefined;
+  return explicit ?? pickVerifier(others, kind, task.created_by, worker);
+}
+
 async function runVerification(
   worker: Agent,
   channel: Channel,
@@ -677,10 +928,11 @@ async function runVerification(
     (docIds.length > 0 ? getDocument(docIds[docIds.length - 1]) : undefined);
   if (!doc) return { result: "revise", reasons: "没有找到交付物文档：必须用 write_document 提交正式交付物。" };
 
-  // V3：按交付物类型选对口校验者（视觉物→设计审核 / 内容物→校对审核 / 代码类→代码评审），团队永不自评。
-  const verifier = pickVerifier(others, doc.kind, task.created_by, worker);
+  // 显式 reviewer 优先；未指定时按交付物类型选对口校验者。
+  const verifier = resolveTaskReviewer(task, others, doc.kind, worker);
 
   audit(channel.id, `🔎 ${verifier.name} 开始${soloSelfCheck ? "自检" : "验收"}任务「${task.title}」的交付物`);
+  emitTaskEvent(task, "verification", `${verifier.name} 开始验收交付物《${doc.title}》`, { doc_id: doc.id, kind: doc.kind }, verifier.id);
 
   // V2：slides 交付物附"渲染清单"（机器读出的页数/要素），让验收对照"声称 vs 实产"、抓静默丢页与表演性自查。
   const renderInfo =
@@ -759,8 +1011,10 @@ async function runVerification(
   if (!ctx.verdict) {
     // 两轮仍无结构化裁决：fail-closed，退回返工兜住，绝不放水（质量下限关键修复）
     audit(channel.id, `⚠️ ${verifier.name} 两轮均未提交结构化裁决，按未通过处理并退回修订`);
+    emitTaskEvent(task, "verification", `${verifier.name} 未提交结构化裁决，按未通过处理`, { result: "revise" }, verifier.id);
     return NO_VERDICT_FALLBACK;
   }
+  emitTaskEvent(task, "verification", `${verifier.name} 验收${ctx.verdict.result === "pass" ? "通过" : "要求返工"}`, { result: ctx.verdict.result, reasons: ctx.verdict.reasons }, verifier.id);
   return ctx.verdict;
 }
 
@@ -781,6 +1035,35 @@ export function onPlanResolved(projectId: string, approved: boolean) {
   } else if (channel) {
     audit(channel.id, `✋ 项目「${project.title}」计划被退回——请结合用户在频道里的意见调整计划后重新立项`);
     if (project.lead_agent_id) triggerAgent(project.lead_agent_id, channel.id);
+  }
+}
+
+function clarificationResponse(approval: Approval): string {
+  try {
+    const parsed = JSON.parse(approval.payload || "{}") as { user_response?: unknown; proposed_default?: unknown };
+    const response = typeof parsed.user_response === "string" ? parsed.user_response.trim() : "";
+    if (response) return response;
+    return typeof parsed.proposed_default === "string" ? parsed.proposed_default.trim() : "";
+  } catch {
+    return "";
+  }
+}
+
+export function onClarificationResolved(approval: Approval, approved: boolean) {
+  if (approval.kind !== "clarification" || !approval.ref_id) return;
+  const task = getTask(approval.ref_id);
+  if (!task) return;
+  if (task.status !== "blocked" || task.blocked_approval_id !== approval.id) return;
+  if (approved) {
+    const response = clarificationResponse(approval);
+    const next = updateTask(task.id, { status: "todo", blocked_approval_id: null }) ?? task;
+    broadcast({ type: "task:upsert", payload: next });
+    emitTaskEvent(next, "approval", response ? `用户补充输入后任务恢复：${response}` : "用户批准了 clarification，任务恢复待办并准备继续", { approval_id: approval.id, status: "approved", response }, approval.agent_id);
+    if (next.channel_id) audit(next.channel_id, response ? `▶️ 用户已补充输入，任务「${next.title}」恢复执行：${response}` : `▶️ 用户已确认，任务「${next.title}」恢复执行`);
+    if (next.assignee_agent_id) onTaskAssigned(next);
+  } else {
+    emitTaskEvent(task, "approval", "用户拒绝了 clarification，任务保持阻塞", { approval_id: approval.id, status: "rejected" }, approval.agent_id);
+    if (task.channel_id) audit(task.channel_id, `⏸️ 用户拒绝了确认请求，任务「${task.title}」保持阻塞，等待进一步输入`);
   }
 }
 
@@ -979,6 +1262,42 @@ export async function oneShotComplete(system: string, userPrompt: string, maxTok
   return resp.content.filter((b): b is Anthropic.TextBlock => b.type === "text").map((b) => b.text).join("").trim();
 }
 
+export async function testProviderConnection(providerId: string): Promise<{
+  ok: true;
+  protocol: "anthropic-compatible" | "openai-compatible";
+  model: string;
+  latency_ms: number;
+  sample: string;
+}> {
+  const provider = getProvider(providerId);
+  if (!provider) throw new Error("provider not found");
+  if (!provider.api_key) throw new Error("provider api key is missing");
+  const model = provider.default_model || provider.light_model;
+  if (!model) throw new Error("provider default model is missing");
+  const rt = runtimeFromProvider(provider, model);
+  if (!rt.client) throw new Error("provider client unavailable");
+  const t0 = Date.now();
+  const resp = await rt.client.messages.create({
+    model: rt.model,
+    max_tokens: Math.min(96, rt.maxTokens),
+    system: "You are a model connectivity probe. Reply briefly in Chinese.",
+    messages: [{ role: "user", content: "请只回复：AiTeam 模型通道可用。" }],
+  });
+  const sample = resp.content
+    .filter((b): b is Anthropic.TextBlock => b.type === "text")
+    .map((b) => b.text)
+    .join("")
+    .trim()
+    .slice(0, 200);
+  return {
+    ok: true,
+    protocol: providerProtocol(provider.base_url),
+    model: rt.model,
+    latency_ms: Date.now() - t0,
+    sample,
+  };
+}
+
 // 交付与导出红线：注入每一轮动态上下文（覆盖所有现存/新建同事、聊天与任务两条路径），
 // 因为 agent.system_prompt 是建号时烘焙进 DB 的、改 SHARED_RULES 不影响存量同事。
 // 根除截图里"导出不可用 / 甩 CLI 给用户"那类臆造阻塞。
@@ -1077,6 +1396,7 @@ const TOOLS: Anthropic.ToolUnion[] = [
               description: { type: "string", description: "充分的背景与要求，负责人将据此独立完成" },
               acceptance_criteria: { type: "string", description: "逐条可核验的验收标准（验收循环将逐条把关）" },
               assignee: { type: "string", description: "负责人名字（AI 同事名）" },
+              reviewer: { type: "string", description: "可选：指定复核人名字；留空则系统按交付物类型自动选择" },
               depends_on: {
                 type: "array",
                 items: { type: "integer" },
@@ -1107,6 +1427,7 @@ const TOOLS: Anthropic.ToolUnion[] = [
         description: { type: "string", description: "任务详情，包含足够的背景（负责人将据此独立完成）" },
         acceptance_criteria: { type: "string", description: "逐条可核验的验收标准；定向润色任务应写明范围（如：仅润色第 3 节、保留原结论、不新增原文未出现的数据）" },
         assignee: { type: "string", description: "负责人的名字（AI 同事名，或留空表示未分配）" },
+        reviewer: { type: "string", description: "可选：指定复核人名字；留空则系统按交付物类型自动选择" },
         source_doc_ids: {
           type: "array",
           items: { type: "string" },
@@ -1122,6 +1443,34 @@ const TOOLS: Anthropic.ToolUnion[] = [
     },
   },
   {
+    name: "claim_task",
+    description:
+      "认领任务：当任务未分配，或用户/负责人明确把任务委派给你时调用。认领会设置负责人、写入任务活动日志，并防止其他 AI 同事重复开工。不能抢占已经分配给其他同事的任务。",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        task_id: { type: "string", description: "任务 id" },
+        reason: { type: "string", description: "为什么由你接手，简短说明即可" },
+      },
+      required: ["task_id"],
+    },
+  },
+  {
+    name: "request_clarification",
+    description:
+      "任务被事实缺口、权限、安全边界、用户选择或缺少必要输入阻塞时调用。系统会把任务置为 blocked，创建一个 clarification 审批/待办，用户回应后再恢复任务。不要用它替代普通交付；能基于合理假设先做草稿时应先做。",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        task_id: { type: "string", description: "被阻塞的任务 id；当前任务可省略但建议填写" },
+        question: { type: "string", description: "需要用户回答的具体问题" },
+        context: { type: "string", description: "为什么这个输入会阻塞继续推进，以及不确认的风险" },
+        proposed_default: { type: "string", description: "可选：如果用户批准，建议采用的默认做法" },
+      },
+      required: ["question"],
+    },
+  },
+  {
     name: "update_task",
     description:
       "更新看板上的任务：推进状态、改负责人、改标题/描述/验收标准。task_id 来自上下文中的任务列表。注意：done（关单）只能由人类操作。",
@@ -1134,6 +1483,7 @@ const TOOLS: Anthropic.ToolUnion[] = [
         description: { type: "string" },
         acceptance_criteria: { type: "string" },
         assignee: { type: "string", description: "负责人名字" },
+        reviewer: { type: "string", description: "复核人名字；留空/不传表示不改" },
       },
       required: ["task_id"],
     },
@@ -1214,6 +1564,51 @@ function findAgentByName(name?: string): Agent | undefined {
   return listAgents().find((a) => a.name === name.replace(/^@/, "").trim());
 }
 
+export function claimTaskForAgent(agent: Agent, taskId: string, reason = ""): { ok: true; task: Task } | { ok: false; error: string } {
+  const task = getTask(taskId);
+  if (!task) return { ok: false, error: `找不到任务 ${taskId}` };
+  if (task.assignee_agent_id && task.assignee_agent_id !== agent.id) {
+    const owner = getAgent(task.assignee_agent_id);
+    return { ok: false, error: `任务已由 ${owner?.name ?? "其他 AI 同事"} 负责，不能重复认领。` };
+  }
+  const next = updateTask(task.id, { assignee_agent_id: agent.id }) ?? task;
+  broadcast({ type: "task:upsert", payload: next });
+  emitTaskEvent(next, "claim", `${agent.name} 认领了任务${reason ? `：${reason}` : ""}`, { reason }, agent.id);
+  if (next.channel_id) audit(next.channel_id, `🙋 ${agent.name} 认领了任务「${next.title}」${reason ? `：${reason}` : ""}`);
+  if (next.status === "todo") onTaskAssigned(next);
+  return { ok: true, task: next };
+}
+
+export function requestClarificationForTask(
+  agent: Agent,
+  task: Task,
+  question: string,
+  context = "",
+  proposedDefault = ""
+): { approvalId: string; task: Task } {
+  if (task.status === "blocked" && task.blocked_approval_id) {
+    const active = getApproval(task.blocked_approval_id);
+    if (active?.kind === "clarification" && active.status === "pending") {
+      return { approvalId: active.id, task };
+    }
+  }
+  const approval = createApproval({
+    channel_id: task.channel_id,
+    agent_id: agent.id,
+    title: `需要确认：${question.slice(0, 120)}`,
+    payload: JSON.stringify({ question, context, proposed_default: proposedDefault }, null, 2),
+    kind: "clarification",
+    ref_id: task.id,
+  });
+  const next = updateTask(task.id, { status: "blocked", blocked_approval_id: approval.id }) ?? task;
+  broadcast({ type: "approval:upsert", payload: approval });
+  broadcast({ type: "task:upsert", payload: next });
+  emitTaskEvent(next, "blocked", `${agent.name} 请求用户输入：${question}`, { approval_id: approval.id, context, proposed_default: proposedDefault }, agent.id);
+  emitTaskEvent(next, "approval", "已创建 clarification 待办，等待用户回应", { approval_id: approval.id }, agent.id);
+  if (next.channel_id) audit(next.channel_id, `⏸️ ${agent.name} 暂停任务「${next.title}」，等待用户确认：${question}`);
+  return { approvalId: approval.id, task: next };
+}
+
 function execTool(ctx: RunCtx, name: string, input: any): string {
   const { agent, channel } = ctx;
   switch (name) {
@@ -1234,6 +1629,7 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
       for (let i = 0; i < items.length; i++) {
         const it = items[i];
         const assignee = findAgentByName(it.assignee);
+        const reviewer = findAgentByName(it.reviewer);
         const deps = (Array.isArray(it.depends_on) ? it.depends_on : [])
           .filter((d: any) => Number.isInteger(d) && d >= 0 && d < i)
           .map((d: number) => created[d].id);
@@ -1243,19 +1639,23 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
           description: String(it.description ?? ""),
           acceptance_criteria: String(it.acceptance_criteria ?? ""),
           assignee_agent_id: assignee?.id ?? null,
+          reviewer_agent_id: reviewer?.id ?? null,
           created_by: agent.id,
           project_id: project.id,
           depends_on: deps,
           model_tier: it.model_tier === "light" ? "light" : "standard",
         });
         created.push(task);
+        emitTaskEvent(task, "created", `${agent.name} 创建了项目子任务`, { project_id: project.id }, agent.id);
+        if (assignee) emitTaskEvent(task, "claim", `任务指派给 ${assignee.name}`, { source: "start_project" }, assignee.id);
         broadcast({ type: "task:upsert", payload: task });
       }
       const plan = created
         .map((t, i) => {
           const deps = taskDependsOn(t).map((id) => created.findIndex((c) => c.id === id) + 1);
           const assignee = t.assignee_agent_id ? getAgent(t.assignee_agent_id)?.name : "未分配";
-          return `${i + 1}. ${t.title} → ${assignee}${deps.length ? `（依赖 ${deps.join("、")}）` : ""}`;
+          const reviewer = t.reviewer_agent_id ? getAgent(t.reviewer_agent_id)?.name : "自动复核";
+          return `${i + 1}. ${t.title} → ${assignee} / 复核 ${reviewer}${deps.length ? `（依赖 ${deps.join("、")}）` : ""}`;
         })
         .join("\n");
       audit(channel.id, `🧩 ${agent.name} 立项「${project.title}」，共 ${created.length} 个任务：\n${plan}`);
@@ -1278,6 +1678,7 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
     }
     case "create_task": {
       const assignee = findAgentByName(input.assignee);
+      const reviewer = findAgentByName(input.reviewer);
       const task = createTask({
         channel_id: channel.id,
         title: String(input.title ?? "").slice(0, 200),
@@ -1285,28 +1686,65 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
         acceptance_criteria: String(input.acceptance_criteria ?? ""),
         status: "todo",
         assignee_agent_id: assignee?.id ?? null,
+        reviewer_agent_id: reviewer?.id ?? null,
         created_by: agent.id,
         model_tier: input.model_tier === "light" ? "light" : "standard",
         source_doc_ids: Array.isArray(input.source_doc_ids) ? input.source_doc_ids.map(String) : [],
       });
+      emitTaskEvent(task, "created", `${agent.name} 创建了任务`, undefined, agent.id);
+      if (assignee) emitTaskEvent(task, "claim", `任务指派给 ${assignee.name}`, { source: "create_task" }, assignee.id);
       broadcast({ type: "task:upsert", payload: task });
-      audit(channel.id, `🗂️ ${agent.name} 创建了任务「${task.title}」${assignee ? `，指派给 ${assignee.name}` : ""}`);
+      audit(channel.id, `🗂️ ${agent.name} 创建了任务「${task.title}」${assignee ? `，指派给 ${assignee.name}` : ""}${reviewer ? `，复核人 ${reviewer.name}` : ""}`);
       if (assignee) onTaskAssigned(task);
       return `已创建任务（id: ${task.id}）${assignee ? `，${assignee.name} 将自动开工` : ""}`;
     }
+    case "claim_task": {
+      const taskId = String(input.task_id ?? ctx.taskId ?? "");
+      if (!taskId) return "错误：task_id 不能为空。";
+      const result = claimTaskForAgent(agent, taskId, String(input.reason ?? ""));
+      if (!result.ok) return `错误：${result.error}`;
+      return `已认领任务（id: ${result.task.id}）。`;
+    }
+    case "request_clarification": {
+      const taskId = String(input.task_id ?? ctx.taskId ?? "");
+      if (!taskId) return "错误：task_id 不能为空。";
+      const task = getTask(taskId);
+      if (!task) return `错误：找不到任务 ${taskId}`;
+      if (task.status === "review" || task.status === "done") return "错误：任务已交付或已关闭，不能再请求 clarification。";
+      const question = String(input.question ?? "").trim();
+      if (!question) return "错误：question 不能为空。";
+      const { approvalId } = requestClarificationForTask(
+        agent,
+        task,
+        question,
+        String(input.context ?? ""),
+        String(input.proposed_default ?? "")
+      );
+      ctx.halted = "blocked";
+      return `已暂停任务并创建 clarification（approval id: ${approvalId}）。在用户回应前不要继续执行该任务。`;
+    }
     case "update_task": {
       if (input.status === "done") return "错误：关单（done）是 human-only 操作，请提请用户在看板上确认关闭。";
+      if (input.status === "blocked") return "错误：blocked 状态必须通过 request_clarification 进入（否则任务会卡住且没有恢复路径）。";
       const prev = getTask(String(input.task_id));
       if (!prev) return `错误：找不到任务 ${input.task_id}`;
       const assignee = findAgentByName(input.assignee);
+      const reviewer = findAgentByName(input.reviewer);
       const task = updateTask(prev.id, {
         ...(input.status ? { status: input.status } : {}),
         ...(input.title ? { title: String(input.title) } : {}),
         ...(input.description !== undefined ? { description: String(input.description) } : {}),
         ...(input.acceptance_criteria !== undefined ? { acceptance_criteria: String(input.acceptance_criteria) } : {}),
         ...(input.assignee !== undefined ? { assignee_agent_id: assignee?.id ?? null } : {}),
+        ...(input.reviewer !== undefined ? { reviewer_agent_id: reviewer?.id ?? null } : {}),
       });
       if (!task) return `错误：找不到任务 ${input.task_id}`;
+      if (task.assignee_agent_id !== prev.assignee_agent_id) {
+        emitTaskEvent(task, task.assignee_agent_id ? "claim" : "handoff", task.assignee_agent_id ? `${agent.name} 指派任务给 ${getAgent(task.assignee_agent_id)?.name ?? "AI 同事"}` : `${agent.name} 取消了任务指派`, undefined, task.assignee_agent_id ?? agent.id);
+      }
+      if (input.reviewer !== undefined && task.reviewer_agent_id !== prev.reviewer_agent_id) {
+        emitTaskEvent(task, "verification", `${agent.name} 指定复核人：${task.reviewer_agent_id ? getAgent(task.reviewer_agent_id)?.name ?? "AI 同事" : "自动选择"}`, undefined, task.reviewer_agent_id ?? agent.id);
+      }
       broadcast({ type: "task:upsert", payload: task });
       audit(channel.id, `🗂️ ${agent.name} 更新了任务「${task.title}」→ ${task.status}`);
       if (task.assignee_agent_id && task.assignee_agent_id !== prev.assignee_agent_id && task.id !== ctx.taskId) {
@@ -1333,6 +1771,10 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
       ctx.createdDocIds.push(doc.id);
       broadcast({ type: "doc:upsert", payload: doc });
       const kindLabel = kind === "slides" ? "演示文稿" : kind === "sheet" ? "数据表" : "文档";
+      if (ctx.taskId) {
+        const task = getTask(ctx.taskId);
+        if (task) emitTaskEvent(task, "delivery", `${agent.name} 写入交付物《${doc.title}》`, { doc_id: doc.id, kind }, agent.id);
+      }
       audit(channel.id, `${kind === "slides" ? "🖥️" : kind === "sheet" ? "📊" : "📄"} ${agent.name} 写好了${kindLabel}《${doc.title}》（${doc.content.length} 字）`);
       return `${kindLabel}已保存（id: ${doc.id}，kind: ${kind}）。`;
     }
@@ -1364,8 +1806,14 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
         agent_id: agent.id,
         title: String(input.title ?? "").slice(0, 200),
         payload: String(input.details ?? ""),
+        // 关联任务：批准后 taskHasApprovedNetworkGrant 才查得到，网络插件二级审批门才能打开。
+        ref_id: ctx.taskId ?? null,
       });
       broadcast({ type: "approval:upsert", payload: approval });
+      if (ctx.taskId) {
+        const task = getTask(ctx.taskId);
+        if (task) emitTaskEvent(task, "approval", `${agent.name} 发起审批请求「${approval.title}」`, { approval_id: approval.id, kind: approval.kind }, agent.id);
+      }
       audit(channel.id, `🔒 ${agent.name} 发起了审批请求「${approval.title}」，等待用户处理（见收件箱）`);
       return `审批请求已提交（id: ${approval.id}），状态 pending。在用户批准前不要执行该动作。`;
     }
@@ -1453,6 +1901,8 @@ function toolLabel(name: string): string {
   switch (name) {
     case "start_project": return "正在拆解项目计划…";
     case "create_task": return "正在创建任务…";
+    case "claim_task": return "正在认领任务…";
+    case "request_clarification": return "正在请求用户输入…";
     case "update_task": return "正在更新任务…";
     case "write_document": return "正在撰写文档…";
     case "read_document": return "正在查阅文档…";
@@ -1613,7 +2063,11 @@ async function llmLoop(
       system,
       messages,
       tools,
-    });
+    }) as {
+      abort(): void;
+      on(event: "text", listener: (delta: string) => void): unknown;
+      finalMessage(): Promise<Anthropic.Message>;
+    };
     const unregister = registerStream(channel.id, stream);
 
     stream.on("text", (delta) => {
@@ -1680,7 +2134,15 @@ async function llmLoop(
     messages.push({ role: "assistant", content: echoContent(final.content) });
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const tu of toolUses) {
+      if (ctx.halted) {
+        results.push({ type: "tool_result", tool_use_id: tu.id, content: "任务已暂停等待用户输入，后续工具未执行。" });
+        continue;
+      }
       status(agent, channel.id, "tool", toolLabel(tu.name));
+      if (ctx.taskId) {
+        const task = getTask(ctx.taskId);
+        if (task) emitTaskEvent(task, "tool", `${agent.name} 使用工具 ${tu.name}`, { tool: tu.name }, agent.id);
+      }
       let result: string;
       try {
         if (isMcpTool(tu.name)) {
@@ -1689,6 +2151,13 @@ async function llmLoop(
             // 高危插件（exec/network）：引擎层硬拦截（非提示词），强制改走 request_approval 审批门。
             result = `⛔ 插件「${gated.name}」属高危（${gated.safety === "exec" ? "本地执行" : "外发数据"}），不能直接调用。请改用 request_approval 提交本次动作的完整内容与目的，经用户批准后再执行。`;
             audit(channel.id, `⛔ ${agent.name} 试图直接调用高危插件「${gated.name}」(${gated.safety})，已拦截——须走审批门`);
+          } else if (
+            mcpRequiresApprovalForTask(ctx.taskId ? getTask(ctx.taskId) : undefined, tu.name) &&
+            !taskHasApprovedNetworkGrant(ctx.taskId)
+          ) {
+            const server = mcpServerForTool(tu.name);
+            result = `⛔ 插件「${server?.name ?? tu.name}」会向外部网络发送数据；当前任务绑定了来源文档或启用了严格网络审批，必须先用 request_approval 说明要外发的查询/内容和目的，经用户批准后再执行。`;
+            audit(channel.id, `⛔ ${agent.name} 试图在带来源文档的任务中调用网络插件「${server?.name ?? tu.name}」，已拦截——须走审批门`);
           } else {
             const sig = SEARCH_DEDUP ? searchQuerySignature(tu.input) : null;
             if (sig && searchMemo.has(sig)) {
@@ -1730,6 +2199,7 @@ async function llmLoop(
     }
     messages.push({ role: "user", content: results });
     if (emitted) emit("\n\n"); // 工具段落之间留空行，保持 Markdown 结构
+    if (ctx.halted) break;
 
     // 运行中插话：把用户在频道里的新消息注入下一轮迭代（人随时可干预）
     const interjections = listMessages(channel.id, 10).filter(
@@ -1767,6 +2237,7 @@ async function mockRun(ctx: RunCtx, emit: (delta: string) => void) {
     });
     ctx.createdDocIds.push(doc.id);
     broadcast({ type: "doc:upsert", payload: doc });
+    if (task) emitTaskEvent(task, "delivery", `${agent.name} 写入 Mock 交付物《${doc.title}》`, { doc_id: doc.id, kind: doc.kind }, agent.id);
     audit(ctx.channel.id, `📄 ${agent.name} 写好了文档《${doc.title}》`);
     text = `（Mock 模式）任务已按演示流程处理完毕：调研 → 交付物撰写（见文档库）→ 转待评审。配置 \`ANTHROPIC_API_KEY\` 后我会真实执行这项工作。`;
   } else if (ctx.kind === "synthesis") {

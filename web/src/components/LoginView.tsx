@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { useWorkspace } from "../store";
+import { BrandLockup } from "./Brand";
 
 const inputCls = "mb-2 w-full rounded-lg border border-line bg-panel px-3 py-2 text-[14px] outline-none focus:border-accent/50";
 
@@ -36,9 +37,8 @@ export function LoginView() {
   return (
     <div className="flex h-full items-center justify-center px-4">
       <form onSubmit={submit} className="w-[360px] rounded-2xl border border-line bg-panel p-7 shadow-sm">
-        <div className="mb-1 flex items-center gap-2">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent text-[15px] font-semibold text-white">A</div>
-          <span className="text-[17px] font-semibold">AITeam</span>
+        <div className="mb-1">
+          <BrandLockup />
         </div>
         <p className="mb-5 text-[13px] text-ink-3">{subtitle}</p>
 

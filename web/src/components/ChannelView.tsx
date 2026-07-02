@@ -1,25 +1,152 @@
-import { useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { useWorkspace } from "../store";
 import { api } from "../api";
 import type { Doc, Message, Task } from "../types";
 import { MessageItem } from "./MessageItem";
 import { Composer } from "./Composer";
 import { AgentAvatar } from "./Avatar";
-import { DocViewerModal, docKindMeta } from "./DocsView";
+import { TaskDetailDrawer } from "./TaskDetailDrawer";
 
-const STATUS_LABEL: Record<Task["status"], string> = { todo: "待办", doing: "进行", review: "待评审", done: "完成" };
+const DocViewerModal = lazy(() => import("./DocsView").then((m) => ({ default: m.DocViewerModal })));
+
+const STATUS_LABEL: Record<Task["status"], string> = { todo: "待办", doing: "进行", blocked: "等待", review: "待评审", done: "完成" };
+const DOC_ICON: Record<Doc["kind"], string> = {
+  report: "📄",
+  slides: "🖥️",
+  sheet: "📊",
+  html: "🌐",
+  source: "📎",
+  template: "🪄",
+};
 
 /** 频道右侧任务面板（Hive 设计：进度/产出物贴着对话看，不用切视图） */
-function ChannelPanel({ channelId, onOpenDoc }: { channelId: string; onOpenDoc: (d: Doc) => void }) {
+function ChannelPanel({ channelId, onOpenDoc, onOpenTask }: { channelId: string; onOpenDoc: (d: Doc) => void; onOpenTask: (t: Task) => void }) {
   const ws = useWorkspace();
   const tasks = ws.tasks.filter((t) => t.channel_id === channelId);
   const docs = ws.documents.filter((d) => d.channel_id === channelId).slice(0, 10);
-  const order: Task["status"][] = ["doing", "review", "todo", "done"];
+  const order: Task["status"][] = ["doing", "blocked", "review", "todo", "done"];
   const active = tasks.filter((t) => t.status !== "done");
   const sorted = [...active].sort((a, b) => order.indexOf(a.status) - order.indexOf(b.status));
+  const taskIds = new Set(tasks.map((t) => t.id));
+  const pendingApprovals = ws.approvals.filter((a) => a.status === "pending" && (a.channel_id === channelId || (a.ref_id ? taskIds.has(a.ref_id) : false)));
+  const latestByTask = new Map<string, (typeof ws.taskEvents)[number]>();
+  for (const e of ws.taskEvents) {
+    if (e.task_id && taskIds.has(e.task_id)) latestByTask.set(e.task_id, e);
+  }
+  const doingCount = active.filter((t) => t.status === "doing").length;
+  const blockedCount = active.filter((t) => t.status === "blocked").length;
+  const reviewCount = active.filter((t) => t.status === "review").length;
+  const attentionItems = [
+    ...pendingApprovals.map((approval) => {
+      const linkedTask = approval.ref_id ? tasks.find((t) => t.id === approval.ref_id) : undefined;
+      return {
+        id: `approval:${approval.id}`,
+        label: approval.kind === "clarification" ? "等待输入" : approval.kind === "plan" ? "计划审批" : "风险审批",
+        title: linkedTask?.title ?? approval.title,
+        meta: approval.kind === "clarification" ? "确认后恢复任务" : "处理后 AI 才能继续",
+        tone: approval.kind === "clarification" ? "block" : "approval",
+        onClick: () => (linkedTask ? onOpenTask(linkedTask) : ws.setView({ kind: "inbox" })),
+      };
+    }),
+    ...active
+      .filter((t) => t.status === "blocked" && !pendingApprovals.some((a) => a.ref_id === t.id))
+      .map((task) => ({
+        id: `blocked:${task.id}`,
+        label: "任务阻塞",
+        title: task.title,
+        meta: "等待补充事实、权限或选择",
+        tone: "block",
+        onClick: () => onOpenTask(task),
+      })),
+    ...active
+      .filter((t) => t.status === "review")
+      .map((task) => ({
+        id: `review:${task.id}`,
+        label: "待复核",
+        title: task.title,
+        meta: task.reviewer_agent_id ? `${ws.agentById(task.reviewer_agent_id)?.name ?? "复核人"} 负责验收` : "等待人工确认关闭",
+        tone: "review",
+        onClick: () => onOpenTask(task),
+      })),
+  ].slice(0, 4);
+  const nextAction =
+    attentionItems[0]?.label === "等待输入" || attentionItems[0]?.label === "任务阻塞"
+      ? "先补输入"
+      : attentionItems[0]?.label === "待复核"
+        ? "先看交付"
+        : pendingApprovals.length > 0
+          ? "先批请求"
+          : doingCount > 0
+            ? "观察执行"
+            : active.length > 0
+              ? "继续推进"
+              : "发起任务";
 
   return (
     <aside className="flex w-[264px] shrink-0 flex-col overflow-y-auto border-l border-line bg-panel/50 px-3 py-3">
+      <div className="mb-3 rounded-lg border border-line bg-panel p-2.5">
+        <div className="mb-2 flex items-center gap-2">
+          <span className="text-[12.5px] font-semibold">运行线</span>
+          <button
+            onClick={() => ws.setView({ kind: "inbox" })}
+            className="ml-auto rounded bg-accent-soft px-1.5 py-px text-[10.5px] text-ink-2 hover:text-accent"
+            title="打开收件箱"
+          >
+            审批 {pendingApprovals.length}
+          </button>
+        </div>
+        <div className="grid grid-cols-3 gap-1 text-center">
+          <div className="rounded bg-sel px-1 py-1">
+            <div className="font-mono text-[13px]">{doingCount}</div>
+            <div className="text-[10px] text-ink-3">进行</div>
+          </div>
+          <div className="rounded bg-red-50 px-1 py-1 text-red-700 dark:bg-red-950/20 dark:text-red-300">
+            <div className="font-mono text-[13px]">{blockedCount}</div>
+            <div className="text-[10px] opacity-80">等待</div>
+          </div>
+          <div className="rounded bg-blue-50 px-1 py-1 text-blue-700 dark:bg-blue-950/20 dark:text-blue-300">
+            <div className="font-mono text-[13px]">{reviewCount}</div>
+            <div className="text-[10px] opacity-80">复核</div>
+          </div>
+        </div>
+        <div className="mt-2 rounded-md bg-sel/70 px-2 py-1.5 text-[11.5px] text-ink-3">
+          下一步：<span className="font-medium text-ink-2">{nextAction}</span>
+        </div>
+      </div>
+      {attentionItems.length > 0 && (
+        <>
+          <div className="mb-1.5 flex items-baseline gap-1.5 px-1">
+            <span className="text-[12.5px] font-semibold">需要处理</span>
+            <span className="font-mono text-[10.5px] text-ink-3">{attentionItems.length}</span>
+          </div>
+          <div className="mb-3 flex flex-col gap-1">
+            {attentionItems.map((item) => (
+              <button
+                key={item.id}
+                onClick={item.onClick}
+                className="w-full rounded-lg border border-line bg-panel px-2 py-1.5 text-left hover:border-accent/40"
+                title={item.meta}
+              >
+                <div className="flex items-center gap-1.5">
+                  <span
+                    className={`rounded px-1 font-mono text-[9.5px] leading-4 ${
+                      item.tone === "block"
+                        ? "bg-red-50 text-red-600 dark:bg-red-950/20 dark:text-red-300"
+                        : item.tone === "review"
+                          ? "bg-blue-50 text-blue-700 dark:bg-blue-950/20 dark:text-blue-300"
+                          : "bg-amber-50 text-amber-700 dark:bg-amber-950/20 dark:text-amber-300"
+                    }`}
+                  >
+                    {item.label}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-[12px]">{item.title}</span>
+                </div>
+                <div className="mt-1 truncate text-[10.5px] text-ink-3">{item.meta}</div>
+              </button>
+            ))}
+          </div>
+        </>
+      )}
       <div className="mb-1.5 flex items-baseline gap-1.5 px-1">
         <span className="text-[12.5px] font-semibold">任务</span>
         <span className="font-mono text-[10.5px] text-ink-3">{active.length}</span>
@@ -28,12 +155,17 @@ function ChannelPanel({ channelId, onOpenDoc }: { channelId: string; onOpenDoc: 
       <div className="flex flex-col gap-1">
         {sorted.map((t) => {
           const assignee = ws.agentById(t.assignee_agent_id);
+          const latest = latestByTask.get(t.id);
           return (
-            <div key={t.id} className="rounded-lg border border-line bg-panel px-2 py-1.5">
+            <button key={t.id} onClick={() => onOpenTask(t)} className="w-full rounded-lg border border-line bg-panel px-2 py-1.5 text-left hover:border-accent/40">
               <div className="flex items-center gap-1.5">
                 <span
                   className={`rounded px-1 font-mono text-[9.5px] leading-4 ${
-                    t.status === "doing" ? "bg-accent-soft text-accent" : "bg-sel text-ink-3"
+                    t.status === "doing"
+                      ? "bg-accent-soft text-accent"
+                      : t.status === "blocked"
+                        ? "bg-red-50 text-red-600"
+                        : "bg-sel text-ink-3"
                   }`}
                 >
                   {STATUS_LABEL[t.status]}
@@ -43,7 +175,8 @@ function ChannelPanel({ channelId, onOpenDoc }: { channelId: string; onOpenDoc: 
                 </span>
                 {assignee && <AgentAvatar agent={assignee} size={16} />}
               </div>
-            </div>
+              {latest && <div className="mt-1 truncate text-[10.5px] text-ink-3">{latest.summary}</div>}
+            </button>
           );
         })}
       </div>
@@ -60,7 +193,7 @@ function ChannelPanel({ channelId, onOpenDoc }: { channelId: string; onOpenDoc: 
             onClick={() => onOpenDoc(d)}
             className="flex items-center gap-1.5 rounded-lg border border-line bg-panel px-2 py-1.5 text-left hover:border-accent/40"
           >
-            <span className="text-[12px]">{docKindMeta(d.kind).icon}</span>
+            <span className="text-[12px]">{DOC_ICON[d.kind] ?? "📄"}</span>
             <span className="min-w-0 flex-1 truncate text-[12px]" title={d.title}>
               {d.title}
             </span>
@@ -80,6 +213,7 @@ export function ChannelView({ channelId }: { channelId: string }) {
   const [pinned, setPinned] = useState(true);
   const [panelOpen, setPanelOpen] = useState(() => localStorage.getItem("aiteam-panel") !== "off");
   const [openDoc, setOpenDoc] = useState<Doc | null>(null);
+  const [openTask, setOpenTask] = useState<Task | null>(null);
   const [replyTarget, setReplyTarget] = useState<Message | null>(null);
 
   function togglePanel() {
@@ -214,9 +348,23 @@ export function ChannelView({ channelId }: { channelId: string }) {
         }
       />
         </div>
-        {panelOpen && channel.kind === "channel" && <ChannelPanel channelId={channelId} onOpenDoc={setOpenDoc} />}
+        {panelOpen && channel.kind === "channel" && (
+          <ChannelPanel channelId={channelId} onOpenDoc={setOpenDoc} onOpenTask={setOpenTask} />
+        )}
       </div>
-      {openDoc && <DocViewerModal doc={openDoc} onClose={() => setOpenDoc(null)} />}
+      {openDoc && (
+        <Suspense fallback={null}>
+          <DocViewerModal doc={openDoc} onClose={() => setOpenDoc(null)} />
+        </Suspense>
+      )}
+      {openTask && (
+        <TaskDetailDrawer
+          task={ws.tasks.find((t) => t.id === openTask.id) ?? openTask}
+          onClose={() => setOpenTask(null)}
+          onOpenDoc={setOpenDoc}
+          onOpenTask={setOpenTask}
+        />
+      )}
     </div>
   );
 }

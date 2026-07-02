@@ -1,4 +1,4 @@
-import type { Agent, Approval, Channel, Doc, Message, Project, Provider, Task } from "./types";
+import type { Agent, Approval, Channel, Doc, Message, Project, Provider, Task, TaskEvent } from "./types";
 
 // 统一入口下 AiTeam 挂在 /aiteam/，BASE_URL 即 "/aiteam/"。
 // 导出供少数绕过 req() 直接 fetch 的组件（MCP/技能/用量/团队等）复用，确保都带 /aiteam 前缀。
@@ -33,6 +33,7 @@ export interface Bootstrap {
   agents: Agent[];
   channels: Channel[];
   tasks: Task[];
+  task_events: TaskEvent[];
   approvals: Approval[];
   documents: Doc[];
   projects: Project[];
@@ -49,6 +50,101 @@ export interface ProviderInput {
   max_tokens?: number;
   web_tools?: boolean;
   is_strong?: boolean;
+  price_input_per_million?: number;
+  price_output_per_million?: number;
+  price_currency?: string;
+}
+
+export interface ScenarioStartResult {
+  project: Project;
+  tasks: Task[];
+  reused?: boolean;
+}
+
+export interface LinkCheckStartResult {
+  project: Project;
+}
+
+export interface ScenarioInfo {
+  id: string;
+  title: string;
+  desc: string;
+}
+
+export interface ProviderTestResult {
+  ok: true;
+  protocol: "anthropic-compatible" | "openai-compatible";
+  model: string;
+  latency_ms: number;
+  sample: string;
+}
+
+export interface ProviderTaskTestResult {
+  ok: boolean;
+  provider: Provider;
+  model: string;
+  latency_ms: number;
+  task: Task;
+  docs: Doc[];
+  events: TaskEvent[];
+  checks: {
+    completed: boolean;
+    delivered: boolean;
+    tool_observed: boolean;
+    verified: boolean;
+    usage_tracked: boolean;
+  };
+  usage_summary: {
+    input: number;
+    output: number;
+    billable: number;
+    estimated_cost: number | null;
+    price_currency: string;
+  };
+}
+
+export interface McpTaskTestResult {
+  ok: boolean;
+  server: {
+    id: string;
+    name: string;
+    kind: "http" | "stdio";
+    safety: "local" | "network" | "exec";
+    enabled: number;
+    has_token: boolean;
+  };
+  task: Task;
+  docs: Doc[];
+  events: TaskEvent[];
+  checks: {
+    connected: boolean;
+    tools: number;
+    converted: boolean;
+    source_document_created: boolean;
+  };
+  latency_ms: number;
+  sample: string;
+}
+
+export interface SkillTaskTestResult {
+  ok: boolean;
+  skill: {
+    id: string;
+    name: string;
+    enabled: number;
+    body: string;
+    content: string;
+  };
+  task: Task;
+  docs: Doc[];
+  events: TaskEvent[];
+  checks: {
+    enabled: boolean;
+    indexed: boolean;
+    read_hint: boolean;
+    body_loaded: boolean;
+    delivered: boolean;
+  };
 }
 
 export interface ImageProviderInfo {
@@ -113,6 +209,11 @@ export const api = {
   createProvider: (data: ProviderInput) => req<Provider>("/providers", { method: "POST", body: JSON.stringify(data) }),
   updateProvider: (id: string, data: ProviderInput) =>
     req<Provider>(`/providers/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+  testProvider: (id: string) => req<ProviderTestResult>(`/providers/${id}/test`, { method: "POST" }),
+  startLinkCheck: (data: { channel_id?: string | null } = {}) =>
+    req<LinkCheckStartResult>("/link-checks", { method: "POST", body: JSON.stringify(data) }),
+  runProviderTaskTest: (id: string, data: { channel_id?: string | null; project_id?: string | null } = {}) =>
+    req<ProviderTaskTestResult>(`/providers/${id}/task-test`, { method: "POST", body: JSON.stringify(data) }),
   deleteProvider: (id: string) => req<{ ok: boolean }>(`/providers/${id}`, { method: "DELETE" }),
   getImageProvider: () => req<ImageProviderInfo>("/image-provider"),
   saveImageProvider: (data: { base_url?: string; api_key?: string; model?: string }) =>
@@ -120,12 +221,28 @@ export const api = {
   listSkills: () => req<{ id: string; name: string; desc: string; enabled: number; builtin: number }[]>("/skills"),
   toggleSkill: (id: string, enabled: boolean) =>
     req(`/skills/${id}`, { method: "PATCH", body: JSON.stringify({ enabled }) }),
-  createTask: (data: { title: string; description?: string; channel_id?: string | null; assignee_agent_id?: string | null }) =>
+  runMcpTaskTest: (id: string, data: { channel_id?: string | null; project_id?: string | null } = {}) =>
+    req<McpTaskTestResult>(`/mcp-servers/${id}/task-test`, { method: "POST", body: JSON.stringify(data) }),
+  runSkillTaskTest: (id: string, data: { channel_id?: string | null; project_id?: string | null } = {}) =>
+    req<SkillTaskTestResult>(`/skills/${id}/task-test`, { method: "POST", body: JSON.stringify(data) }),
+  createTask: (data: {
+    title: string;
+    description?: string;
+    channel_id?: string | null;
+    assignee_agent_id?: string | null;
+    reviewer_agent_id?: string | null;
+  }) =>
     req<Task>("/tasks", { method: "POST", body: JSON.stringify(data) }),
-  updateTask: (id: string, data: Partial<Pick<Task, "title" | "description" | "status" | "assignee_agent_id">>) =>
+  listScenarios: () => req<ScenarioInfo[]>("/scenarios"),
+  startScenario: (id: string, data: { channel_id?: string | null; acceptance?: boolean }) =>
+    req<ScenarioStartResult>(`/scenarios/${id}/start`, { method: "POST", body: JSON.stringify(data) }),
+  taskEvents: (id: string) => req<TaskEvent[]>(`/tasks/${id}/events`),
+  updateTask: (id: string, data: Partial<Pick<Task, "title" | "description" | "status" | "assignee_agent_id" | "reviewer_agent_id">>) =>
     req<Task>(`/tasks/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
-  resolveApproval: (id: string, approve: boolean) =>
-    req<Approval>(`/approvals/${id}/resolve`, { method: "POST", body: JSON.stringify({ approve }) }),
+  requestRevision: (id: string, reason: string) =>
+    req<Task>(`/tasks/${id}/revise`, { method: "POST", body: JSON.stringify({ reason }) }),
+  resolveApproval: (id: string, approve: boolean, response?: string) =>
+    req<Approval>(`/approvals/${id}/resolve`, { method: "POST", body: JSON.stringify({ approve, response }) }),
   closeProject: (id: string) =>
     req<{ project: Project; tasks: Task[] }>(`/projects/${id}/close`, { method: "POST" }),
   docVersions: (id: string) => req<Doc[]>(`/documents/${id}/versions`),

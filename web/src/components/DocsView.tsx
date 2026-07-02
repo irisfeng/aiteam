@@ -1,12 +1,12 @@
-import { useEffect, useRef, useState } from "react";
-import * as echarts from "echarts";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useWorkspace } from "../store";
 import { api, API_BASE } from "../api";
 import type { Doc } from "../types";
 import { AgentAvatar } from "./Avatar";
-import { TemplateEditor } from "./TemplateEditor";
+
+const TemplateEditor = lazy(() => import("./TemplateEditor").then((m) => ({ default: m.TemplateEditor })));
 
 function fmt(ts: number) {
   return new Date(ts).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
@@ -144,49 +144,55 @@ function SheetChart({ rows }: { rows: string[][] }) {
   useEffect(() => {
     const el = ref.current;
     if (!el || valueCols.length === 0) return;
+    let disposed = false;
+    let chart: import("echarts").ECharts | null = null;
     const ink = cssVar("--t-ink", "#26241f");
     const dim = cssVar("--t-dim", "#8a877e");
     const line = cssVar("--t-line", "#e6e3db");
     const accent = cssVar("--t-accent", "#c28a1e");
     const palette = [accent, "#7c9a6d", "#5e87b0", "#b06a5e", "#8a7ab0", "#b0985e"];
     const labels = body.map((r) => r[0] ?? "");
-    const chart = echarts.init(el);
     const axisStyle = {
       axisLabel: { color: dim, fontSize: 11 },
       axisLine: { lineStyle: { color: line } },
       splitLine: { lineStyle: { color: line } },
     };
-    chart.setOption({
-      color: palette,
-      textStyle: { color: ink },
-      tooltip: { trigger: type === "pie" ? "item" : "axis", textStyle: { fontSize: 12 } },
-      legend: valueCols.length > 1 || type === "pie"
-        ? { textStyle: { color: dim, fontSize: 11 }, top: 0 }
-        : undefined,
-      grid: type === "pie" ? undefined : { left: 8, right: 16, top: valueCols.length > 1 ? 32 : 16, bottom: 8, containLabel: true },
-      xAxis: type === "pie" ? undefined : { type: "category", data: labels, ...axisStyle },
-      yAxis: type === "pie" ? undefined : { type: "value", ...axisStyle },
-      series:
-        type === "pie"
-          ? [{
-              type: "pie",
-              radius: ["32%", "68%"],
-              label: { color: ink, fontSize: 11, formatter: "{b}: {c}" },
-              data: body.map((r) => ({ name: r[0] ?? "", value: Math.abs(num(r[valueCols[0]])) || 0 })),
-            }]
-          : valueCols.map((c) => ({
-              name: head[c],
-              type,
-              smooth: type === "line",
-              barMaxWidth: 28,
-              data: body.map((r) => num(r[c]) || 0),
-            })),
+    void import("echarts").then((echarts) => {
+      if (disposed || !ref.current) return;
+      chart = echarts.init(ref.current);
+      chart.setOption({
+        color: palette,
+        textStyle: { color: ink },
+        tooltip: { trigger: type === "pie" ? "item" : "axis", textStyle: { fontSize: 12 } },
+        legend: valueCols.length > 1 || type === "pie"
+          ? { textStyle: { color: dim, fontSize: 11 }, top: 0 }
+          : undefined,
+        grid: type === "pie" ? undefined : { left: 8, right: 16, top: valueCols.length > 1 ? 32 : 16, bottom: 8, containLabel: true },
+        xAxis: type === "pie" ? undefined : { type: "category", data: labels, ...axisStyle },
+        yAxis: type === "pie" ? undefined : { type: "value", ...axisStyle },
+        series:
+          type === "pie"
+            ? [{
+                type: "pie",
+                radius: ["32%", "68%"],
+                label: { color: ink, fontSize: 11, formatter: "{b}: {c}" },
+                data: body.map((r) => ({ name: r[0] ?? "", value: Math.abs(num(r[valueCols[0]])) || 0 })),
+              }]
+            : valueCols.map((c) => ({
+                name: head[c],
+                type,
+                smooth: type === "line",
+                barMaxWidth: 28,
+                data: body.map((r) => num(r[c]) || 0),
+              })),
+      });
     });
-    const onResize = () => chart.resize();
+    const onResize = () => chart?.resize();
     window.addEventListener("resize", onResize);
     return () => {
+      disposed = true;
       window.removeEventListener("resize", onResize);
-      chart.dispose();
+      chart?.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [type, rows]);
@@ -353,7 +359,9 @@ export function DocViewerModal({ doc, onClose }: { doc: Doc; onClose: () => void
         </div>
         <div ref={contentRef} className={`flex-1 overflow-y-auto px-6 py-4 ${doc.kind === "slides" ? "bg-sel/40" : ""}`}>
           {doc.kind === "template" ? (
-            <TemplateEditor doc={doc} />
+            <Suspense fallback={<div className="p-6 text-[13px] text-ink-3">加载模板编辑器…</div>}>
+              <TemplateEditor doc={doc} />
+            </Suspense>
           ) : doc.kind === "slides" ? (
             <SlidesPreview content={doc.content} />
           ) : doc.kind === "sheet" ? (
@@ -514,6 +522,38 @@ export function DocsView() {
     }
   }
 
+  async function pickDesktopFile(mode: "source" | "template") {
+    const picked = await window.aiteamDesktop?.pickFile(mode);
+    if (!picked || picked.canceled) return null;
+    return new File([new Uint8Array(picked.file.bytes)], picked.file.name);
+  }
+
+  async function chooseSource() {
+    if (window.aiteamDesktop?.pickFile) {
+      try {
+        const file = await pickDesktopFile("source");
+        if (file) await onUpload(file);
+      } catch (err) {
+        window.alert("选择文件失败：" + ((err as Error)?.message ?? err));
+      }
+      return;
+    }
+    fileRef.current?.click();
+  }
+
+  async function chooseTemplate() {
+    if (window.aiteamDesktop?.pickFile) {
+      try {
+        const file = await pickDesktopFile("template");
+        if (file) await onUploadTemplate(file);
+      } catch (err) {
+        window.alert("选择模板失败：" + ((err as Error)?.message ?? err));
+      }
+      return;
+    }
+    tplRef.current?.click();
+  }
+
   const mockDocs = ws.documents.filter(isMockDoc);
   let visible = showMock ? ws.documents : ws.documents.filter((d) => !isMockDoc(d));
   if (kind !== "all") visible = visible.filter((d) => d.kind === kind);
@@ -551,7 +591,7 @@ export function DocsView() {
         <h1 className="text-[15px] font-semibold">文档</h1>
         <span className="hidden text-[12px] text-ink-3 lg:inline">AI 同事交付的报告、演示文稿与数据表都沉淀在这里</span>
         <button
-          onClick={() => fileRef.current?.click()}
+          onClick={() => void chooseSource()}
           disabled={uploading}
           className="rounded-lg border border-line px-2.5 py-1 text-[12px] text-ink-2 hover:bg-sel disabled:opacity-50"
           title="上传文档(PDF/Word/PPT/Excel/txt/md…)作为「来源」，供 AI 同事定向润色时 grounding"
@@ -566,7 +606,7 @@ export function DocsView() {
           onChange={(e) => { const file = e.currentTarget.files?.[0]; e.currentTarget.value = ""; if (file) void onUpload(file); }}
         />
         <button
-          onClick={() => tplRef.current?.click()}
+          onClick={() => void chooseTemplate()}
           disabled={uploadingTpl}
           className="rounded-lg border border-accent/50 px-2.5 py-1 text-[12px] font-medium text-accent hover:bg-accent-soft disabled:opacity-50"
           title="上传现成 .pptx 品牌模板：逐槽改里面的图文、保留原设计后导出可编辑 pptx"

@@ -6,6 +6,15 @@ export default defineConfig({
   // 整合到统一 Web App 后，AiTeam 前端整体挂载在 /aiteam/ 子路径下
   base: "/aiteam/",
   plugins: [react(), tailwindcss()],
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("/node_modules/echarts/") || id.includes("/node_modules/zrender/")) return "charts";
+        },
+      },
+    },
+  },
   server: {
     proxy: {
       "/aiteam/api": "http://localhost:8787",
