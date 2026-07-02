@@ -6,6 +6,7 @@
   "scripts": {
     "pack": "node prepare-runtime.mjs && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --dir --config electron-builder.yml",
     "pack:verify": "node verify-packaged-runtime.mjs",
+    "dist": "node prepare-runtime.mjs && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --config electron-builder.yml",
     "start": "electron .",
     "smoke": "node smoke.mjs"
   },

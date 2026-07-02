@@ -6,6 +6,7 @@ asar: true
 files:
   - main.cjs
   - preload.cjs
+  - connect-preload.cjs
   - package.json
 extraResources:
   - from: .runtime/server
@@ -25,10 +26,15 @@ extraResources:
     to: web
     filter:
       - dist/**/*
+# mac 出 dmg + zip 双产物：dmg 给用户装，zip 给自动更新/CI 校验用；alpha 阶段不签名不公证。
 mac:
   identity: null
+  category: public.app-category.productivity
   target:
-    - dir
+    - dmg
+    - zip
+dmg:
+  artifactName: "${productName}-${version}-${arch}.${ext}"
 win:
   target:
     - dir

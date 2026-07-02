@@ -14,6 +14,7 @@
     "build": "npm run build --workspace web && npm run build --workspace server",
     "desktop": "npm run build && npm run start --workspace desktop",
     "desktop:pack": "npm run build && npm run pack --workspace desktop",
+    "desktop:dist": "npm run build && npm run dist --workspace desktop",
     "desktop:smoke": "npm run build && npm run smoke --workspace desktop",
     "client:smoke": "npm run build && node scripts/client-smoke.mjs",
     "ui:smoke": "npm run build && node scripts/ui-smoke.mjs",
