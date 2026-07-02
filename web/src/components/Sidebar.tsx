@@ -120,7 +120,7 @@ export function Sidebar({
   const dms = ws.channels.filter((c) => c.kind === "dm");
 
   return (
-    <aside className="flex h-full w-[250px] shrink-0 flex-col border-r border-line bg-panel">
+    <aside className="hidden h-full w-[250px] shrink-0 flex-col border-r border-line bg-panel md:flex">
       <div className="flex items-center gap-2 px-4 py-3.5">
         <BrandMark size={28} />
         <span className="font-semibold">AiTeam</span>

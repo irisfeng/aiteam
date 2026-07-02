@@ -457,6 +457,8 @@ export function TasksBoard({
       const result = await ws.startScenario(id, { channel_id: channel.id, ...(mode === "acceptance" ? { acceptance: true } : {}) });
       if (mode === "acceptance") {
         setAcceptanceProjectId(result.project.id);
+        const taskToReview = result.tasks.find((t) => t.status === "review") ?? result.tasks.find((t) => t.status === "done") ?? result.tasks[0];
+        if (taskToReview) setOpenTask(taskToReview);
       }
     } catch (e: any) {
       setScenarioError(e?.message ?? "启动失败");
@@ -468,21 +470,21 @@ export function TasksBoard({
 
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col">
-      <header className="flex items-center gap-3 border-b border-line px-5 py-3">
+      <header className="flex flex-wrap items-center gap-3 border-b border-line px-4 py-3 sm:px-5">
         <h1 className="text-[15px] font-semibold">任务</h1>
-        <span className="text-[12px] text-ink-3">指派给 AI 同事即自动开工：调研 → 交付文档 → 转待评审</span>
-        <div className="ml-auto flex items-center gap-2">
+        <span className="min-w-0 flex-1 text-[12px] text-ink-3">指派给 AI 同事即自动开工：调研 → 交付文档 → 转待评审</span>
+        <div className="flex w-full flex-wrap items-center gap-2 lg:ml-auto lg:w-auto">
           <input
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && void addTask()}
             placeholder="快速新建任务…"
-            className="w-52 rounded-lg border border-line bg-panel px-3 py-1.5 text-[13px] outline-none focus:border-accent/50"
+            className="min-w-0 flex-1 rounded-lg border border-line bg-panel px-3 py-1.5 text-[13px] outline-none focus:border-accent/50 sm:flex-none sm:w-52"
           />
           <select
             value={assignee}
             onChange={(e) => setAssignee(e.target.value)}
-            className="rounded-lg border border-line bg-panel px-2 py-1.5 text-[13px] text-ink-2 outline-none"
+            className="min-w-28 flex-1 rounded-lg border border-line bg-panel px-2 py-1.5 text-[13px] text-ink-2 outline-none sm:flex-none"
           >
             <option value="">不指派</option>
             {ws.agents.map((a) => (
@@ -513,7 +515,7 @@ export function TasksBoard({
         scenarioError={scenarioError}
         onOpenSettings={onOpenSettings}
       />
-      <div className="grid flex-1 grid-cols-[repeat(5,minmax(230px,1fr))] gap-3 overflow-auto p-4">
+      <div className="grid flex-1 grid-cols-[repeat(5,minmax(190px,1fr))] gap-3 overflow-auto p-4">
         {COLUMNS.map((col) => {
           const tasks = ws.tasks.filter((t) => t.status === col.key);
           // 同一项目的子任务收进折叠组卡；无项目的单任务平铺。保留列内出现顺序。

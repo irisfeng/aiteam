@@ -16,6 +16,7 @@
     "desktop:pack": "npm run build && npm run pack --workspace desktop",
     "desktop:smoke": "npm run build && npm run smoke --workspace desktop",
     "client:smoke": "npm run build && node scripts/client-smoke.mjs",
+    "ui:smoke": "npm run build && node scripts/ui-smoke.mjs",
     "start": "npm run start --workspace server",
     "typecheck": "npm run typecheck --workspace server && npm run typecheck --workspace web",
     "test": "node scripts/regression.mjs"

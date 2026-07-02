@@ -56,7 +56,7 @@ function StatButton({
     <button
       type="button"
       onClick={onClick}
-      className={`min-h-[74px] rounded-lg border px-3 py-2 text-left transition-colors hover:border-accent/50 ${toneClass}`}
+      className={`min-h-[74px] min-w-0 rounded-lg border px-3 py-2 text-left transition-colors hover:border-accent/50 ${toneClass}`}
     >
       <div className="flex items-baseline gap-2">
         <span className="text-[22px] font-semibold leading-none">{value}</span>
@@ -93,7 +93,7 @@ function FlowStep({
       type="button"
       onClick={onClick}
       disabled={!onClick}
-      className={`flex min-h-[58px] min-w-[116px] flex-1 items-center gap-2 rounded-lg border px-2.5 py-2 text-left transition-colors disabled:cursor-default ${stateClass} ${onClick ? "hover:border-accent/50" : ""}`}
+      className={`flex min-h-[58px] min-w-0 flex-1 items-center gap-2 rounded-lg border px-2.5 py-2 text-left transition-colors disabled:cursor-default sm:min-w-[116px] ${stateClass} ${onClick ? "hover:border-accent/50" : ""}`}
     >
       <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white/70 font-mono text-[11px] dark:bg-black/20">
         {index}
@@ -633,8 +633,8 @@ export function WorklineOverview({
   }
 
   return (
-    <section className={`grid gap-3 xl:grid-cols-[minmax(0,1fr)_360px] ${className}`}>
-      <div className="rounded-lg border border-line bg-panel p-3 shadow-sm">
+    <section className={`grid min-w-0 gap-3 xl:grid-cols-[minmax(0,1fr)_360px] ${className}`}>
+      <div className="min-w-0 overflow-hidden rounded-lg border border-line bg-panel p-3 shadow-sm">
         <div className="mb-3 flex items-start gap-3">
           <div className="min-w-0 flex-1">
             <div className="text-[13px] font-semibold">任务运行线</div>
@@ -688,7 +688,7 @@ export function WorklineOverview({
         <div className="mt-3 rounded-lg border border-line bg-paper/70 p-2.5">
           <div className="mb-2 flex flex-wrap items-center gap-2">
             <div className="text-[12.5px] font-semibold">当前推进路径</div>
-            <div className="min-w-[180px] flex-1 truncate text-right text-[11.5px] text-ink-3" title={nextAction}>
+            <div className="min-w-0 flex-1 truncate text-right text-[11.5px] text-ink-3 sm:min-w-[180px]" title={nextAction}>
               下一步：{nextAction}
             </div>
             {nextActionCta && (

@@ -14,6 +14,9 @@
 > - **客户端烟测（已自动化）**：`npm run client:smoke` 会构建生产产物，用临时数据目录启动
 >   `server/dist/index.js`，验证 `/aiteam/` 页面、standalone 登录、bootstrap、核心场景启动和 WebSocket
 >   项目/任务/活动实时更新。
+> - **真实浏览器 UI 烟测（本机可选）**：`npm run ui:smoke` 会启动隔离生产服务和系统 Chrome，
+>   在桌面/移动视口真实渲染任务运行线、端到端验收、任务详情抽屉、复核清单和活动日志，并把截图写到
+>   `output/ui-smoke/`。若 Chrome 不在默认路径，可设置 `AITEAM_UI_CHROME=/path/to/chrome`。
 > - **智能层（需真实 key 人工执行）**：即本清单的 B2、C1-C4 的质量观察项、D1、G1/G3/G5
 >   的行为观察项——机器只能验证"流程对不对"，"干得好不好"要靠你按 F 段回报。
 
@@ -69,9 +72,11 @@
 - [ ] **B0 自动客户端烟测**：
   ```bash
   npm run client:smoke
+  npm run ui:smoke
   ```
   - 预期：依次通过 production server、client shell、session cookie、bootstrap、Helio-style scenario、WebSocket live updates。
-  - 失败时先看是否执行过 `npm install`，以及本机端口/Node 原生模块是否异常；脚本使用临时数据目录，不会污染当前工作区数据。
+  - `ui:smoke` 预期：桌面/移动两种视口都能看到任务运行线，启动端到端验收后能打开任务详情、人工复核清单和活动日志，且无横向溢出。
+  - 失败时先看是否执行过 `npm install`、本机端口/Node 原生模块是否异常，以及 Chrome 路径是否需要 `AITEAM_UI_CHROME`；脚本使用临时数据目录，不会污染当前工作区数据。
 
 - [ ] **B1 基础聊天**：在 `#general` 发 `@产品经理 用三句话介绍你自己和你的工作方式`
   - 预期：产品经理头像 + `AI` 角标，**流式逐字输出**，Markdown 渲染正常。
