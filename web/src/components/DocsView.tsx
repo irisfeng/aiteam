@@ -5,6 +5,7 @@ import { useWorkspace } from "../store";
 import { api, API_BASE } from "../api";
 import type { Doc } from "../types";
 import { AgentAvatar } from "./Avatar";
+import { DOC_KIND_ICON } from "../lib/docMeta";
 
 const TemplateEditor = lazy(() => import("./TemplateEditor").then((m) => ({ default: m.TemplateEditor })));
 
@@ -15,17 +16,17 @@ function fmt(ts: number) {
 export function docKindMeta(kind: Doc["kind"]) {
   switch (kind) {
     case "slides":
-      return { icon: "🖥️", label: "演示文稿", ext: ".md", mime: "text/markdown", hint: "Marp 格式，可直接生成 PPT" };
+      return { icon: DOC_KIND_ICON.slides, label: "演示文稿", ext: ".md", mime: "text/markdown", hint: "Marp 格式，可直接生成 PPT" };
     case "sheet":
-      return { icon: "📊", label: "数据表", ext: ".csv", mime: "text/csv", hint: "CSV，可导入 Excel" };
+      return { icon: DOC_KIND_ICON.sheet, label: "数据表", ext: ".csv", mime: "text/csv", hint: "CSV，可导入 Excel" };
     case "html":
-      return { icon: "🌐", label: "网页", ext: ".html", mime: "text/html", hint: "单文件 HTML，沙箱预览，可下载本地打开" };
+      return { icon: DOC_KIND_ICON.html, label: "网页", ext: ".html", mime: "text/html", hint: "单文件 HTML，沙箱预览，可下载本地打开" };
     case "source":
-      return { icon: "📎", label: "来源", ext: ".md", mime: "text/markdown", hint: "上传的来源文档（已转 Markdown），供 AI 同事定向润色时 grounding" };
+      return { icon: DOC_KIND_ICON.source, label: "来源", ext: ".md", mime: "text/markdown", hint: "上传的来源文档（已转 Markdown），供 AI 同事定向润色时 grounding" };
     case "template":
-      return { icon: "🪄", label: "模板", ext: ".pptx", mime: "application/vnd.openxmlformats-officedocument.presentationml.presentation", hint: "上传的 .pptx 模板：逐槽改图文、保留原设计后导出可编辑 pptx" };
+      return { icon: DOC_KIND_ICON.template, label: "模板", ext: ".pptx", mime: "application/vnd.openxmlformats-officedocument.presentationml.presentation", hint: "上传的 .pptx 模板：逐槽改图文、保留原设计后导出可编辑 pptx" };
     default:
-      return { icon: "📄", label: "报告", ext: ".md", mime: "text/markdown", hint: "Markdown" };
+      return { icon: DOC_KIND_ICON.report, label: "报告", ext: ".md", mime: "text/markdown", hint: "Markdown" };
   }
 }
 
@@ -33,12 +34,12 @@ export function docKindMeta(kind: Doc["kind"]) {
 function exportWord(title: string, bodyHtml: string) {
   const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word">
 <head><meta charset="utf-8"><title>${title}</title><style>
-body{font-family:"PingFang SC","Microsoft YaHei",sans-serif;font-size:11pt;line-height:1.7;color:#26241f;max-width:18cm;margin:auto;}
-h1{font-size:20pt;border-bottom:2px solid #c28a1e;padding-bottom:6pt;}h2{font-size:15pt;margin-top:16pt;}h3{font-size:12.5pt;}
-table{border-collapse:collapse;width:100%;margin:8pt 0;}th,td{border:1pt solid #d9d4c8;padding:4pt 8pt;font-size:10pt;}
-th{background:#f3efe4;}code{background:#f3f1eb;padding:1pt 4pt;font-family:Consolas,monospace;font-size:9.5pt;}
-pre{background:#f6f4ef;border:1pt solid #e6e3db;padding:8pt;font-family:Consolas,monospace;font-size:9pt;white-space:pre-wrap;}
-blockquote{border-left:3pt solid #c28a1e;margin-left:0;padding-left:10pt;color:#6b675e;}
+body{font-family:"PingFang SC","Microsoft YaHei",sans-serif;font-size:11pt;line-height:1.7;color:#1f2937;max-width:18cm;margin:auto;}
+h1{font-size:20pt;border-bottom:2px solid #2563eb;padding-bottom:6pt;}h2{font-size:15pt;margin-top:16pt;}h3{font-size:12.5pt;}
+table{border-collapse:collapse;width:100%;margin:8pt 0;}th,td{border:1pt solid #d1d5db;padding:4pt 8pt;font-size:10pt;}
+th{background:#eef2f7;}code{background:#f3f4f6;padding:1pt 4pt;font-family:Consolas,monospace;font-size:9.5pt;}
+pre{background:#f8fafc;border:1pt solid #e5e7eb;padding:8pt;font-family:Consolas,monospace;font-size:9pt;white-space:pre-wrap;}
+blockquote{border-left:3pt solid #2563eb;margin-left:0;padding-left:10pt;color:#6b7280;}
 </style></head><body><h1>${title}</h1>${bodyHtml}</body></html>`;
   const blob = new Blob(["\ufeff", html], { type: "application/msword" });
   const url = URL.createObjectURL(blob);
@@ -54,10 +55,10 @@ function printDoc(title: string, bodyHtml: string, slides: boolean) {
   const w = window.open("", "_blank", "width=900,height=700");
   if (!w) return;
   w.document.write(`<html><head><meta charset="utf-8"><title>${title}</title><style>
-body{font-family:"PingFang SC","Microsoft YaHei",sans-serif;font-size:12px;line-height:1.75;color:#26241f;margin:2cm;}
-h1,h2,h3{color:#26241f;}h1{border-bottom:2px solid #c28a1e;padding-bottom:6px;}
-table{border-collapse:collapse;width:100%;}th,td{border:1px solid #d9d4c8;padding:4px 8px;}th{background:#f3efe4;}
-pre{background:#f6f4ef;border:1px solid #e6e3db;padding:10px;white-space:pre-wrap;font-size:11px;}
+body{font-family:"PingFang SC","Microsoft YaHei",sans-serif;font-size:12px;line-height:1.75;color:#1f2937;margin:2cm;}
+h1,h2,h3{color:#1f2937;}h1{border-bottom:2px solid #2563eb;padding-bottom:6px;}
+table{border-collapse:collapse;width:100%;}th,td{border:1px solid #d1d5db;padding:4px 8px;}th{background:#eef2f7;}
+pre{background:#f8fafc;border:1px solid #e5e7eb;padding:10px;white-space:pre-wrap;font-size:11px;}
 ${slides ? ".slide-page{page-break-after:always;border:none!important;box-shadow:none!important;aspect-ratio:auto!important;padding:1cm 0;}" : ""}
 @media print { a { color: inherit; text-decoration: none; } }
 </style></head><body>${slides ? "" : `<h1>${title}</h1>`}${bodyHtml}</body></html>`);
@@ -149,7 +150,7 @@ function SheetChart({ rows }: { rows: string[][] }) {
     const ink = cssVar("--t-ink", "#26241f");
     const dim = cssVar("--t-dim", "#8a877e");
     const line = cssVar("--t-line", "#e6e3db");
-    const accent = cssVar("--t-accent", "#c28a1e");
+    const accent = cssVar("--t-accent", "#2563eb");
     const palette = [accent, "#7c9a6d", "#5e87b0", "#b06a5e", "#8a7ab0", "#b0985e"];
     const labels = body.map((r) => r[0] ?? "");
     const axisStyle = {

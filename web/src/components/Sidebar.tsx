@@ -105,6 +105,7 @@ export function MobileNav({ onSettings }: { onSettings: () => void }) {
   const ws = useWorkspace();
   const pending = ws.approvals.filter((a) => a.status === "pending").length;
   const views = [
+    { kind: "workline", label: "工作台" },
     { kind: "inbox", label: "收件箱", badge: pending },
     { kind: "tasks", label: "任务" },
     { kind: "docs", label: "文档" },
@@ -190,20 +191,23 @@ export function Sidebar({
       </div>
 
       <div className="flex-1 overflow-y-auto px-2 pb-4">
+        <Item active={ws.view.kind === "workline"} onClick={() => ws.setView({ kind: "workline" })}>
+          <span className="mr-1.5 font-mono text-[10.5px] text-ink-3">01</span>工作台
+        </Item>
         <Item active={ws.view.kind === "inbox"} onClick={() => ws.setView({ kind: "inbox" })} badge={pending}>
-          <span className="mr-1.5 font-mono text-[10.5px] text-ink-3">01</span>收件箱
+          <span className="mr-1.5 font-mono text-[10.5px] text-ink-3">02</span>收件箱
         </Item>
         <Item active={ws.view.kind === "tasks"} onClick={() => ws.setView({ kind: "tasks" })} badge={activeTasks}>
-          <span className="mr-1.5 font-mono text-[10.5px] text-ink-3">02</span>任务
+          <span className="mr-1.5 font-mono text-[10.5px] text-ink-3">03</span>任务
         </Item>
         <Item active={ws.view.kind === "docs"} onClick={() => ws.setView({ kind: "docs" })}>
-          <span className="mr-1.5 font-mono text-[10.5px] text-ink-3">03</span>文档
+          <span className="mr-1.5 font-mono text-[10.5px] text-ink-3">04</span>文档
         </Item>
         <Item active={ws.view.kind === "team"} onClick={() => ws.setView({ kind: "team" })}>
-          <span className="mr-1.5 font-mono text-[10.5px] text-ink-3">04</span>团队
+          <span className="mr-1.5 font-mono text-[10.5px] text-ink-3">05</span>团队
         </Item>
         <Item active={ws.view.kind === "usage"} onClick={() => ws.setView({ kind: "usage" })}>
-          <span className="mr-1.5 font-mono text-[10.5px] text-ink-3">05</span>用量
+          <span className="mr-1.5 font-mono text-[10.5px] text-ink-3">06</span>用量
         </Item>
 
         <SectionTitle onAdd={onNewChannel}>频道</SectionTitle>

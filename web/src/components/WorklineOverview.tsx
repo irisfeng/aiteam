@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useWorkspace } from "../store";
 import { API_BASE, api, type ScenarioInfo } from "../api";
-import type { Approval, Task, TaskEvent } from "../types";
+import type { Task, TaskEvent } from "../types";
+import { computeWorkline } from "../lib/workline";
 import type { SettingsTab } from "./Modals";
 import { INTEGRATIONS_UPDATED_EVENT } from "./IntegrationsTabs";
 
@@ -180,11 +181,9 @@ function ReadinessItem({
   );
 }
 
-function approvalKindLabel(kind: Approval["kind"]) {
-  if (kind === "plan") return "计划审批";
-  if (kind === "clarification") return "等待输入";
-  return "风险动作";
-}
+const FALLBACK_SCENARIOS: ScenarioInfo[] = [
+  { id: "helio-core", title: "协作演练", desc: "三步跑通认领、依赖推进、复核和人类关闭。" },
+];
 
 export function WorklineOverview({
   channelId,
@@ -226,9 +225,8 @@ export function WorklineOverview({
   const [linkCheckResults, setLinkCheckResults] = useState<LinkCheckResult[]>([]);
   const [linkCheckProjectId, setLinkCheckProjectId] = useState<string | null>(null);
   const [closingProjectId, setClosingProjectId] = useState<string | null>(null);
-  const [scenarios, setScenarios] = useState<ScenarioInfo[]>([
-    { id: "helio-core", title: "协作演练", desc: "三步跑通认领、依赖推进、复核和人类关闭。" },
-  ]);
+  // null = 场景目录加载中（渲染骨架，避免加载完成前只显示硬编码的单个场景卡）
+  const [scenarios, setScenarios] = useState<ScenarioInfo[] | null>(null);
 
   async function refreshReadiness() {
     const [skillItems, serverItems] = await Promise.all([
@@ -245,10 +243,8 @@ export function WorklineOverview({
 
   useEffect(() => {
     api.listScenarios()
-      .then((items) => {
-        if (items.length > 0) setScenarios(items);
-      })
-      .catch(() => undefined);
+      .then((items) => setScenarios(items.length > 0 ? items : FALLBACK_SCENARIOS))
+      .catch(() => setScenarios(FALLBACK_SCENARIOS));
     void refreshReadiness();
     const onFocus = () => void refreshReadiness();
     const onIntegrationsUpdated = () => void refreshReadiness();
@@ -260,63 +256,22 @@ export function WorklineOverview({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  const scopedTasks = useMemo(
-    () => (channelId ? ws.tasks.filter((t) => t.channel_id === channelId) : ws.tasks),
-    [channelId, ws.tasks],
-  );
+  const wl = computeWorkline({ tasks: ws.tasks, approvals: ws.approvals, channelId, agentById: ws.agentById });
+  const scopedTasks = wl.tasks;
   const taskIds = useMemo(() => new Set(scopedTasks.map((t) => t.id)), [scopedTasks]);
-  const scopedApprovals = ws.approvals.filter((a) => {
-    if (a.status !== "pending") return false;
-    if (!channelId) return true;
-    return a.channel_id === channelId || (a.ref_id ? taskIds.has(a.ref_id) : false);
-  });
+  const scopedApprovals = wl.approvals;
   const events = ws.taskEvents
     .filter((e) => !channelId || (e.task_id && taskIds.has(e.task_id)) || e.channel_id === channelId)
     .slice(-8)
     .reverse();
   const firstByStatus = (status: Task["status"]) => scopedTasks.find((t) => t.status === status);
-  const running = scopedTasks.filter((t) => t.status === "doing");
-  const blocked = scopedTasks.filter((t) => t.status === "blocked");
-  const approvalTaskIds = new Set(scopedApprovals.map((approval) => approval.ref_id).filter(Boolean));
-  const blockedWithoutPendingApproval = blocked.filter((task) => !approvalTaskIds.has(task.id));
+  const { running, blocked, blockedWithoutPendingApproval, review, todo, done, active, unassigned } = wl;
   const inputOrApprovalCount = scopedApprovals.length + blockedWithoutPendingApproval.length;
-  const review = scopedTasks.filter((t) => t.status === "review");
-  const todo = scopedTasks.filter((t) => t.status === "todo");
-  const done = scopedTasks.filter((t) => t.status === "done");
-  const active = scopedTasks.filter((t) => t.status !== "done");
   const claimed = scopedTasks.filter((t) => t.assignee_agent_id);
-  const unassigned = scopedTasks.filter((t) => t.status === "todo" && !t.assignee_agent_id);
-  const attentionItems = [
-    ...scopedApprovals.map((approval) => {
-      const linkedTask = approval.ref_id ? ws.tasks.find((t) => t.id === approval.ref_id) : undefined;
-      return {
-        id: `approval:${approval.id}`,
-        tone: approval.kind === "clarification" ? "block" : "approval",
-        label: approvalKindLabel(approval.kind),
-        title: approval.title,
-        meta: `${ws.agentById(approval.agent_id)?.name ?? "AI 同事"} · ${fmt(approval.created_at)}`,
-        onClick: () => (linkedTask ? onOpenTask(linkedTask) : ws.setView({ kind: "inbox" })),
-      };
-    }),
-    ...blockedWithoutPendingApproval.map((task) => ({
-      id: `blocked:${task.id}`,
-      tone: "block",
-      label: "任务阻塞",
-      title: task.title,
-      meta: task.blocked_approval_id ? "收件箱需要确认后恢复" : "等待补充信息",
-      onClick: () => onOpenTask(task),
-    })),
-    ...review.map((task) => ({
-      id: `review:${task.id}`,
-      tone: "review",
-      label: "待复核",
-      title: task.title,
-      meta: task.reviewer_agent_id
-        ? `${ws.agentById(task.reviewer_agent_id)?.name ?? "复核人"} 负责验收`
-        : "自动复核后等待人类关单",
-      onClick: () => onOpenTask(task),
-    })),
-  ].slice(0, 5);
+  const attentionItems = wl.attention.map((item) => ({
+    ...item,
+    onClick: () => (item.task ? onOpenTask(item.task) : ws.setView({ kind: "inbox" })),
+  }));
   const modelReady = !ws.mockMode;
   const channelReady = ws.channels.some((c) => c.kind === "channel");
   const enabledMcp = mcpServers.filter((s) => s.enabled);
@@ -813,7 +768,11 @@ export function WorklineOverview({
                 {acceptanceButtonLabel}
               </button>
             )}
-            {onStartScenario && scenarios.map((s) => {
+            {onStartScenario && scenarios === null &&
+              [0, 1, 2].map((i) => (
+                <span key={i} className="inline-block h-[34px] w-24 animate-pulse rounded-lg bg-sel" aria-hidden />
+              ))}
+            {onStartScenario && (scenarios ?? []).map((s) => {
               const active = scenarioBusy && activeScenarioId === s.id;
               return (
                 <button

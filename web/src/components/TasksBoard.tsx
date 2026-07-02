@@ -1,10 +1,8 @@
-import { Suspense, lazy, useEffect, useMemo, useState } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
 import { useWorkspace } from "../store";
 import type { Doc, Task } from "../types";
 import { API_BASE } from "../api";
 import { TaskDetailDrawer } from "./TaskDetailDrawer";
-import { WorklineOverview } from "./WorklineOverview";
-import type { SettingsTab } from "./Modals";
 
 const DocViewerModal = lazy(() => import("./DocsView").then((m) => ({ default: m.DocViewerModal })));
 
@@ -16,7 +14,6 @@ const COLUMNS: { key: Task["status"]; label: string }[] = [
   { key: "done", label: "完成" },
 ];
 const COLUMN_LABEL = Object.fromEntries(COLUMNS.map((c) => [c.key, c.label])) as Record<Task["status"], string>;
-const ACCEPTANCE_PROJECT_PREFIX = "闭环验收";
 const PROJECT_STATUS_TONE: Record<Task["status"], string> = {
   todo: "bg-slate-400",
   doing: "bg-accent",
@@ -137,6 +134,15 @@ function TaskCard({ task, onOpenDoc, onOpenTask }: { task: Task; onOpenDoc: (doc
             </span>
           )}
           <span className="ml-auto flex shrink-0 gap-0.5">
+          {task.status === "blocked" && (
+            <button
+              onClick={() => onOpenTask(task)}
+              className="rounded bg-red-50 px-1.5 font-medium text-red-600 hover:bg-red-100 dark:bg-red-950/30 dark:text-red-300 dark:hover:bg-red-950/50"
+              title="打开详情，在「审批与输入」区回应后任务自动恢复"
+            >
+              去处理
+            </button>
+          )}
           {task.status === "doing" && (
             <button
               onClick={() => void fetch(`${API_BASE}/tasks/${task.id}/stop`, { method: "POST" })}
@@ -376,21 +382,15 @@ function ProjectGroup({
 export function TasksBoard({
   deepTaskId,
   onDeepTaskConsumed,
-  onOpenSettings,
 }: {
   deepTaskId?: string | null;
   onDeepTaskConsumed?: () => void;
-  onOpenSettings?: (tab: SettingsTab) => void;
 }) {
   const ws = useWorkspace();
   const [title, setTitle] = useState("");
   const [assignee, setAssignee] = useState("");
   const [openDoc, setOpenDoc] = useState<Doc | null>(null);
   const [openTask, setOpenTask] = useState<Task | null>(null);
-  const [scenarioBusy, setScenarioBusy] = useState(false);
-  const [activeScenarioId, setActiveScenarioId] = useState("");
-  const [scenarioError, setScenarioError] = useState("");
-  const [acceptanceProjectId, setAcceptanceProjectId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!deepTaskId) return;
@@ -405,87 +405,6 @@ export function TasksBoard({
     if (!t) return;
     await ws.createTask({ title: t, assignee_agent_id: assignee || null });
     setTitle("");
-  }
-
-  const latestAcceptanceProject = [...ws.projects]
-    .filter((p) => p.title.startsWith(ACCEPTANCE_PROJECT_PREFIX))
-    .sort((a, b) => {
-      const aOpen = a.status === "done" ? 0 : 1;
-      const bOpen = b.status === "done" ? 0 : 1;
-      return bOpen - aOpen || b.updated_at - a.updated_at;
-    })[0];
-  const acceptanceProject = (acceptanceProjectId ? ws.projects.find((p) => p.id === acceptanceProjectId) : undefined) ?? latestAcceptanceProject;
-  const acceptanceTasks = useMemo(
-    () => (acceptanceProject ? ws.tasks.filter((t) => t.project_id === acceptanceProject.id) : []),
-    [acceptanceProject, ws.tasks],
-  );
-  const acceptanceDelivered = acceptanceTasks.filter((t) => t.status === "review" || t.status === "done").length;
-  const acceptanceDone = acceptanceTasks.filter((t) => t.status === "done").length;
-  const acceptanceRun = acceptanceProject
-    ? {
-        title: acceptanceProject.title,
-        total: acceptanceTasks.length,
-        delivered: acceptanceDelivered,
-        done: acceptanceDone,
-        status: (acceptanceTasks.length > 0 && acceptanceDone === acceptanceTasks.length
-          ? "done"
-          : acceptanceTasks.length > 0 && acceptanceDelivered === acceptanceTasks.length
-            ? "review"
-            : "running") as "running" | "review" | "done",
-      }
-    : null;
-
-  function openAcceptanceReview() {
-    const task = acceptanceTasks.find((t) => t.status === "review") ?? acceptanceTasks.find((t) => t.status === "done") ?? acceptanceTasks[0];
-    if (task) setOpenTask(task);
-  }
-
-  async function closeAcceptanceProject() {
-    if (!acceptanceProject) return;
-    const ids = new Set(acceptanceTasks.map((t) => t.id));
-    const blockedByApproval = ws.approvals.some(
-      (a) => a.status === "pending" && (a.ref_id === acceptanceProject.id || (a.ref_id ? ids.has(a.ref_id) : false)),
-    );
-    if (blockedByApproval) {
-      window.alert("该验收项目还有待处理的审批/输入，请先在收件箱处理后再关闭。");
-      return;
-    }
-    if (!window.confirm(`确认关闭验收项目「${acceptanceProject.title}」？\n这会把本轮验收任务归档为完成。`)) return;
-    await ws.closeProject(acceptanceProject.id);
-  }
-
-  async function runOrOpenAcceptance() {
-    if (acceptanceRun && acceptanceRun.status !== "done") {
-      openAcceptanceReview();
-      return;
-    }
-    await startCoreScenario("helio-core", "acceptance");
-  }
-
-  async function startCoreScenario(id = "helio-core", mode: "normal" | "acceptance" = "normal") {
-    if (scenarioBusy) return;
-    const view = ws.view;
-    const channel =
-      view.kind === "channel"
-        ? ws.channels.find((c) => c.id === view.id)
-        : ws.channels.find((c) => c.kind === "channel") ?? ws.channels[0];
-    if (!channel) return;
-    setScenarioBusy(true);
-    setActiveScenarioId(mode === "acceptance" ? "acceptance" : id);
-    setScenarioError("");
-    try {
-      const result = await ws.startScenario(id, { channel_id: channel.id, ...(mode === "acceptance" ? { acceptance: true } : {}) });
-      if (mode === "acceptance") {
-        setAcceptanceProjectId(result.project.id);
-        const taskToReview = result.tasks.find((t) => t.status === "review") ?? result.tasks.find((t) => t.status === "done") ?? result.tasks[0];
-        if (taskToReview) setOpenTask(taskToReview);
-      }
-    } catch (e: any) {
-      setScenarioError(e?.message ?? "启动失败");
-    } finally {
-      setScenarioBusy(false);
-      setActiveScenarioId("");
-    }
   }
 
   return (
@@ -522,19 +441,6 @@ export function TasksBoard({
           </button>
         </div>
       </header>
-      <WorklineOverview
-        className="border-b border-line px-4 py-3"
-        onOpenTask={setOpenTask}
-        onStartScenario={(id) => void startCoreScenario(id)}
-        onRunAcceptance={() => void runOrOpenAcceptance()}
-        acceptanceRun={acceptanceRun}
-        onOpenAcceptanceReview={openAcceptanceReview}
-        onCloseAcceptanceProject={() => void closeAcceptanceProject()}
-        activeScenarioId={activeScenarioId}
-        scenarioBusy={scenarioBusy}
-        scenarioError={scenarioError}
-        onOpenSettings={onOpenSettings}
-      />
       <div className="grid flex-1 grid-cols-[repeat(5,minmax(190px,1fr))] gap-3 overflow-auto p-4">
         {COLUMNS.map((col) => {
           const tasks = ws.tasks.filter((t) => t.status === col.key);

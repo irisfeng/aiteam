@@ -6,73 +6,39 @@ import { MessageItem } from "./MessageItem";
 import { Composer } from "./Composer";
 import { AgentAvatar } from "./Avatar";
 import { TaskDetailDrawer } from "./TaskDetailDrawer";
+import { computeWorkline } from "../lib/workline";
+import { DOC_KIND_ICON } from "../lib/docMeta";
 
 const DocViewerModal = lazy(() => import("./DocsView").then((m) => ({ default: m.DocViewerModal })));
 
 const STATUS_LABEL: Record<Task["status"], string> = { todo: "待办", doing: "进行", blocked: "等待", review: "待评审", done: "完成" };
-const DOC_ICON: Record<Doc["kind"], string> = {
-  report: "📄",
-  slides: "🖥️",
-  sheet: "📊",
-  html: "🌐",
-  source: "📎",
-  template: "🪄",
-};
 
 /** 频道右侧任务面板（Hive 设计：进度/产出物贴着对话看，不用切视图） */
 function ChannelPanel({ channelId, onOpenDoc, onOpenTask }: { channelId: string; onOpenDoc: (d: Doc) => void; onOpenTask: (t: Task) => void }) {
   const ws = useWorkspace();
-  const tasks = ws.tasks.filter((t) => t.channel_id === channelId);
+  const wl = computeWorkline({ tasks: ws.tasks, approvals: ws.approvals, channelId, agentById: ws.agentById, attentionLimit: 4 });
+  const tasks = wl.tasks;
   const docs = ws.documents.filter((d) => d.channel_id === channelId).slice(0, 10);
   const order: Task["status"][] = ["doing", "blocked", "review", "todo", "done"];
-  const active = tasks.filter((t) => t.status !== "done");
+  const active = wl.active;
   const sorted = [...active].sort((a, b) => order.indexOf(a.status) - order.indexOf(b.status));
   const taskIds = new Set(tasks.map((t) => t.id));
-  const pendingApprovals = ws.approvals.filter((a) => a.status === "pending" && (a.channel_id === channelId || (a.ref_id ? taskIds.has(a.ref_id) : false)));
+  const pendingApprovals = wl.approvals;
   const latestByTask = new Map<string, (typeof ws.taskEvents)[number]>();
   for (const e of ws.taskEvents) {
     if (e.task_id && taskIds.has(e.task_id)) latestByTask.set(e.task_id, e);
   }
-  const doingCount = active.filter((t) => t.status === "doing").length;
-  const blockedCount = active.filter((t) => t.status === "blocked").length;
-  const reviewCount = active.filter((t) => t.status === "review").length;
-  const attentionItems = [
-    ...pendingApprovals.map((approval) => {
-      const linkedTask = approval.ref_id ? tasks.find((t) => t.id === approval.ref_id) : undefined;
-      return {
-        id: `approval:${approval.id}`,
-        label: approval.kind === "clarification" ? "等待输入" : approval.kind === "plan" ? "计划审批" : "风险审批",
-        title: linkedTask?.title ?? approval.title,
-        meta: approval.kind === "clarification" ? "确认后恢复任务" : "处理后 AI 才能继续",
-        tone: approval.kind === "clarification" ? "block" : "approval",
-        onClick: () => (linkedTask ? onOpenTask(linkedTask) : ws.setView({ kind: "inbox" })),
-      };
-    }),
-    ...active
-      .filter((t) => t.status === "blocked" && !pendingApprovals.some((a) => a.ref_id === t.id))
-      .map((task) => ({
-        id: `blocked:${task.id}`,
-        label: "任务阻塞",
-        title: task.title,
-        meta: "等待补充事实、权限或选择",
-        tone: "block",
-        onClick: () => onOpenTask(task),
-      })),
-    ...active
-      .filter((t) => t.status === "review")
-      .map((task) => ({
-        id: `review:${task.id}`,
-        label: "待复核",
-        title: task.title,
-        meta: task.reviewer_agent_id ? `${ws.agentById(task.reviewer_agent_id)?.name ?? "复核人"} 负责验收` : "等待人工确认关闭",
-        tone: "review",
-        onClick: () => onOpenTask(task),
-      })),
-  ].slice(0, 4);
+  const doingCount = wl.running.length;
+  const blockedCount = wl.blocked.length;
+  const reviewCount = wl.review.length;
+  const attentionItems = wl.attention.map((item) => ({
+    ...item,
+    onClick: () => (item.task ? onOpenTask(item.task) : ws.setView({ kind: "inbox" })),
+  }));
   const nextAction =
-    attentionItems[0]?.label === "等待输入" || attentionItems[0]?.label === "任务阻塞"
+    attentionItems[0]?.tone === "block"
       ? "先补输入"
-      : attentionItems[0]?.label === "待复核"
+      : attentionItems[0]?.tone === "review"
         ? "先看交付"
         : pendingApprovals.length > 0
           ? "先批请求"
@@ -193,7 +159,7 @@ function ChannelPanel({ channelId, onOpenDoc, onOpenTask }: { channelId: string;
             onClick={() => onOpenDoc(d)}
             className="flex items-center gap-1.5 rounded-lg border border-line bg-panel px-2 py-1.5 text-left hover:border-accent/40"
           >
-            <span className="text-[12px]">{DOC_ICON[d.kind] ?? "📄"}</span>
+            <span className="text-[12px]">{DOC_KIND_ICON[d.kind] ?? "📄"}</span>
             <span className="min-w-0 flex-1 truncate text-[12px]" title={d.title}>
               {d.title}
             </span>

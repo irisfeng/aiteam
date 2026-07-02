@@ -77,16 +77,16 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
   const taskDetailSource = readFileSync(join(root, "web/src/components/TaskDetailDrawer.tsx"), "utf8");
   const inboxSource = readFileSync(join(root, "web/src/components/InboxView.tsx"), "utf8");
   const modalsSource = readFileSync(join(root, "web/src/components/Modals.tsx"), "utf8");
-  const defaultTasks = /view:\s*\{\s*kind:\s*"tasks"\s*\}/.test(storeSource);
+  const defaultWorkline = /view:\s*\{\s*kind:\s*"workline"\s*\}/.test(storeSource);
   const bootstrapKeepsView = /view:\s*keepValidView\(state\.view,\s*d\.channels\)/.test(storeSource);
   const loadDoesNotForceChannel = !/const first = data\.channels\.find[\s\S]*?openChannel\(first\.id\)/.test(storeSource);
   const onboardingTargetsWorkline =
     onboardingSource.includes("从任务运行线开始") &&
     onboardingSource.includes("onOpenTasks") &&
     !onboardingSource.includes("自主闭环");
-  check("UX1", "首屏体验：默认落任务线，首次引导指向任务运行线而非泛欢迎/自主闭环文案",
-    defaultTasks && bootstrapKeepsView && loadDoesNotForceChannel && onboardingTargetsWorkline,
-    `defaultTasks=${defaultTasks} bootstrapKeepsView=${bootstrapKeepsView} loadNoChannel=${loadDoesNotForceChannel} onboarding=${onboardingTargetsWorkline}`);
+  check("UX1", "首屏体验：默认落工作台（任务运行线），首次引导指向任务运行线而非泛欢迎/自主闭环文案",
+    defaultWorkline && bootstrapKeepsView && loadDoesNotForceChannel && onboardingTargetsWorkline,
+    `defaultWorkline=${defaultWorkline} bootstrapKeepsView=${bootstrapKeepsView} loadNoChannel=${loadDoesNotForceChannel} onboarding=${onboardingTargetsWorkline}`);
   const projectCloseCta =
     worklineSource.includes("closableProject") &&
     worklineSource.includes("确认关闭项目") &&
@@ -95,8 +95,12 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
   check("UX2", "任务运行线：项目全量交付且无待审批时，顶部下一步直接进入项目级人类关单",
     projectCloseCta,
     `projectCloseCta=${projectCloseCta}`);
-  const normalScenarioKeepsWorkline = !/else\s*\{\s*setOpenTask\(result\.tasks\[0\]/.test(tasksBoardSource);
-  check("UX3", "任务运行线：普通场景启动后停留在项目全局视图，不自动弹出单任务抽屉",
+  const worklineViewSource = readFileSync(join(root, "web/src/components/WorklineView.tsx"), "utf8");
+  const normalScenarioKeepsWorkline =
+    worklineViewSource.includes("startCoreScenario") &&
+    !/else\s*\{\s*setOpenTask\(result\.tasks\[0\]/.test(worklineViewSource) &&
+    !/startCoreScenario/.test(tasksBoardSource);
+  check("UX3", "任务运行线：普通场景启动后停留在工作台全局视图，不自动弹出单任务抽屉（场景逻辑单点在 WorklineView）",
     normalScenarioKeepsWorkline,
     `normalScenarioKeepsWorkline=${normalScenarioKeepsWorkline}`);
   const multiProviderLinkCheck =

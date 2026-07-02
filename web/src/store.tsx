@@ -71,7 +71,7 @@ const initial: State = {
   providers: [],
   messages: {},
   statuses: {},
-  view: { kind: "tasks" },
+  view: { kind: "workline" },
 };
 
 function upsertBy<T extends { id: string }>(list: T[], item: T): T[] {
@@ -527,15 +527,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         dispatch({ type: "approval:upsert", approval });
         const fresh = await api.bootstrap();
         dispatch({ type: "bootstrap:merge", data: fresh });
-        if (approval.kind === "clarification" && approve) {
-          for (const delay of [1200, 3500]) {
-            window.setTimeout(() => {
-              void api.bootstrap()
-                .then((later) => dispatch({ type: "bootstrap:merge", data: later }))
-                .catch(() => undefined);
-            }, delay);
-          }
-        }
       },
       refreshWorkspace: async () => {
         const fresh = await api.bootstrap();

@@ -164,6 +164,7 @@ export interface AgentStatus {
 }
 export type View =
   | { kind: "channel"; id: string }
+  | { kind: "workline" }
   | { kind: "tasks" }
   | { kind: "inbox" }
   | { kind: "docs" }
