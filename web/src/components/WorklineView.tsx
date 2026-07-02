@@ -20,6 +20,7 @@ export function WorklineView({ onOpenSettings }: { onOpenSettings?: (tab: Settin
   const [activeScenarioId, setActiveScenarioId] = useState("");
   const [scenarioError, setScenarioError] = useState("");
   const [acceptanceProjectId, setAcceptanceProjectId] = useState<string | null>(null);
+  const [scenarioChannelId, setScenarioChannelId] = useState("");
 
   async function addTask() {
     const t = title.trim();
@@ -27,6 +28,9 @@ export function WorklineView({ onOpenSettings }: { onOpenSettings?: (tab: Settin
     await ws.createTask({ title: t, assignee_agent_id: assignee || null });
     setTitle("");
   }
+
+  const teamChannels = ws.channels.filter((c) => c.kind === "channel");
+  const scenarioChannel = teamChannels.find((c) => c.id === scenarioChannelId) ?? teamChannels[0] ?? ws.channels[0];
 
   const latestAcceptanceProject = [...ws.projects]
     .filter((p) => p.title.startsWith(ACCEPTANCE_PROJECT_PREFIX))
@@ -85,11 +89,7 @@ export function WorklineView({ onOpenSettings }: { onOpenSettings?: (tab: Settin
 
   async function startCoreScenario(id = "helio-core", mode: "normal" | "acceptance" = "normal") {
     if (scenarioBusy) return;
-    const view = ws.view;
-    const channel =
-      view.kind === "channel"
-        ? ws.channels.find((c) => c.id === view.id)
-        : ws.channels.find((c) => c.kind === "channel") ?? ws.channels[0];
+    const channel = scenarioChannel;
     if (!channel) return;
     setScenarioBusy(true);
     setActiveScenarioId(mode === "acceptance" ? "acceptance" : id);
@@ -141,6 +141,19 @@ export function WorklineView({ onOpenSettings }: { onOpenSettings?: (tab: Settin
           >
             新建
           </button>
+          <select
+            value={scenarioChannel?.id ?? ""}
+            onChange={(e) => setScenarioChannelId(e.target.value)}
+            className="min-w-28 flex-1 rounded-lg border border-line bg-panel px-2 py-1.5 text-[13px] text-ink-2 outline-none sm:flex-none"
+            title="核心场景与端到端验收的任务将挂到这个频道"
+          >
+            {teamChannels.length === 0 && <option value="">无团队频道</option>}
+            {teamChannels.map((c) => (
+              <option key={c.id} value={c.id}>
+                场景 → #{c.name}
+              </option>
+            ))}
+          </select>
           <button
             onClick={() => ws.setView({ kind: "tasks" })}
             className="rounded-lg border border-line px-3 py-1.5 text-[13px] text-ink-2 hover:bg-sel hover:text-ink"
