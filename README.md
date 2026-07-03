@@ -66,11 +66,14 @@ AITEAM_SESSION_SECRET="一串足够长的随机字符串" npm start
 ```bash
 npm run desktop          # Electron 壳启动本机 AiTeam
 npm run desktop:smoke    # 验证桌面资源、deep link、通知、文件选择和 server 运行时
-npm run desktop:pack     # 生成未签名的开发者预览包，含 Node sidecar + 服务端生产依赖
+npm run desktop:pack     # 生成未签名的开发者预览包（--dir 产物），含 Node sidecar + 服务端生产依赖
+npm run desktop:dist     # 出 DMG/zip 安装包（mac；win/linux 仍是 --dir 产物），同样未签名
 npm run pack:verify --workspace desktop  # 脱离源码树验证包内运行时
 ```
 
 桌面端当前是 Electron shell，不是最终 C 端发行版；签名/公证、安装器、自动更新和崩溃日志仍是发布前门槛。
+
+除了本机模式（壳内 spawn 打包的 server），桌面端也可**连接远端工作区**：菜单栏或托盘的「连接远端工作区…」填入已部署的 AiTeam 地址（`http(s)://host[:port]`），校验可达后切换，不再在本机起 server；托盘/菜单同一入口下会出现「切回本机工作区」用于切回。模式选择持久化在 userData 下的 `desktop-settings.json`。
 
 ### 首次使用
 

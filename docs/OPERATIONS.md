@@ -88,6 +88,9 @@ npm run pack:verify --workspace desktop  # 将包内 Resources 复制到 /tmp �
 - 全部业务数据在单个 SQLite 文件：**`server/data/aiteam.db`**（可用 `AITEAM_DATA_DIR` 改目录）。
 - 生成图资产：`server/data/assets/`；上传临时件：`server/data/uploads-tmp/`（即用即删，不持久化二进制）。
 - **备份**：停服后复制 `aiteam.db`（+ `assets/`）即可；恢复反之。
+- **凭证密钥**：MCP 的 `auth_token` / env 密钥在库中是 AES-256-GCM 密文，解密密钥在数据目录
+  `credential.key`（首启自动生成，0600；也可用 `AITEAM_CREDENTIAL_KEY` 注入统一密钥）。
+  **迁移/恢复数据库必须连同 `credential.key` 一起**，否则存量 MCP 凭证不可解（需重新录入）。
 - 只读查看：`sqlite3 server/data/aiteam.db`。无「删用户」API，清理测试账号需直接操作 DB（owner 隔离，测试号对正常用户不可见）。
 
 ---
@@ -132,6 +135,8 @@ npm run pack:verify --workspace desktop  # 将包内 Resources 复制到 /tmp �
 | `AITEAM_IMAGES_PER_RUN` | `3` | 单次运行配图张数上限 |
 | `AITEAM_UPLOAD_MAX_BYTES` | `20971520`（20MB） | 上传单文件大小上限 |
 | `AITEAM_SEARCH_DEDUP` | `1`（开） | 跨插件检索去重；`0`=关 |
+| `AITEAM_MCP_STDIO_ALLOW` | 空 | stdio MCP 启动命令白名单扩展（逗号分隔）；默认仅允许 `npx/uvx/uv/node/python/python3/markitdown-mcp` |
+| `AITEAM_CREDENTIAL_KEY` | 空（用 `credential.key` 文件） | 凭证落库加密密钥（32 字节，hex 或 base64）；多实例部署统一注入 |
 
 > 更多业务/治理开关见 GUIDE.md「治理开关（环境变量）」。
 

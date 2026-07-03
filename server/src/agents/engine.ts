@@ -955,6 +955,21 @@ function buildReworkBrief(task: Task, channel: Channel, feedback: string): strin
 // 验收循环：干净上下文的校验者按 rubric 逐条核验（verifier ≠ self-critique）
 // ---------------------------------------------------------------------------
 
+/**
+ * 验收去人设（docs/harness-analysis.html · 校验者去人设）：verify 运行不再使用被选中同事的
+ * 日常人设 system prompt，统一替换为这份固定校验者指令——判准与"谁碰巧当校验者"解耦，
+ * 同一交付物换任何人复核，结论都应可重复。人选仍按交付物类型对口路由（pickVerifier），
+ * 领域敏感度保留在"选谁"，判准统一在"怎么判"。
+ */
+export const VERIFIER_SYSTEM_PROMPT = [
+  `你是一名独立的交付校验者。本次运行中你唯一的职责是：以挑剔的第三方视角，按验收标准逐条核验交付物，并通过 submit_verdict 提交结构化裁决。`,
+  `判准恒定，不受团队氛围与个人风格影响：`,
+  `- 只认可验证的证据：声称的数字要有来源，声称的产出要与实际交付一致；`,
+  `- 不因文风流畅、篇幅可观或态度诚恳加分，不因返工麻烦而放水；`,
+  `- 事实拿不准时倾向 revise，并指出需要补充的证据，而不是善意脑补；`,
+  `- 理由必须具体、可执行：指出哪一条标准、差在哪里、怎么补。`,
+].join("\n");
+
 /** 校验者未产出结构化裁决时的兜底裁决：fail-closed，绝不默认通过（见 docs/harness-analysis.html · QW1）。 */
 export const NO_VERDICT_FALLBACK: { result: "revise"; reasons: string } = {
   result: "revise",
@@ -2083,10 +2098,12 @@ async function llmLoop(
   // 用本次工作焦点（任务简报 / 用户消息）做技能相关性筛选——只注入相关专项方法
   let dynamicCtx = buildDynamicContext(agent, channel, userPrompt);
   if (!rt.webTools) dynamicCtx += `\n\n注意：当前模型通道不支持 web_search/web_fetch 联网调研，依据已有上下文与常识工作，不确定的事实要明确说明未经核实。`;
+  // 验收去人设：verify 运行用固定校验者指令替换同事人设（选人仍对口路由，判准统一不漂移）
+  const personaPrompt = ctx.kind === "verify" ? VERIFIER_SYSTEM_PROMPT : agent.system_prompt;
   const system: Anthropic.TextBlockParam[] = [
     rt.official
-      ? { type: "text", text: agent.system_prompt, cache_control: { type: "ephemeral" } }
-      : { type: "text", text: agent.system_prompt },
+      ? { type: "text", text: personaPrompt, cache_control: { type: "ephemeral" } }
+      : { type: "text", text: personaPrompt },
     { type: "text", text: dynamicCtx + (extraSystem ? `\n\n${extraSystem}` : "") },
   ];
   const messages: Anthropic.MessageParam[] = [{ role: "user", content: userPrompt }];
@@ -2240,13 +2257,16 @@ async function llmLoop(
             result = `⛔ 插件「${server?.name ?? tu.name}」会向外部网络发送数据；当前任务绑定了来源文档或启用了严格网络审批，必须先用 request_approval 说明要外发的查询/内容和目的，经用户批准后再执行。`;
             audit(channel.id, `⛔ ${agent.name} 试图在带来源文档的任务中调用网络插件「${server?.name ?? tu.name}」，已拦截——须走审批门`);
           } else {
-            const sig = SEARCH_DEDUP ? searchQuerySignature(tu.input) : null;
-            if (sig && searchMemo.has(sig)) {
+            const rawSig = SEARCH_DEDUP ? searchQuerySignature(tu.input) : null;
+            // memo 键带 owner 前缀：searchMemo 现在是 run 级私有（天然单租户），但键规则与
+            // mcp.callCache 对齐——将来提为跨 run 共享缓存时不会漏掉租户维度。展示用 rawSig，不外露 owner 主体。
+            const sig = rawSig ? `${currentOwner()}:${rawSig}` : null;
+            if (sig && rawSig && searchMemo.has(sig)) {
               // 同一查询已检索过（可能是别的搜索插件）→ 回上次结果，省去重复计费的一次往返。
               const mcp = tu.name.match(/^mcp__(.+?)__(.+)$/);
-              audit(channel.id, `↩️ ${agent.name} 重复检索「${sig.slice(0, 24)}…」已去重（省 1 次计费，复用上次结果）`);
+              audit(channel.id, `↩️ ${agent.name} 重复检索「${rawSig.slice(0, 24)}…」已去重（省 1 次计费，复用上次结果）`);
               result =
-                `↩️ 本次运行已检索过相同查询「${sig.slice(0, 60)}」，为避免重复计费，直接返回上次结果（如需更多信息请换不同的查询角度，不要对同一问题换搜索插件重复查）：\n\n` +
+                `↩️ 本次运行已检索过相同查询「${rawSig.slice(0, 60)}」，为避免重复计费，直接返回上次结果（如需更多信息请换不同的查询角度，不要对同一问题换搜索插件重复查）：\n\n` +
                 searchMemo.get(sig);
             } else if (mcpCalls >= MCP_CALLS_PER_RUN) {
               result = `⚠️ 本次运行的外部插件调用已达上限（${MCP_CALLS_PER_RUN} 次）。外部检索按次计费，请基于已获得的信息完成工作，不要再尝试调用插件。`;

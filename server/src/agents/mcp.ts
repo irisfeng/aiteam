@@ -2,7 +2,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type Anthropic from "@anthropic-ai/sdk";
+import { basename } from "node:path";
 import { McpServer, listMcpServers } from "../db.js";
+import { currentOwnerOrNull } from "../ownerScope.js";
+import { decryptSecret } from "../secrets.js";
 
 /** 注入工作循环的 MCP 工具数量上限（防上下文膨胀，尤其轻量通道） */
 const MAX_MCP_TOOLS = Number(process.env.AITEAM_MAX_MCP_TOOLS ?? 40);
@@ -32,6 +35,26 @@ function sanitizeName(s: string): string {
   return s.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 24) || "srv";
 }
 
+/**
+ * stdio MCP 启动命令白名单：stdio 插件本质是"以服务进程身份跑任意子进程"，不设白名单就是
+ * 任意命令执行面（VPS 多用户下即提权通道）。默认覆盖 registry 全部预设所需的运行器；
+ * 自部署要跑别的命令用 AITEAM_MCP_STDIO_ALLOW（逗号分隔）扩展，而不是放开校验。
+ * 按 basename 匹配（容许绝对路径如 /usr/bin/python3；Windows 去 .exe），不匹配参数——
+ * 参数注入（如 npx 装任意包）由 safety=exec 审批门兜底，白名单只收窄"能被启动的程序"。
+ */
+const STDIO_ALLOWED_DEFAULT = ["npx", "uvx", "uv", "node", "python", "python3", "markitdown-mcp"];
+export function stdioAllowedCommands(): string[] {
+  const extra = (process.env.AITEAM_MCP_STDIO_ALLOW || "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  return [...new Set([...STDIO_ALLOWED_DEFAULT, ...extra])];
+}
+export function stdioCommandAllowed(command: string): boolean {
+  const base = basename(command.trim()).toLowerCase().replace(/\.exe$/, "");
+  return stdioAllowedCommands().includes(base);
+}
+
 /** 与 mcpToolDefs 注册用同一套名字规则拼完整工具名；调用侧不要自己拼前缀（大小写/分隔符会对不上）。 */
 export function mcpToolName(serverName: string, tool: string): string {
   return `mcp__${sanitizeName(serverName)}__${tool}`;
@@ -40,6 +63,12 @@ export function mcpToolName(serverName: string, tool: string): string {
 async function connect(server: McpServer): Promise<Connection> {
   const client = new Client({ name: "aiteam", version: "1.0.0" });
   if (server.kind === "stdio") {
+    // 二次防御：路由层建档时已校验，但存量行/直接写库的行也必须在启动点被拦下
+    if (!stdioCommandAllowed(server.command)) {
+      throw new Error(
+        `stdio 命令「${server.command}」不在白名单（${stdioAllowedCommands().join("/")}）；如确需可用 AITEAM_MCP_STDIO_ALLOW 扩展`
+      );
+    }
     let args: string[] = [];
     try {
       args = JSON.parse(server.args_json);
@@ -47,7 +76,7 @@ async function connect(server: McpServer): Promise<Connection> {
     // 自定义环境变量（如 BOCHA_API_KEY）：在 SDK 安全默认环境(含 PATH)之上叠加，让需要 env key 的 stdio MCP 可用。
     let envExtra: Record<string, string> = {};
     try {
-      const parsed = JSON.parse(server.env_json || "{}");
+      const parsed = JSON.parse(decryptSecret(server.env_json || "{}") || "{}");
       if (parsed && typeof parsed === "object") {
         for (const [k, v] of Object.entries(parsed)) envExtra[k] = String(v);
       }
@@ -55,9 +84,10 @@ async function connect(server: McpServer): Promise<Connection> {
     const env = { ...getDefaultEnvironment(), ...envExtra };
     await client.connect(new StdioClientTransport({ command: server.command, args, env }));
   } else {
+    const token = decryptSecret(server.auth_token);
     await client.connect(
       new StreamableHTTPClientTransport(new URL(server.url), {
-        requestInit: server.auth_token ? { headers: { Authorization: `Bearer ${server.auth_token}` } } : undefined,
+        requestInit: token ? { headers: { Authorization: `Bearer ${token}` } } : undefined,
       })
     );
   }
@@ -188,8 +218,11 @@ export async function callMcpTool(name: string, input: unknown): Promise<string>
   if (!server) return `错误：MCP server「${serverKey}」不存在或已停用`;
   const conn = await ensureConnection(server);
   if (!conn) return `错误：MCP server「${server.name}」连接失败，请检查配置（设置 → MCP 插件 → 测试）`;
-  const cacheKey = `${name}:${JSON.stringify(input ?? {})}`;
-  const hit = callCache.get(cacheKey);
+  // 缓存是进程级全局，而结果可能含租户私有数据（检索内容/文档转换产物）——key 必须带 owner 前缀，
+  // 否则多用户下 A 的结果会命中给 B。缺 owner 上下文时 fail-closed：不读不写缓存，只走真实调用。
+  const owner = currentOwnerOrNull();
+  const cacheKey = owner ? `${owner}:${name}:${JSON.stringify(input ?? {})}` : null;
+  const hit = cacheKey ? callCache.get(cacheKey) : undefined;
   if (hit && Date.now() - hit.ts < CALL_CACHE_TTL) return hit.text;
   try {
     const result = await withTimeout(
@@ -205,7 +238,7 @@ export async function callMcpTool(name: string, input: unknown): Promise<string>
     }
     const text = parts.join("\n") || "(无输出)";
     const out = (result.isError ? `工具返回错误：${text}` : text).slice(0, TOOL_RESULT_LIMIT);
-    if (!result.isError) {
+    if (!result.isError && cacheKey) {
       if (callCache.size >= 200) callCache.delete(callCache.keys().next().value as string);
       callCache.set(cacheKey, { text: out, ts: Date.now() });
     }

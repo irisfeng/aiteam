@@ -3,20 +3,29 @@ const { spawn } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const http = require("node:http");
+const https = require("node:https");
 const net = require("node:net");
 const path = require("node:path");
 
 let mainWindow = null;
+let connectWindow = null;
 let tray = null;
 let serverProcess = null;
 let baseUrl = null;
+let localBaseUrl = null;
 let keepRunning = true;
 let quitting = false;
+let refreshTrayMenu = () => {};
+// 远端工作区模式的持久化设置，启动时从 desktop-settings.json 加载；默认本机模式。
+let settings = { mode: "local", remoteUrl: "" };
 
 const rootDir = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, "..");
 const serverEntry = path.join(rootDir, "server", "dist", "index.js");
 const preload = path.join(__dirname, "preload.cjs");
+const connectPreload = path.join(__dirname, "connect-preload.cjs");
 const desktopUploadMaxBytes = Number(process.env.AITEAM_UPLOAD_MAX_BYTES || 20 * 1024 * 1024);
+// 远端连通性探测超时：本地起服务很快，远端受公网延迟影响需要更宽松的窗口。
+const remoteProbeTimeoutMs = 15000;
 const bundledNode = process.platform === "win32"
   ? path.join(process.resourcesPath, "node", "node.exe")
   : path.join(process.resourcesPath, "node", "bin", "node");
@@ -47,10 +56,11 @@ function getFreePort() {
 }
 
 function waitFor(url, timeoutMs = 30000) {
+  const client = url.startsWith("https:") ? https : http;
   const start = Date.now();
   return new Promise((resolve, reject) => {
     const tick = () => {
-      const req = http.get(url, (res) => {
+      const req = client.get(url, (res) => {
         res.resume();
         if (res.statusCode && res.statusCode < 500) resolve();
         else retry();
@@ -67,6 +77,57 @@ function waitFor(url, timeoutMs = 30000) {
     };
     tick();
   });
+}
+
+// 远端连通性探测：只返回可达与否，不抛错，调用方按结果决定是否回退本机模式。
+async function probeRemote(url, timeoutMs = remoteProbeTimeoutMs) {
+  try {
+    await waitFor(`${url}/aiteam/`, timeoutMs);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// 只接受 http(s) 且取 origin（丢弃用户误填的路径/查询/尾斜杠），统一以 /aiteam/ 前缀访问。
+function normalizeRemoteUrl(raw) {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  let parsed;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+  return parsed.origin;
+}
+
+function settingsPath() {
+  return path.join(app.getPath("userData"), "desktop-settings.json");
+}
+
+function loadSettings() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(settingsPath(), "utf8"));
+    if (parsed && (parsed.mode === "local" || parsed.mode === "remote")) {
+      return { mode: parsed.mode, remoteUrl: typeof parsed.remoteUrl === "string" ? parsed.remoteUrl : "" };
+    }
+  } catch {
+    /* 首次启动或文件缺失/损坏时退回默认本机模式 */
+  }
+  return { mode: "local", remoteUrl: "" };
+}
+
+function saveSettings(next) {
+  try {
+    const userData = app.getPath("userData");
+    fs.mkdirSync(userData, { recursive: true });
+    fs.writeFileSync(settingsPath(), JSON.stringify(next, null, 2));
+  } catch (error) {
+    console.error(`[aiteam-desktop] failed to save desktop-settings.json: ${error}`);
+  }
 }
 
 function ensureSecret(userData) {
@@ -93,6 +154,11 @@ function resolveServerNode() {
 }
 
 async function startServer() {
+  // 幂等：本机 server 已在跑（例如从远端模式切回本机）时直接复用，不重复 spawn。
+  if (serverProcess && !serverProcess.killed) {
+    baseUrl = localBaseUrl;
+    return;
+  }
   if (!fs.existsSync(serverEntry)) {
     throw new Error("server/dist/index.js not found. Run `npm run build` before starting the desktop shell.");
   }
@@ -119,7 +185,8 @@ async function startServer() {
   serverProcess.on("exit", (code, signal) => {
     if (!quitting) console.error(`[aiteam-desktop] server exited code=${code} signal=${signal}`);
   });
-  baseUrl = `http://127.0.0.1:${port}`;
+  localBaseUrl = `http://127.0.0.1:${port}`;
+  baseUrl = localBaseUrl;
   await waitFor(`${baseUrl}/aiteam/`);
 }
 
@@ -160,12 +227,157 @@ function createWindow(target = "/aiteam/") {
   return mainWindow;
 }
 
+// 切到远端工作区：校验地址、探测健康后才提交状态，避免把窗口指向一个连不上的 baseUrl。
+async function connectToRemote(rawUrl) {
+  const normalized = normalizeRemoteUrl(rawUrl);
+  if (!normalized) return { ok: false, message: "请输入合法的 http(s) 地址，例如 https://your-server:8787" };
+  const reachable = await probeRemote(normalized, 8000);
+  if (!reachable) return { ok: false, message: "无法连接到该地址，请确认服务已启动且网络可达" };
+  settings = { mode: "remote", remoteUrl: normalized };
+  saveSettings(settings);
+  baseUrl = normalized;
+  createMenu();
+  refreshTrayMenu();
+  createWindow();
+  return { ok: true };
+}
+
+// 切回本机工作区：本地 server 未启动则先启动（startServer 对已运行的情况是幂等的）。
+async function switchToLocal() {
+  try {
+    await startServer();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    dialog.showErrorBox("启动本机服务失败", message);
+    return { ok: false, message };
+  }
+  settings = { mode: "local", remoteUrl: settings.remoteUrl };
+  saveSettings(settings);
+  createMenu();
+  refreshTrayMenu();
+  createWindow();
+  return { ok: true };
+}
+
+// 「连接远端工作区」窗口内容：以 data: URL 加载的内联表单，不接触磁盘/文件协议，避免额外的打包资源。
+const connectWindowHtml = `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; margin: 0; padding: 20px; background: #f8faf7; color: #111827; }
+  h1 { font-size: 15px; margin: 0 0 12px; }
+  p.status { font-size: 12px; color: #475569; margin: 0 0 16px; word-break: break-all; }
+  label { display: block; font-size: 12px; margin-bottom: 6px; color: #334155; }
+  input[type=text] { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; margin-bottom: 10px; }
+  .row { display: flex; gap: 8px; margin-top: 12px; }
+  button { flex: 1; padding: 8px 10px; border-radius: 6px; border: 1px solid #cbd5e1; background: #fff; font-size: 13px; cursor: pointer; }
+  button.primary { background: #111827; color: #fff; border-color: #111827; }
+  button:disabled { opacity: 0.6; cursor: default; }
+  .error { color: #dc2626; font-size: 12px; min-height: 16px; margin-top: 8px; }
+</style>
+</head>
+<body>
+  <h1>连接远端工作区</h1>
+  <p class="status" id="status">正在读取当前状态…</p>
+  <label for="url">远端地址（http/https，含端口）</label>
+  <input type="text" id="url" placeholder="https://your-vps:8787" />
+  <div class="error" id="error"></div>
+  <div class="row">
+    <button id="cancel">取消</button>
+    <button id="local" style="display:none">切回本机工作区</button>
+    <button id="submit" class="primary">连接</button>
+  </div>
+  <script>
+    var statusEl = document.getElementById("status");
+    var urlInput = document.getElementById("url");
+    var errorEl = document.getElementById("error");
+    var submitBtn = document.getElementById("submit");
+    var cancelBtn = document.getElementById("cancel");
+    var localBtn = document.getElementById("local");
+
+    function setBusy(busy) {
+      submitBtn.disabled = busy;
+      localBtn.disabled = busy;
+      submitBtn.textContent = busy ? "连接中…" : "连接";
+    }
+
+    window.aiteamConnect.getState().then(function (state) {
+      statusEl.textContent = "当前模式：" + (state.mode === "remote" ? "远端 (" + state.remoteUrl + ")" : "本机");
+      if (state.remoteUrl) urlInput.value = state.remoteUrl;
+      if (state.mode === "remote") localBtn.style.display = "block";
+    });
+
+    cancelBtn.addEventListener("click", function () {
+      window.close();
+    });
+
+    localBtn.addEventListener("click", function () {
+      setBusy(true);
+      errorEl.textContent = "";
+      window.aiteamConnect.switchLocal().then(function (result) {
+        setBusy(false);
+        if (result && result.ok) window.close();
+        else errorEl.textContent = (result && result.message) || "切换失败";
+      });
+    });
+
+    submitBtn.addEventListener("click", function () {
+      var value = urlInput.value.trim();
+      if (!value) {
+        errorEl.textContent = "请输入远端地址";
+        return;
+      }
+      setBusy(true);
+      errorEl.textContent = "";
+      window.aiteamConnect.setRemote(value).then(function (result) {
+        setBusy(false);
+        if (result && result.ok) window.close();
+        else errorEl.textContent = (result && result.message) || "连接失败";
+      });
+    });
+  </script>
+</body>
+</html>`;
+
+function openConnectWindow() {
+  if (connectWindow) {
+    connectWindow.show();
+    connectWindow.focus();
+    return;
+  }
+  connectWindow = new BrowserWindow({
+    width: 460,
+    height: 320,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    parent: mainWindow ?? undefined,
+    title: "连接远端工作区",
+    webPreferences: {
+      preload: connectPreload,
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  connectWindow.setMenuBarVisibility(false);
+  connectWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(connectWindowHtml)}`);
+  connectWindow.on("closed", () => {
+    connectWindow = null;
+  });
+}
+
 function createMenu() {
+  const remoteActive = settings.mode === "remote";
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     {
       label: "AiTeam",
       submenu: [
         { label: "显示 AiTeam", click: () => createWindow() },
+        { type: "separator" },
+        { label: "连接远端工作区…", click: () => openConnectWindow() },
+        ...(remoteActive ? [{ label: "切回本机工作区", click: () => switchToLocal() }] : []),
         { type: "separator" },
         {
           label: "关闭窗口后继续运行",
@@ -196,21 +408,27 @@ function createMenu() {
 function createTray() {
   tray = new Tray(iconImage());
   tray.setToolTip("AiTeam");
-  const update = () => tray.setContextMenu(Menu.buildFromTemplate([
-    { label: "打开 AiTeam", click: () => createWindow() },
-    {
-      label: "关闭窗口后继续运行",
-      type: "checkbox",
-      checked: keepRunning,
-      click: (item) => {
-        keepRunning = item.checked;
-        update();
+  const update = () => {
+    const remoteActive = settings.mode === "remote";
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: "打开 AiTeam", click: () => createWindow() },
+      { label: "连接远端工作区…", click: () => openConnectWindow() },
+      ...(remoteActive ? [{ label: "切回本机工作区", click: () => switchToLocal() }] : []),
+      {
+        label: "关闭窗口后继续运行",
+        type: "checkbox",
+        checked: keepRunning,
+        click: (item) => {
+          keepRunning = item.checked;
+          update();
+        },
       },
-    },
-    { type: "separator" },
-    { label: "退出", click: () => app.quit() },
-  ]));
+      { type: "separator" },
+      { label: "退出", click: () => app.quit() },
+    ]));
+  };
   update();
+  refreshTrayMenu = update;
   tray.on("click", () => createWindow());
 }
 
@@ -282,6 +500,10 @@ ipcMain.handle("pick-file", async (_event, payload) => {
   };
 });
 
+ipcMain.handle("get-connection-state", () => ({ mode: settings.mode, remoteUrl: settings.remoteUrl }));
+ipcMain.handle("set-remote", (_event, rawUrl) => connectToRemote(rawUrl));
+ipcMain.handle("switch-local", () => switchToLocal());
+
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   // app.quit() 是异步的：不加 else 守卫，输家实例仍会注册 whenReady 并再起一个 server 子进程。
@@ -303,7 +525,24 @@ if (!gotLock) {
     } catch {
       /* protocol registration is best-effort */
     }
-    await startServer();
+    settings = loadSettings();
+    if (settings.mode === "remote" && settings.remoteUrl) {
+      // 远端模式启动不 spawn 本机 server、不生成本机 session secret；探测失败才回退本机模式。
+      const reachable = await probeRemote(settings.remoteUrl);
+      if (reachable) {
+        baseUrl = settings.remoteUrl;
+      } else {
+        dialog.showErrorBox(
+          "无法连接远端工作区",
+          `无法连接到 ${settings.remoteUrl}，已自动切换到本机工作区。可通过菜单「连接远端工作区…」重试。`,
+        );
+        settings = { mode: "local", remoteUrl: settings.remoteUrl };
+        saveSettings(settings);
+        await startServer();
+      }
+    } else {
+      await startServer();
+    }
     createMenu();
     createTray();
     createWindow();
