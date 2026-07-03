@@ -55,7 +55,7 @@ for (const [label, source, needle] of [
   ["desktop packaged node sidecar", builder, "to: node"],
   ["desktop packaged web runtime", builder, "from: .runtime/web"],
   ["desktop runtime copies node sidecar", prepareRuntime, "copyFileSync(nodeBinary, runtimeNodeBin)"],
-  ["desktop runtime installs production deps", prepareRuntime, "npm\", [\"install\", \"--omit=dev\""],
+  ["desktop runtime installs production deps", prepareRuntime, "npmCmd, [\"install\", \"--omit=dev\""],
   ["desktop runtime verifies sqlite native module", prepareRuntime, "require('better-sqlite3')"],
   ["desktop package verifier isolates resources", verifyPackagedRuntime, "aiteam-packaged-resources-"],
   ["desktop package verifier uses sidecar node", verifyPackagedRuntime, "spawn(nodeBinary, [serverEntry]"],
