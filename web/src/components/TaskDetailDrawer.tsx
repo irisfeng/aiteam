@@ -145,6 +145,9 @@ export function TaskDetailDrawer({
 
   useEffect(() => {
     let alive = true;
+    // 抽屉切换任务时不卸载：先清上一个任务的裁决链，避免请求返回前闪现旧数据
+    setVerdicts([]);
+    setExpandedVerdicts({});
     api.taskVerdicts(task.id).then((v) => alive && setVerdicts(v)).catch(() => undefined);
     return () => {
       alive = false;
