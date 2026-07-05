@@ -128,6 +128,7 @@ npm run pack:verify --workspace desktop  # 将包内 Resources 复制到 /tmp �
 | `AITEAM_ALLOW_SIGNUP` | `1`（开） | 公开注册开关；`0`=关 |
 | `AITEAM_ADMIN_EMAILS` | 空 | 逗号分隔的 admin 邮箱白名单 |
 | `AITEAM_DAILY_TOKEN_BUDGET` | `0`（不限） | 每日 token 预算，`>0` 启用 |
+| `AITEAM_TASK_TOKEN_BUDGET` | `0`（不限） | 单任务默认预算（加权计费 token）；触线任务自动暂停并开审批，批准后追加预算续跑 |
 | `TASK_MAX_REVISIONS` | `1` | 验收返工上限 |
 | `AGENT_CHAIN_DEPTH` | `2` | AI 互相 @ 接力的链深上限（防雪崩） |
 | `AITEAM_MCP_CALLS_PER_RUN` | `5` | 单次运行 MCP 调用上限 |

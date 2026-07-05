@@ -722,6 +722,54 @@ check(
   check("SRC1", "定向润色：source_doc_ids 把来源全文+受限改写框架注入工作简报，无来源不触发", ok, `len=${brief.length}`);
 }
 
+// QC1 D1 裁决落表：verdict 链可回放（revise→pass），质量汇总能区分一次通过/返工
+{
+  const t = db.createTask({ channel_id: ch.id, title: "质量落表任务", assignee_agent_id: eng.id, created_by: pm.id });
+  db.createVerdict({ task_id: t.id, worker_agent_id: eng.id, verifier_agent_id: pm.id, attempt: 0, result: "revise", reasons: "关键数字无来源", source: "auto" });
+  db.createVerdict({ task_id: t.id, worker_agent_id: eng.id, verifier_agent_id: pm.id, attempt: 1, result: "pass", reasons: "已补来源", source: "auto" });
+  db.updateTask(t.id, { status: "review" });
+  const chain = db.listVerdictsForTask(t.id);
+  const q = db.qualitySummary();
+  const mine = q.agents.find((a) => a.agent_id === eng.id);
+  const ok =
+    chain.length === 2 && chain[0].result === "revise" && chain[1].result === "pass" &&
+    Boolean(mine) && mine.tasks >= 1 && mine.revises >= 1 && mine.first_pass === 0 && // attempt0=revise 不算一次通过
+    q.coverage.delivered >= 1 && q.coverage.verified >= 1 &&
+    q.recent_revises.some((r) => r.task_id === t.id && r.reasons.includes("无来源"));
+  check("QC1", "D1 裁决落表：verdict 链回放 + 质量汇总（一次通过率/返工/覆盖率）", ok,
+    `chain=${chain.map((v) => v.result).join("→")} coverage=${q.coverage.verified}/${q.coverage.delivered}`);
+}
+
+// QC2 D2 任务级用量累计：跨多次运行叠加、billable 加权口径、进入同档估价样本
+{
+  const t = db.createTask({ channel_id: ch.id, title: "用量累计任务", assignee_agent_id: eng.id, created_by: pm.id });
+  db.addTaskUsage(t.id, { input_tokens: 1000, output_tokens: 500, cache_read_tokens: 2000, cache_creation_tokens: 400 });
+  db.addTaskUsage(t.id, { input_tokens: 100, output_tokens: 50, cache_read_tokens: 0, cache_creation_tokens: 0 });
+  const spent = db.taskSpentBillable(db.getTask(t.id));
+  // billable = 1100 + 550 + 400*1.25 + 2000*0.1 = 2350（与 readUsage 计费权重同口径）
+  db.updateTask(t.id, { status: "review" });
+  const est = db.estimateTaskBillable("standard");
+  check("QC2", "D2 用量累计：多次运行叠加 + billable 加权 + 同档历史估价（中位数）",
+    spent === 2350 && est === 2350, `spent=${spent} est=${est}`);
+}
+
+// QC3 D2 预算护栏：超支暂停（blocked + budget 审批）→ 批准恢复（todo + 预算=消耗+追加周期）
+{
+  const t = db.createTask({ channel_id: ch.id, title: "预算护栏任务", assignee_agent_id: eng.id, created_by: pm.id, budget_billable: 100 });
+  db.addTaskUsage(t.id, { input_tokens: 90, output_tokens: 30, cache_read_tokens: 0, cache_creation_tokens: 0 });
+  const spent = db.taskSpentBillable(db.getTask(t.id)); // 120 ≥ 100 触线
+  const { approvalId } = engine.requestBudgetPauseForTask(eng, db.getTask(t.id), spent, 100);
+  const paused = db.getTask(t.id);
+  const approval = db.getApproval(approvalId);
+  const pausedOk = paused.status === "blocked" && paused.blocked_approval_id === approvalId && approval.kind === "budget";
+  db.resolveApproval(approvalId, true);
+  engine.onBudgetResolved(db.getApproval(approvalId), true);
+  const resumed = db.getTask(t.id);
+  check("QC3", "D2 预算护栏：超支暂停开 budget 审批，批准后恢复且新预算=消耗+追加",
+    pausedOk && resumed.status === "todo" && resumed.blocked_approval_id === null && resumed.budget_billable === spent + 100,
+    `spent=${spent} paused=${pausedOk} resumedBudget=${resumed.budget_billable}`);
+}
+
 // ---------------------------------------------------------------------------
 // Phase 2：拉起服务，走 HTTP API（聊天/引用/文档/技能/MCP/用量/导出/模板/频道）
 // ---------------------------------------------------------------------------
@@ -938,6 +986,20 @@ try {
     check("HC3B", "复核人责任链：创建/修改/清空 reviewer 都写结构化 verification 事件",
       ok,
       `events=${events.map((e) => e.type).join(",")} summaries=${verificationSummaries.join(" | ")}`);
+  }
+
+  // QC4 D1 人工退回落表：POST /tasks/:id/revise 写 source=human 的 verdict；HTTP 读侧（verdicts/quality）可见
+  {
+    const t = db.createTask({ channel_id: ch.id, title: "QC4-人工退回落表", assignee_agent_id: eng.id, created_by: pm.id });
+    db.updateTask(t.id, { status: "review" });
+    const revise = await J(`/tasks/${t.id}/revise`, { method: "POST", body: JSON.stringify({ reason: "结论缺依据，需补引用" }) });
+    const chain = (await J(`/tasks/${t.id}/verdicts`)).body;
+    const quality = (await J(`/quality`)).body;
+    const humanRow = Array.isArray(chain) && chain.find((v) => v.source === "human");
+    check("QC4", "D1 人工退回：revise 路由落 human verdict + /verdicts 与 /quality 读侧可见",
+      revise.ok && Boolean(humanRow) && humanRow.reasons.includes("缺依据") &&
+      Array.isArray(quality.agents) && quality.recent_revises.some((r) => r.task_id === t.id),
+      `verdicts=${Array.isArray(chain) ? chain.length : "?"} human=${Boolean(humanRow)}`);
   }
 
   // HC4 Helio-style 全链路：频道里的多角色项目 → claim → clarification → 用户确认恢复 → reviewer 退回一次 → 返工再交付 → Lead 汇总 → 人类关闭

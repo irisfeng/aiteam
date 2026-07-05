@@ -186,11 +186,32 @@ addColumnIfMissing("tasks", "source_doc_ids", "source_doc_ids TEXT NOT NULL DEFA
 addColumnIfMissing("tasks", "reviewer_agent_id", "reviewer_agent_id TEXT");
 addColumnIfMissing("tasks", "blocked_approval_id", "blocked_approval_id TEXT");
 addColumnIfMissing("providers", "is_strong", "is_strong INTEGER NOT NULL DEFAULT 0");
+// D2 成本可预测性：任务级用量累计（跨返工/验收不清零）+ 预算护栏 + 开工估价
+addColumnIfMissing("tasks", "usage_json", "usage_json TEXT NOT NULL DEFAULT '{}'");           // 累计 {input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens}
+addColumnIfMissing("tasks", "budget_billable", "budget_billable INTEGER NOT NULL DEFAULT 0"); // 0=不设上限（可被全局 AITEAM_TASK_TOKEN_BUDGET 兜底）
+addColumnIfMissing("tasks", "estimate_billable", "estimate_billable INTEGER NOT NULL DEFAULT 0"); // 开工估价（按历史同档任务中位数）
 addColumnIfMissing("providers", "price_input_per_million", "price_input_per_million REAL NOT NULL DEFAULT 0");
 addColumnIfMissing("providers", "price_output_per_million", "price_output_per_million REAL NOT NULL DEFAULT 0");
 addColumnIfMissing("providers", "price_currency", "price_currency TEXT NOT NULL DEFAULT 'USD'");
 db.exec(`CREATE INDEX IF NOT EXISTS idx_task_events_task ON task_events(owner_id, task_id, created_at)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_task_events_owner ON task_events(owner_id, created_at)`);
+// D1 质量闭环落表：每次验收裁决一行（此前 verdict 只散落在频道消息流里，无法做质量度量）
+db.exec(`CREATE TABLE IF NOT EXISTS verdicts (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL DEFAULT '',
+  task_id TEXT NOT NULL,
+  project_id TEXT,
+  doc_id TEXT,
+  verifier_agent_id TEXT,
+  worker_agent_id TEXT,
+  attempt INTEGER NOT NULL DEFAULT 0,
+  result TEXT NOT NULL,
+  reasons TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT 'auto',
+  created_at INTEGER NOT NULL
+)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_verdicts_task ON verdicts(owner_id, task_id, created_at)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_verdicts_owner ON verdicts(owner_id, created_at)`);
 // 旧库迁移：早期 agents 是全局 UNIQUE(name)；多用户化后应为 UNIQUE(owner_id,name)。
 // CREATE TABLE IF NOT EXISTS 不会替换已存在表的约束 → 重建表，否则新用户 seed 撞全局唯一名导致 bootstrap 崩。
 (function migrateAgentsUnique() {
@@ -379,6 +400,12 @@ export interface Task {
   source_doc_ids: string;
   project_id: string | null;
   revision_count: number;
+  /** 累计用量 JSON（工作+返工+验收全算入本任务，跨返工不清零）：{input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens} */
+  usage_json: string;
+  /** 任务级预算（billable 加权 token）；0 = 不设，回退全局 AITEAM_TASK_TOKEN_BUDGET（也为 0 则不限） */
+  budget_billable: number;
+  /** 开工时按历史同档任务中位数写入的估价（billable）；0 = 无历史可估 */
+  estimate_billable: number;
   created_at: number;
   updated_at: number;
 }
@@ -404,9 +431,9 @@ export interface Approval {
   agent_id: string;
   title: string;
   payload: string;
-  /** action = 高风险动作审批；plan = 项目计划把关；clarification = 任务阻塞后向用户要输入 */
-  kind: "action" | "plan" | "clarification";
-  /** plan 关联 project id；clarification 关联 task id；action 可关联工具/任务 id */
+  /** action = 高风险动作审批；plan = 项目计划把关；clarification = 任务阻塞后向用户要输入；budget = 任务超预算暂停，批准即追加预算继续 */
+  kind: "action" | "plan" | "clarification" | "budget";
+  /** plan 关联 project id；clarification/budget 关联 task id；action 可关联工具/任务 id */
   ref_id: string | null;
   status: "pending" | "approved" | "rejected";
   created_at: number;
@@ -899,6 +926,105 @@ export function readUsage(json: string | null): {
   return { input, output, cacheRead, cacheCreation, promptTotal, billable };
 }
 
+// ---- verdicts（D1 质量闭环落表）----
+export interface Verdict {
+  id: string;
+  owner_id: string;
+  task_id: string;
+  project_id: string | null;
+  doc_id: string | null;
+  verifier_agent_id: string | null;
+  worker_agent_id: string | null;
+  /** 第几轮交付的裁决（0 = 首次交付） */
+  attempt: number;
+  result: "pass" | "revise";
+  reasons: string;
+  /** auto = 机器验收；solo = 无他人时的自检；fallback = 未提交结构化裁决的兜底 revise；human = 人工复核退回 */
+  source: "auto" | "solo" | "fallback" | "human";
+  created_at: number;
+}
+export function createVerdict(v: {
+  task_id: string;
+  project_id?: string | null;
+  doc_id?: string | null;
+  verifier_agent_id?: string | null;
+  worker_agent_id?: string | null;
+  attempt?: number;
+  result: Verdict["result"];
+  reasons?: string;
+  source?: Verdict["source"];
+}): Verdict {
+  const row: Verdict = {
+    id: nanoid(10),
+    owner_id: currentOwner(),
+    task_id: v.task_id,
+    project_id: v.project_id ?? null,
+    doc_id: v.doc_id ?? null,
+    verifier_agent_id: v.verifier_agent_id ?? null,
+    worker_agent_id: v.worker_agent_id ?? null,
+    attempt: v.attempt ?? 0,
+    result: v.result,
+    reasons: (v.reasons ?? "").slice(0, 4000),
+    source: v.source ?? "auto",
+    created_at: now(),
+  };
+  db.prepare(
+    "INSERT INTO verdicts (id, owner_id, task_id, project_id, doc_id, verifier_agent_id, worker_agent_id, attempt, result, reasons, source, created_at) VALUES (@id, @owner_id, @task_id, @project_id, @doc_id, @verifier_agent_id, @worker_agent_id, @attempt, @result, @reasons, @source, @created_at)"
+  ).run(row);
+  return row;
+}
+export function listVerdictsForTask(taskId: string): Verdict[] {
+  return db
+    .prepare("SELECT * FROM verdicts WHERE owner_id = ? AND task_id = ? ORDER BY created_at ASC, rowid ASC")
+    .all(currentOwner(), taskId) as Verdict[];
+}
+/**
+ * 质量度量汇总（D1 面板数据源）：
+ * - 按负责人聚合：一次通过率（attempt=0 即 pass 的任务占比）、返工数、参与任务数；
+ * - 验收覆盖率：已交付任务中有 ≥1 条裁决记录的占比（衡量质量闸是否被绕过）；
+ * - 近期 revise 理由：给人看返工都因为什么（面板原样展示，不做聚类）。
+ */
+export function qualitySummary(): {
+  agents: { agent_id: string; tasks: number; first_pass: number; revises: number }[];
+  coverage: { delivered: number; verified: number };
+  recent_revises: { task_id: string; reasons: string; source: string; created_at: number }[];
+} {
+  const owner = currentOwner();
+  const rows = db
+    .prepare("SELECT task_id, worker_agent_id, attempt, result, reasons, source, created_at FROM verdicts WHERE owner_id = ? ORDER BY created_at ASC")
+    .all(owner) as Pick<Verdict, "task_id" | "worker_agent_id" | "attempt" | "result" | "reasons" | "source" | "created_at">[];
+  const byAgent = new Map<string, { tasks: Set<string>; firstPass: Set<string>; revises: number }>();
+  for (const r of rows) {
+    const key = r.worker_agent_id ?? "unknown";
+    const s = byAgent.get(key) ?? { tasks: new Set(), firstPass: new Set(), revises: 0 };
+    s.tasks.add(r.task_id);
+    if (r.attempt === 0 && r.result === "pass") s.firstPass.add(r.task_id);
+    if (r.result === "revise") s.revises++;
+    byAgent.set(key, s);
+  }
+  const delivered = (db
+    .prepare("SELECT COUNT(*) AS n FROM tasks WHERE owner_id = ? AND status IN ('review','done')")
+    .get(owner) as { n: number }).n;
+  const verified = (db
+    .prepare("SELECT COUNT(DISTINCT t.id) AS n FROM tasks t JOIN verdicts v ON v.task_id = t.id AND v.owner_id = t.owner_id WHERE t.owner_id = ? AND t.status IN ('review','done')")
+    .get(owner) as { n: number }).n;
+  const recentRevises = rows
+    .filter((r) => r.result === "revise" && r.reasons)
+    .slice(-20)
+    .reverse()
+    .map((r) => ({ task_id: r.task_id, reasons: r.reasons.slice(0, 500), source: r.source, created_at: r.created_at }));
+  return {
+    agents: [...byAgent.entries()].map(([agent_id, s]) => ({
+      agent_id,
+      tasks: s.tasks.size,
+      first_pass: s.firstPass.size,
+      revises: s.revises,
+    })),
+    coverage: { delivered, verified },
+    recent_revises: recentRevises,
+  };
+}
+
 export function usageDaily(days = 14): { date: string; input: number; output: number }[] {
   const since = Date.now() - days * 86400_000;
   const rows = db
@@ -983,6 +1109,7 @@ export function createTask(t: {
   model_tier?: Task["model_tier"];
   source_doc_ids?: string[];
   project_id?: string | null;
+  budget_billable?: number;
 }): Task {
   const task: Task = {
     id: nanoid(10),
@@ -1001,11 +1128,14 @@ export function createTask(t: {
     source_doc_ids: JSON.stringify(t.source_doc_ids ?? []),
     project_id: t.project_id ?? null,
     revision_count: 0,
+    usage_json: "{}",
+    budget_billable: Math.max(0, Math.round(t.budget_billable ?? 0)),
+    estimate_billable: 0,
     created_at: now(),
     updated_at: now(),
   };
   db.prepare(
-    "INSERT INTO tasks (id, owner_id, channel_id, title, description, status, assignee_agent_id, reviewer_agent_id, blocked_approval_id, created_by, acceptance_criteria, depends_on, model_tier, source_doc_ids, project_id, revision_count, created_at, updated_at) VALUES (@id, @owner_id, @channel_id, @title, @description, @status, @assignee_agent_id, @reviewer_agent_id, @blocked_approval_id, @created_by, @acceptance_criteria, @depends_on, @model_tier, @source_doc_ids, @project_id, @revision_count, @created_at, @updated_at)"
+    "INSERT INTO tasks (id, owner_id, channel_id, title, description, status, assignee_agent_id, reviewer_agent_id, blocked_approval_id, created_by, acceptance_criteria, depends_on, model_tier, source_doc_ids, project_id, revision_count, usage_json, budget_billable, estimate_billable, created_at, updated_at) VALUES (@id, @owner_id, @channel_id, @title, @description, @status, @assignee_agent_id, @reviewer_agent_id, @blocked_approval_id, @created_by, @acceptance_criteria, @depends_on, @model_tier, @source_doc_ids, @project_id, @revision_count, @usage_json, @budget_billable, @estimate_billable, @created_at, @updated_at)"
   ).run(task);
   return task;
 }
@@ -1023,6 +1153,8 @@ export function updateTask(
       | "channel_id"
       | "acceptance_criteria"
       | "revision_count"
+      | "budget_billable"
+      | "estimate_billable"
     >
   >
 ): Task | undefined {
@@ -1030,10 +1162,45 @@ export function updateTask(
   if (!cur) return undefined;
   const next: Task = { ...cur, ...fields, updated_at: now() };
   db.prepare(
-    "UPDATE tasks SET title = @title, description = @description, status = @status, assignee_agent_id = @assignee_agent_id, reviewer_agent_id = @reviewer_agent_id, blocked_approval_id = @blocked_approval_id, channel_id = @channel_id, acceptance_criteria = @acceptance_criteria, revision_count = @revision_count, updated_at = @updated_at WHERE id = @id"
+    "UPDATE tasks SET title = @title, description = @description, status = @status, assignee_agent_id = @assignee_agent_id, reviewer_agent_id = @reviewer_agent_id, blocked_approval_id = @blocked_approval_id, channel_id = @channel_id, acceptance_criteria = @acceptance_criteria, revision_count = @revision_count, budget_billable = @budget_billable, estimate_billable = @estimate_billable, updated_at = @updated_at WHERE id = @id"
   ).run(next);
   return next;
 }
+/** 任务级用量累计：每次 streamRun（工作/返工/验收）结束时叠加。跨返工不清零——预算护栏与成本展示都以此为准。 */
+export function addTaskUsage(
+  taskId: string,
+  u: { input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_creation_tokens: number }
+): Task | undefined {
+  const cur = getTask(taskId);
+  if (!cur) return undefined;
+  const acc = readUsage(cur.usage_json);
+  const merged = JSON.stringify({
+    input_tokens: acc.input + (u.input_tokens || 0),
+    output_tokens: acc.output + (u.output_tokens || 0),
+    cache_read_tokens: acc.cacheRead + (u.cache_read_tokens || 0),
+    cache_creation_tokens: acc.cacheCreation + (u.cache_creation_tokens || 0),
+  });
+  db.prepare("UPDATE tasks SET usage_json = ?, updated_at = ? WHERE id = ? AND owner_id = ?").run(merged, now(), taskId, cur.owner_id);
+  return getTask(taskId);
+}
+
+/** 任务已消耗的加权计费 token（预算/估价的统一口径）。 */
+export function taskSpentBillable(task: Task): number {
+  return readUsage(task.usage_json).billable;
+}
+
+/** 开工估价：最近 20 个已交付（review/done）同档任务实际消耗的中位数；无历史返 0（不硬编造）。 */
+export function estimateTaskBillable(tier: Task["model_tier"]): number {
+  const rows = db
+    .prepare(
+      "SELECT usage_json FROM tasks WHERE owner_id = ? AND model_tier = ? AND status IN ('review','done') AND usage_json != '{}' ORDER BY updated_at DESC LIMIT 20"
+    )
+    .all(currentOwner(), tier) as { usage_json: string }[];
+  const spent = rows.map((r) => readUsage(r.usage_json).billable).filter((b) => b > 0).sort((a, b) => a - b);
+  if (spent.length === 0) return 0;
+  return spent[Math.floor(spent.length / 2)];
+}
+
 export function taskDependsOn(task: Task): string[] {
   try {
     const arr = JSON.parse(task.depends_on);

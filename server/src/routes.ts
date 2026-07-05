@@ -46,6 +46,9 @@ import {
   resolveApproval,
   updateApprovalPayload,
   updateTask,
+  createVerdict,
+  listVerdictsForTask,
+  qualitySummary,
 } from "./db.js";
 import { broadcast } from "./bus.js";
 import { requireAdmin, type AuthedRequest } from "./auth.js";
@@ -81,6 +84,7 @@ import { DEFAULT_IMAGE_BASE_URL, generateImageBytes } from "./agents/images.js";
 import {
   isMock,
   onMessage,
+  onBudgetResolved,
   onClarificationResolved,
   onPlanResolved,
   onTaskAssigned,
@@ -835,8 +839,16 @@ api.get("/tasks/:id/events", (req, res) => {
   res.json(listTaskEvents(task.id));
 });
 
+// D1 质量闭环落表的读侧：单任务裁决链 + 工作区质量汇总（面板数据源）
+api.get("/tasks/:id/verdicts", (req, res) => {
+  const task = getTask(req.params.id);
+  if (!task) return res.status(404).json({ error: "task not found" });
+  res.json(listVerdictsForTask(task.id));
+});
+api.get("/quality", (_req, res) => res.json(qualitySummary()));
+
 api.post("/tasks", (req, res) => {
-  const { title, description, channel_id, assignee_agent_id, reviewer_agent_id, acceptance_criteria, source_doc_ids } = req.body ?? {};
+  const { title, description, channel_id, assignee_agent_id, reviewer_agent_id, acceptance_criteria, source_doc_ids, budget_billable } = req.body ?? {};
   if (!title) return res.status(400).json({ error: "title required" });
   const task = createTask({
     title: String(title),
@@ -847,6 +859,7 @@ api.post("/tasks", (req, res) => {
     reviewer_agent_id: reviewer_agent_id ?? null,
     // 定向润色：前端/调用方可直接把来源文档 id 挂到任务上，触发 buildWorkBrief 的受限改写引导
     source_doc_ids: Array.isArray(source_doc_ids) ? source_doc_ids.map(String) : [],
+    budget_billable: Number(budget_billable) > 0 ? Math.round(Number(budget_billable)) : 0,
     created_by: "user",
   });
   emitTaskEvent({
@@ -1156,7 +1169,9 @@ api.patch("/tasks/:id", (req, res) => {
       todo: ["todo", "done"],
       doing: ["todo", "review", "done"],
       review: ["todo", "done"],
-      blocked: ["done"],
+      // blocked→todo 是"审批已处理但未恢复"（如拒绝追加预算后想调整预算重跑）的人工恢复口；
+      // 仍有 pending 阻塞审批时下方统一拦截，防止绕过待输入直接重启。
+      blocked: ["todo", "done"],
       done: ["todo", "review"],
     };
     if (!["todo", "doing", "review", "blocked", "done"].includes(nextStatus)) {
@@ -1168,7 +1183,7 @@ api.patch("/tasks/:id", (req, res) => {
     if (!allowed[prev.status]?.includes(nextStatus)) {
       return res.status(400).json({ error: `invalid task transition: ${prev.status} -> ${nextStatus}` });
     }
-    if (nextStatus === "done") {
+    if (nextStatus === "done" || (nextStatus === "todo" && prev.status === "blocked")) {
       const pendingApprovals = listApprovals().filter((approval) =>
         approval.status === "pending" &&
         (approval.ref_id === prev.id || approval.id === prev.blocked_approval_id)
@@ -1181,12 +1196,15 @@ api.patch("/tasks/:id", (req, res) => {
       }
     }
   }
+  const { budget_billable } = req.body ?? {};
   const task = updateTask(req.params.id, {
     ...(title !== undefined ? { title } : {}),
     ...(description !== undefined ? { description } : {}),
     ...(status !== undefined ? { status } : {}),
+    ...(status === "todo" && prev.status === "blocked" ? { blocked_approval_id: null } : {}),
     ...(assignee_agent_id !== undefined ? { assignee_agent_id } : {}),
     ...(reviewer_agent_id !== undefined ? { reviewer_agent_id } : {}),
+    ...(budget_billable !== undefined ? { budget_billable: Number(budget_billable) > 0 ? Math.round(Number(budget_billable)) : 0 } : {}),
   });
   if (!task) return res.status(404).json({ error: "task not found" });
   if (task.assignee_agent_id !== prev?.assignee_agent_id) {
@@ -1267,6 +1285,17 @@ api.post("/tasks/:id/revise", (req, res) => {
   const revisions = (prev.revision_count ?? 0) + 1;
   const task = updateTask(prev.id, { status: "todo", revision_count: revisions, blocked_approval_id: null });
   if (!task) return res.status(404).json({ error: "task not found" });
+  // D1：人工退回同样入 verdicts 表——质量度量要能区分"机器验收退回"与"人不满意退回"
+  createVerdict({
+    task_id: task.id,
+    project_id: task.project_id,
+    verifier_agent_id: task.reviewer_agent_id,
+    worker_agent_id: task.assignee_agent_id,
+    attempt: revisions,
+    result: "revise",
+    reasons: reason,
+    source: "human",
+  });
   emitTaskEvent({
     task_id: task.id,
     channel_id: task.channel_id,
@@ -1646,10 +1675,11 @@ api.post("/approvals/:id/resolve", (req, res) => {
     broadcast({ type: "message:new", payload: sys });
     if (approval.kind === "plan" && approval.ref_id) {
       onPlanResolved(approval.ref_id, approve); // 计划把关：批准开工 / 退回唤起 Lead
-    } else if (approval.kind !== "clarification") {
+    } else if (approval.kind !== "clarification" && approval.kind !== "budget") {
       triggerAgent(approval.agent_id, approval.channel_id);
     }
   }
   if (changed && approval.kind === "clarification") onClarificationResolved(approval, approve);
+  if (changed && approval.kind === "budget") onBudgetResolved(approval, approve); // 预算追加：批准恢复执行/拒绝保持暂停
   res.json(approval);
 });

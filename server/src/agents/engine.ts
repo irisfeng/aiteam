@@ -44,6 +44,11 @@ import {
   updateMessage,
   updateProject,
   updateTask,
+  addTaskUsage,
+  createVerdict,
+  estimateTaskBillable,
+  readUsage,
+  taskSpentBillable,
 } from "../db.js";
 import { broadcast } from "../bus.js";
 import { currentOwner, withOwner } from "../ownerScope.js";
@@ -817,8 +822,18 @@ async function runTaskWork(agent: Agent, taskId: string) {
     broadcast({ type: "task:upsert", payload: task });
   }
 
-  audit(channel.id, `🚀 ${agent.name} 开始处理任务「${task.title}」${task.model_tier === "light" ? "（⚡ 轻量通道）" : ""}`);
-  emitTaskEvent(task, "start", `${agent.name} 开始处理任务`, { model_tier: task.model_tier }, agent.id);
+  // D2 开工估价：按历史同档已交付任务的实际消耗给中位数预期（无历史不硬编数字）。
+  // 只在首次开工时写入（阻塞恢复/重启恢复会重进本函数，别把估价刷成新值导致口径漂移）。
+  let estimate = task.estimate_billable;
+  if (!estimate) {
+    estimate = estimateTaskBillable(task.model_tier);
+    if (estimate > 0) task = updateTask(task.id, { estimate_billable: estimate }) ?? task;
+  }
+  audit(
+    channel.id,
+    `🚀 ${agent.name} 开始处理任务「${task.title}」${task.model_tier === "light" ? "（⚡ 轻量通道）" : ""}${estimate > 0 ? `（按历史同档任务预计 ~${estimate.toLocaleString()} 计费 token）` : ""}`
+  );
+  emitTaskEvent(task, "start", `${agent.name} 开始处理任务`, { model_tier: task.model_tier, estimate_billable: estimate || undefined }, agent.id);
   setTaskStatus(task.id, "doing");
 
   let feedback: string | null = null; // 上一轮验收意见（返工时注入）
@@ -839,7 +854,7 @@ async function runTaskWork(agent: Agent, taskId: string) {
       return;
     }
 
-    const verdict = await runVerification(agent, channel, task.id, lastDocIds);
+    const verdict = await runVerification(agent, channel, task.id, lastDocIds, attempt);
     if (verdict.result === "pass") {
       if (verdict.reasons) audit(channel.id, `✅ 验收通过：任务「${task.title}」`);
       break;
@@ -849,7 +864,11 @@ async function runTaskWork(agent: Agent, taskId: string) {
     const revisions = (fresh?.revision_count ?? 0) + 1;
     updateTask(task.id, { revision_count: revisions });
     if (attempt >= MAX_REVISIONS) {
-      audit(channel.id, `⚠️ 任务「${task.title}」已达返工上限（${MAX_REVISIONS} 次），转入待评审请人工把关`);
+      // D1 返工差距结构化：达上限不再只说"请人工把关"——把最后一轮未解决的差距原样带给人，
+      // 人工复核不用回频道翻验收长文（差距全文在事件 metadata，audit 只给首行摘要）。
+      const gapBrief = feedback.replace(/\s+/g, " ").slice(0, 120);
+      emitTaskEvent(task, "verification", `已达返工上限（${MAX_REVISIONS} 次），转待评审。未解决差距见 metadata`, { result: "gap", reasons: feedback.slice(0, 2000), revision_count: revisions }, agent.id);
+      audit(channel.id, `⚠️ 任务「${task.title}」已达返工上限（${MAX_REVISIONS} 次），转入待评审请人工把关。未解决差距：${gapBrief}…`);
       break;
     }
     audit(channel.id, `↩️ 验收未通过，任务「${task.title}」退回 ${agent.name} 修订（第 ${revisions} 次）`);
@@ -1005,7 +1024,8 @@ async function runVerification(
   worker: Agent,
   channel: Channel,
   taskId: string,
-  docIds: string[]
+  docIds: string[],
+  attempt = 0
 ): Promise<{ result: "pass" | "revise"; reasons: string }> {
   const task = getTask(taskId);
   if (!task) return { result: "pass", reasons: "" };
@@ -1015,6 +1035,21 @@ async function runVerification(
   // SOLO/DM（无其他同事）不再无条件放行（V1）：由本人在净上下文里做 fail-closed 自校验。
   const soloSelfCheck = others.length === 0;
 
+  // 裁决统一从这里落表（D1）：频道消息流不可聚合，质量度量以 verdicts 表为准。
+  const recordVerdict = (result: "pass" | "revise", reasons: string, source: "auto" | "solo" | "fallback", verifierId: string | null, docId: string | null) => {
+    createVerdict({
+      task_id: task.id,
+      project_id: task.project_id,
+      doc_id: docId,
+      verifier_agent_id: verifierId,
+      worker_agent_id: worker.id,
+      attempt,
+      result,
+      reasons,
+      source,
+    });
+  };
+
   // 先锚定该任务的「当前版」交付物（listDocuments 已只返当前版），再按其 kind 选对口校验者。
   // 优先 report，否则取最新当前版；兜底用本轮 createdDocIds 末位。
   const taskDocs = listDocuments().filter((d) => d.task_id === taskId);
@@ -1022,7 +1057,14 @@ async function runVerification(
     taskDocs.find((d) => d.kind === "report") ??
     taskDocs[0] ??
     (docIds.length > 0 ? getDocument(docIds[docIds.length - 1]) : undefined);
-  if (!doc) return { result: "revise", reasons: "没有找到交付物文档：必须用 write_document 提交正式交付物。" };
+  if (!doc) {
+    const reasons = "没有找到交付物文档：必须用 write_document 提交正式交付物。";
+    recordVerdict("revise", reasons, "fallback", null, null);
+    return { result: "revise", reasons };
+  }
+  // 多交付物全核验（D1）：report+slides+sheet 组合交付时，其余当前版一并注入（此前只核主文档，
+  // 副交付物是免检通道）。主文档给大头预算，其余按剩余预算截断注入。
+  const extraDocs = taskDocs.filter((d) => d.id !== doc.id);
 
   // 显式 reviewer 优先；未指定时按交付物类型选对口校验者。
   const verifier = resolveTaskReviewer(task, others, doc.kind, worker);
@@ -1050,10 +1092,17 @@ async function runVerification(
       ? `验收标准（逐条核验）：\n${task.acceptance_criteria}`
       : `（未写明验收标准 —— 按任务标题与详情判断交付物是否完整、可直接使用、无明显错误）`,
     ``,
-    `交付物《${doc.title}》全文：`,
+    `交付物《${doc.title}》（${doc.kind}）全文：`,
     `<deliverable>`,
-    stripLoneSurrogates(doc.content.slice(0, 16000)),
+    stripLoneSurrogates(doc.content.slice(0, extraDocs.length > 0 ? 12000 : 16000)),
     `</deliverable>`,
+    ...extraDocs.slice(0, 3).flatMap((d) => [
+      ``,
+      `同任务交付物《${d.title}》（${d.kind}，一并核验，不是参考资料）：`,
+      `<deliverable>`,
+      stripLoneSurrogates(d.content.slice(0, 3000)),
+      `</deliverable>`,
+    ]),
     renderInfo,
     ``,
     `核验时另须执行（不可放水）：`,
@@ -1108,9 +1157,11 @@ async function runVerification(
     // 两轮仍无结构化裁决：fail-closed，退回返工兜住，绝不放水（质量下限关键修复）
     audit(channel.id, `⚠️ ${verifier.name} 两轮均未提交结构化裁决，按未通过处理并退回修订`);
     emitTaskEvent(task, "verification", `${verifier.name} 未提交结构化裁决，按未通过处理`, { result: "revise" }, verifier.id);
+    recordVerdict("revise", NO_VERDICT_FALLBACK.reasons, "fallback", verifier.id, doc.id);
     return NO_VERDICT_FALLBACK;
   }
   emitTaskEvent(task, "verification", `${verifier.name} 验收${ctx.verdict.result === "pass" ? "通过" : "要求返工"}`, { result: ctx.verdict.result, reasons: ctx.verdict.reasons }, verifier.id);
+  recordVerdict(ctx.verdict.result, ctx.verdict.reasons, soloSelfCheck ? "solo" : "auto", verifier.id, doc.id);
   return ctx.verdict;
 }
 
@@ -1142,6 +1193,60 @@ function clarificationResponse(approval: Approval): string {
     return typeof parsed.proposed_default === "string" ? parsed.proposed_default.trim() : "";
   } catch {
     return "";
+  }
+}
+
+/**
+ * D2 预算护栏：任务累计消耗触线 → 暂停任务并开 budget 审批（复用 clarification 的 blocked/恢复通道）。
+ * 语义：批准 = 在当前消耗之上追加一个预算周期继续跑；拒绝 = 保持暂停（人工在看板改预算或收尾）。
+ */
+export function requestBudgetPauseForTask(agent: Agent, task: Task, spent: number, budget: number): { approvalId: string; task: Task } {
+  if (task.status === "blocked" && task.blocked_approval_id) {
+    const active = getApproval(task.blocked_approval_id);
+    if (active?.kind === "budget" && active.status === "pending") return { approvalId: active.id, task };
+  }
+  const approval = createApproval({
+    channel_id: task.channel_id,
+    agent_id: agent.id,
+    title: `超预算暂停：「${task.title.slice(0, 100)}」`,
+    payload: JSON.stringify(
+      {
+        spent_billable: spent,
+        budget_billable: budget,
+        note: "批准 = 追加同额预算并继续执行；拒绝 = 保持暂停（可在看板调整预算或直接转人工收尾）。",
+      },
+      null,
+      2
+    ),
+    kind: "budget",
+    ref_id: task.id,
+  });
+  const next = updateTask(task.id, { status: "blocked", blocked_approval_id: approval.id }) ?? task;
+  broadcast({ type: "approval:upsert", payload: approval });
+  broadcast({ type: "task:upsert", payload: next });
+  emitTaskEvent(next, "blocked", `累计消耗 ${spent.toLocaleString()} 已达预算 ${budget.toLocaleString()}（计费 token），暂停待批`, { approval_id: approval.id, spent_billable: spent, budget_billable: budget }, agent.id);
+  if (next.channel_id)
+    audit(next.channel_id, `⏸️ 任务「${next.title}」累计消耗 ${spent.toLocaleString()} 已达预算 ${budget.toLocaleString()}（计费 token），暂停等待批准追加`);
+  return { approvalId: approval.id, task: next };
+}
+
+export function onBudgetResolved(approval: Approval, approved: boolean) {
+  if (approval.kind !== "budget" || !approval.ref_id) return;
+  const task = getTask(approval.ref_id);
+  if (!task) return;
+  if (task.status !== "blocked" || task.blocked_approval_id !== approval.id) return;
+  if (approved) {
+    const spent = taskSpentBillable(task);
+    const grant = task.budget_billable > 0 ? task.budget_billable : Number(process.env.AITEAM_TASK_TOKEN_BUDGET ?? 0);
+    // 新预算 = 当前消耗 + 一个周期：既不会立刻再触线，也保留护栏（而不是一批准就变无限）
+    const next = updateTask(task.id, { status: "todo", blocked_approval_id: null, budget_billable: spent + Math.max(grant, 1) }) ?? task;
+    broadcast({ type: "task:upsert", payload: next });
+    emitTaskEvent(next, "approval", `用户批准追加预算，任务恢复（新预算 ${next.budget_billable.toLocaleString()} 计费 token）`, { approval_id: approval.id, status: "approved", budget_billable: next.budget_billable }, approval.agent_id);
+    if (next.channel_id) audit(next.channel_id, `▶️ 用户批准追加预算，任务「${next.title}」恢复执行（新预算 ${next.budget_billable.toLocaleString()}）`);
+    if (next.assignee_agent_id) onTaskAssigned(next);
+  } else {
+    emitTaskEvent(task, "approval", "用户拒绝追加预算，任务保持暂停", { approval_id: approval.id, status: "rejected" }, approval.agent_id);
+    if (task.channel_id) audit(task.channel_id, `⏸️ 用户拒绝追加预算，任务「${task.title}」保持暂停——可在看板调整预算或转人工收尾`);
   }
 }
 
@@ -2067,6 +2172,11 @@ async function streamRun(
     }
     const usageJson = JSON.stringify(usage);
     updateMessage(row.id, { content, status: "complete", usage_json: usageJson, model: rt.client ? rt.model : "mock" });
+    // D2 任务级成本归因：工作/返工/验收的每一次运行都累计到任务（跨返工不清零），预算护栏与面板同源。
+    if (ctx.taskId) {
+      const t = addTaskUsage(ctx.taskId, usage);
+      if (t) broadcast({ type: "task:upsert", payload: t });
+    }
     broadcast({ type: "message:done", payload: { id: row.id, channel_id: channel.id, content, usage_json: usageJson } });
     status(agent, channel.id, "idle");
     return { ...row, content, status: "complete", reply_depth: depth };
@@ -2153,6 +2263,21 @@ async function llmLoop(
     if ((ctx.taskId && cancelledTasks.has(ctx.taskId)) || cancelledChannels.has(channel.id)) {
       emit("\n\n⏹ 已按用户要求停止。");
       break;
+    }
+    // D2 预算护栏（仅工作运行；验收是质量下限不该被预算掐断）：任务累计 + 本次运行已耗 ≥ 预算 → 暂停待批。
+    // 在迭代边界检查而非流中：不打断半个回复，粒度 = 一次模型往返。
+    if (ctx.kind === "work" && ctx.taskId) {
+      const t = getTask(ctx.taskId);
+      const budget = t ? (t.budget_billable > 0 ? t.budget_billable : Number(process.env.AITEAM_TASK_TOKEN_BUDGET ?? 0)) : 0;
+      if (t && budget > 0) {
+        const spent = taskSpentBillable(t) + readUsage(JSON.stringify(usage)).billable;
+        if (spent >= budget) {
+          requestBudgetPauseForTask(agent, t, spent, budget);
+          ctx.halted = "blocked";
+          emit(`\n\n⏸️ 任务累计消耗已达预算上限（${spent.toLocaleString()}/${budget.toLocaleString()} 计费 token），已暂停等待用户批准追加预算。`);
+          break;
+        }
+      }
     }
     const stream = client.messages.stream({
       model: rt.model,
