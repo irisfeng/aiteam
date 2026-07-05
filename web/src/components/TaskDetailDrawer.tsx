@@ -1,7 +1,7 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useWorkspace } from "../store";
-import type { Approval, Doc, Task, TaskEvent } from "../types";
-import { api } from "../api";
+import type { Approval, Doc, Task, TaskEvent, Verdict } from "../types";
+import { api, billableTokens, parseTaskUsage } from "../api";
 
 const EVENT_LABEL: Record<TaskEvent["type"], string> = {
   created: "创建",
@@ -16,6 +16,19 @@ const EVENT_LABEL: Record<TaskEvent["type"], string> = {
   user_close: "关闭",
   failure: "失败",
 };
+
+const VERDICT_SOURCE_LABEL: Record<Verdict["source"], string> = {
+  auto: "机器验收",
+  solo: "自检",
+  fallback: "兜底",
+  human: "人工退回",
+};
+
+function fmtNum(n: number) {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(Math.round(n));
+}
 
 function fmt(ts: number) {
   return new Date(ts).toLocaleString("zh-CN", {
@@ -125,6 +138,25 @@ export function TaskDetailDrawer({
   const [resolvingApprovalId, setResolvingApprovalId] = useState("");
   const [approvalResponses, setApprovalResponses] = useState<Record<string, string>>({});
   const [savingRole, setSavingRole] = useState<"" | "assignee" | "reviewer">("");
+  const [verdicts, setVerdicts] = useState<Verdict[]>([]);
+  const [expandedVerdicts, setExpandedVerdicts] = useState<Record<string, boolean>>({});
+  const [budgetInput, setBudgetInput] = useState("");
+  const [savingBudget, setSavingBudget] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    // 抽屉切换任务时不卸载：先清上一个任务的裁决链，避免请求返回前闪现旧数据
+    setVerdicts([]);
+    setExpandedVerdicts({});
+    api.taskVerdicts(task.id).then((v) => alive && setVerdicts(v)).catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [task.id]);
+
+  useEffect(() => {
+    setBudgetInput(task.budget_billable > 0 ? String(task.budget_billable) : "");
+  }, [task.id, task.budget_billable]);
   const assignee = ws.agentById(task.assignee_agent_id);
   const reviewer = ws.agentById(task.reviewer_agent_id);
   const creator = task.created_by === "user" ? null : ws.agentById(task.created_by);
@@ -183,6 +215,17 @@ export function TaskDetailDrawer({
     }
   }
 
+  async function saveBudget() {
+    if (savingBudget) return;
+    const n = Math.max(0, Math.round(Number(budgetInput) || 0));
+    setSavingBudget(true);
+    try {
+      await ws.updateTask(task.id, { budget_billable: n });
+    } finally {
+      setSavingBudget(false);
+    }
+  }
+
   async function updateRole(kind: "assignee" | "reviewer", agentId: string) {
     if (savingRole) return;
     setSavingRole(kind);
@@ -197,6 +240,15 @@ export function TaskDetailDrawer({
       setSavingRole("");
     }
   }
+
+  const usage = useMemo(() => parseTaskUsage(task.usage_json), [task.usage_json]);
+  const billable = useMemo(() => billableTokens(usage), [usage]);
+  const hasUsage = billable > 0;
+  const hasBudget = task.budget_billable > 0;
+  const budgetPct = hasBudget ? Math.round((billable / task.budget_billable) * 100) : 0;
+  const budgetTone = !hasBudget ? "" : budgetPct >= 100 ? "bg-red-500" : budgetPct >= 90 ? "bg-amber-500" : "bg-accent";
+  const budgetTextTone = !hasBudget ? "text-ink-2" : budgetPct >= 100 ? "text-red-600" : budgetPct >= 90 ? "text-amber-600" : "text-ink-2";
+  const hasEstimate = task.estimate_billable > 0;
 
   const pendingApprovalCount = pendingApprovals.length;
   const hintToneClass =
@@ -356,6 +408,117 @@ export function TaskDetailDrawer({
                     </div>
                   </div>
                 )}
+              </div>
+            </section>
+          )}
+
+          <section>
+            <h3 className="mb-2 text-[12px] font-semibold text-ink-2">成本</h3>
+            <div className="rounded-lg border border-line bg-panel p-3 text-[12px]">
+              {(hasUsage || hasEstimate) && (
+                <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+                  {hasUsage && (
+                    <div>
+                      <span className="text-ink-3">累计消耗</span>{" "}
+                      <span className="font-mono font-semibold text-ink" title="按 input + output + 缓存写×1.25 + 缓存读×0.1 取整的加权计费 token">
+                        {fmtNum(billable)}
+                      </span>{" "}
+                      <span className="text-ink-3">billable</span>
+                    </div>
+                  )}
+                  {hasEstimate && (
+                    <div>
+                      <span className="text-ink-3">开工预估</span>{" "}
+                      <span className="font-mono text-ink-2">~{fmtNum(task.estimate_billable)}</span>
+                      {hasUsage && (
+                        <span className={`ml-1 ${billable > task.estimate_billable ? "text-amber-600" : "text-emerald-600"}`}>
+                          （{billable > task.estimate_billable ? "超出" : "低于"} {fmtNum(Math.abs(billable - task.estimate_billable))}）
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+              {hasUsage && (
+                <div className="mt-2 grid grid-cols-4 gap-1 text-center text-[10.5px] text-ink-3">
+                  <span className="rounded bg-sel px-1 py-1" title="纯输入 token">输入 {fmtNum(usage.input_tokens)}</span>
+                  <span className="rounded bg-sel px-1 py-1" title="输出 token">输出 {fmtNum(usage.output_tokens)}</span>
+                  <span className="rounded bg-sel px-1 py-1" title="缓存读取 token（按 0.1 倍计费）">缓存读 {fmtNum(usage.cache_read_tokens)}</span>
+                  <span className="rounded bg-sel px-1 py-1" title="缓存写入 token（按 1.25 倍计费）">缓存写 {fmtNum(usage.cache_creation_tokens)}</span>
+                </div>
+              )}
+              <div className="mt-2.5 border-t border-line pt-2.5">
+                {hasBudget && (
+                  <>
+                    <div className={`mb-1 flex items-center justify-between text-[11px] ${budgetTextTone}`}>
+                      <span>预算 {fmtNum(billable)}/{fmtNum(task.budget_billable)}</span>
+                      <span>{budgetPct}%</span>
+                    </div>
+                    <div className="mb-2 h-1.5 overflow-hidden rounded-full bg-sel">
+                      <div className={`h-full rounded-full ${budgetTone}`} style={{ width: `${Math.min(100, budgetPct)}%` }} />
+                    </div>
+                  </>
+                )}
+                <label className="flex items-center gap-1.5 text-[11px] text-ink-3">
+                  设置预算（billable，0=不限）
+                  <input
+                    value={budgetInput}
+                    onChange={(e) => setBudgetInput(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && void saveBudget()}
+                    inputMode="numeric"
+                    placeholder="不限"
+                    className="w-20 rounded-md border border-line bg-paper px-1.5 py-0.5 text-[11.5px] font-mono text-ink outline-none focus:border-accent/50"
+                  />
+                  <button
+                    onClick={() => void saveBudget()}
+                    disabled={savingBudget}
+                    className="rounded-md border border-line px-2 py-0.5 text-[11px] text-ink-2 hover:bg-sel disabled:opacity-40"
+                  >
+                    {savingBudget ? "保存中…" : "保存"}
+                  </button>
+                </label>
+              </div>
+            </div>
+          </section>
+
+          {verdicts.length > 0 && (
+            <section>
+              <h3 className="mb-2 text-[12px] font-semibold text-ink-2">验收记录</h3>
+              <div className="flex flex-col gap-1.5">
+                {verdicts.map((v) => {
+                  const expanded = expandedVerdicts[v.id];
+                  return (
+                    <div key={v.id} className="rounded-md bg-sel px-2.5 py-1.5 text-[12px]">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="font-mono text-[10px] text-ink-3">第 {v.attempt + 1} 轮</span>
+                        <span
+                          className={`rounded px-1.5 py-px font-medium ${
+                            v.result === "pass"
+                              ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300"
+                              : "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-300"
+                          }`}
+                        >
+                          {v.result === "pass" ? "通过" : "退回返工"}
+                        </span>
+                        <span className="rounded bg-panel px-1.5 py-px font-mono text-[10px] text-ink-3">
+                          {VERDICT_SOURCE_LABEL[v.source] ?? v.source}
+                        </span>
+                        <span className="ml-auto font-mono text-[10.5px] text-ink-3">{fmt(v.created_at)}</span>
+                      </div>
+                      {v.reasons && (
+                        <button
+                          onClick={() => setExpandedVerdicts((s) => ({ ...s, [v.id]: !s[v.id] }))}
+                          className="mt-1 text-left text-[11px] text-ink-3 hover:text-ink"
+                        >
+                          {expanded ? "▾ 收起理由" : "▸ 展开理由"}
+                        </button>
+                      )}
+                      {v.reasons && expanded && (
+                        <div className="mt-1 whitespace-pre-wrap rounded bg-panel px-2 py-1.5 text-ink-2">{v.reasons}</div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </section>
           )}

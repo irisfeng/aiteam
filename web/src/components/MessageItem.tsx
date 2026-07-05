@@ -3,6 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Message } from "../types";
 import { useWorkspace } from "../store";
+import { parseTaskUsage } from "../api";
 import { AgentAvatar, AiBadge, UserAvatar } from "./Avatar";
 
 function fmtTime(ts: number) {
@@ -10,15 +11,15 @@ function fmtTime(ts: number) {
   return `${d.getHours().toString().padStart(2, "0")}:${d.getMinutes().toString().padStart(2, "0")}`;
 }
 
+// 计费分列：缓存读/写与纯输入分开展示，避免把 1/10 价的缓存读误当全价输入。
 function usageLabel(usageJson: string | null): string | null {
   if (!usageJson) return null;
-  try {
-    const u = JSON.parse(usageJson);
-    if (!u.input_tokens && !u.output_tokens) return null;
-    return `${u.input_tokens.toLocaleString()} in · ${u.output_tokens.toLocaleString()} out tokens`;
-  } catch {
-    return null;
-  }
+  const u = parseTaskUsage(usageJson);
+  if (!u.input_tokens && !u.output_tokens && !u.cache_read_tokens && !u.cache_creation_tokens) return null;
+  const parts = [`${u.input_tokens.toLocaleString()} in`, `${u.output_tokens.toLocaleString()} out`];
+  if (u.cache_read_tokens) parts.push(`${u.cache_read_tokens.toLocaleString()} 缓存读`);
+  if (u.cache_creation_tokens) parts.push(`${u.cache_creation_tokens.toLocaleString()} 缓存写`);
+  return `${parts.join(" · ")} tokens`;
 }
 
 export const MessageItem = memo(function MessageItem({

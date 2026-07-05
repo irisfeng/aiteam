@@ -60,8 +60,36 @@ export interface Task {
   source_doc_ids: string;
   project_id: string | null;
   revision_count: number;
+  /** 累计用量 JSON（跨返工/验收不清零）：{input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens} */
+  usage_json: string;
+  /** 任务级预算（billable 加权 token）；0 = 不设上限 */
+  budget_billable: number;
+  /** 开工时按历史同档任务中位数写入的估价（billable）；0 = 无历史可估 */
+  estimate_billable: number;
   created_at: number;
   updated_at: number;
+}
+/** 单次验收裁决（D1 质量闭环落表） */
+export interface Verdict {
+  id: string;
+  task_id: string;
+  project_id: string | null;
+  doc_id: string | null;
+  verifier_agent_id: string | null;
+  worker_agent_id: string | null;
+  /** 第几轮交付的裁决（0 = 首次交付） */
+  attempt: number;
+  result: "pass" | "revise";
+  reasons: string;
+  /** auto = 机器验收；solo = 无他人时的自检；fallback = 未提交结构化裁决的兜底 revise；human = 人工复核退回 */
+  source: "auto" | "solo" | "fallback" | "human";
+  created_at: number;
+}
+/** 工作区质量汇总（质量面板数据源） */
+export interface QualitySummary {
+  agents: { agent_id: string; tasks: number; first_pass: number; revises: number }[];
+  coverage: { delivered: number; verified: number };
+  recent_revises: { task_id: string; reasons: string; source: string; created_at: number }[];
 }
 export interface TaskEvent {
   id: string;
