@@ -1,8 +1,32 @@
-import type { Agent, Approval, Channel, Doc, Message, Project, Provider, Task, TaskEvent } from "./types";
+import type { Agent, Approval, Channel, Doc, Message, Project, Provider, QualitySummary, Task, TaskEvent, Verdict } from "./types";
 
 // 统一入口下 AiTeam 挂在 /aiteam/，BASE_URL 即 "/aiteam/"。
 // 导出供少数绕过 req() 直接 fetch 的组件（MCP/技能/用量/团队等）复用，确保都带 /aiteam 前缀。
 export const API_BASE = `${import.meta.env.BASE_URL}api`;
+
+/** usage_json 累计字段；解析失败或缺省字段一律按 0 处理（兼容空 "{}"、老数据）。 */
+export interface TaskUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+}
+export function parseTaskUsage(json: string | null | undefined): TaskUsage {
+  let u: any = {};
+  try {
+    u = json ? JSON.parse(json) : {};
+  } catch { /* 忽略损坏数据 */ }
+  return {
+    input_tokens: u.input_tokens ?? 0,
+    output_tokens: u.output_tokens ?? 0,
+    cache_read_tokens: u.cache_read_tokens ?? 0,
+    cache_creation_tokens: u.cache_creation_tokens ?? 0,
+  };
+}
+// 计费口径需与 server/src/db.ts 的 readUsage 保持一致：缓存写≈1.25倍、缓存读≈0.1倍，取整。
+export function billableTokens(u: TaskUsage): number {
+  return Math.round(u.input_tokens + u.output_tokens + u.cache_creation_tokens * 1.25 + u.cache_read_tokens * 0.1);
+}
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -231,13 +255,16 @@ export const api = {
     channel_id?: string | null;
     assignee_agent_id?: string | null;
     reviewer_agent_id?: string | null;
+    budget_billable?: number;
   }) =>
     req<Task>("/tasks", { method: "POST", body: JSON.stringify(data) }),
   listScenarios: () => req<ScenarioInfo[]>("/scenarios"),
   startScenario: (id: string, data: { channel_id?: string | null; acceptance?: boolean }) =>
     req<ScenarioStartResult>(`/scenarios/${id}/start`, { method: "POST", body: JSON.stringify(data) }),
   taskEvents: (id: string) => req<TaskEvent[]>(`/tasks/${id}/events`),
-  updateTask: (id: string, data: Partial<Pick<Task, "title" | "description" | "status" | "assignee_agent_id" | "reviewer_agent_id">>) =>
+  taskVerdicts: (id: string) => req<Verdict[]>(`/tasks/${id}/verdicts`),
+  quality: () => req<QualitySummary>("/quality"),
+  updateTask: (id: string, data: Partial<Pick<Task, "title" | "description" | "status" | "assignee_agent_id" | "reviewer_agent_id" | "budget_billable">>) =>
     req<Task>(`/tasks/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
   requestRevision: (id: string, reason: string) =>
     req<Task>(`/tasks/${id}/revise`, { method: "POST", body: JSON.stringify({ reason }) }),

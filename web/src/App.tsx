@@ -100,7 +100,7 @@ export default function App() {
           )}
           {ws.view.kind === "team" && (
             <Suspense fallback={<ViewLoading />}>
-              <TeamView onOpenProfile={setProfileAgent} />
+              <TeamView onOpenProfile={setProfileAgent} onOpenTask={openTaskFromModal} />
             </Suspense>
           )}
           {ws.view.kind === "usage" && (
