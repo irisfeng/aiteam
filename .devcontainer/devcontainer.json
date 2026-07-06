@@ -1,0 +1,16 @@
+{
+  "name": "AiTeam（Codespaces 试用/手机测试）",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:22",
+  "containerEnv": {
+    "ELECTRON_SKIP_BINARY_DOWNLOAD": "1"
+  },
+  "forwardPorts": [8787],
+  "portsAttributes": {
+    "8787": {
+      "label": "AiTeam",
+      "onAutoForward": "notify"
+    }
+  },
+  "postCreateCommand": "npm install --no-audit --no-fund && npm run build",
+  "postStartCommand": "nohup node server/dist/index.js > /tmp/aiteam.log 2>&1 &"
+}
