@@ -197,4 +197,5 @@ export type View =
   | { kind: "inbox" }
   | { kind: "docs" }
   | { kind: "team" }
-  | { kind: "usage" };
+  | { kind: "usage" }
+  | { kind: "theatre" };

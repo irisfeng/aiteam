@@ -14,6 +14,7 @@ import { LoginView } from "./components/LoginView";
 const DocsView = lazy(() => import("./components/DocsView").then((m) => ({ default: m.DocsView })));
 const TeamView = lazy(() => import("./components/TeamView").then((m) => ({ default: m.TeamView })));
 const UsageView = lazy(() => import("./components/UsageView").then((m) => ({ default: m.UsageView })));
+const TheatreView = lazy(() => import("./components/TheatreView").then((m) => ({ default: m.TheatreView })));
 
 function ViewLoading() {
   return <div className="flex h-full flex-1 items-center justify-center text-[13px] text-ink-3">加载视图…</div>;
@@ -106,6 +107,11 @@ export default function App() {
           {ws.view.kind === "usage" && (
             <Suspense fallback={<ViewLoading />}>
               <UsageView />
+            </Suspense>
+          )}
+          {ws.view.kind === "theatre" && (
+            <Suspense fallback={<ViewLoading />}>
+              <TheatreView />
             </Suspense>
           )}
         </div>

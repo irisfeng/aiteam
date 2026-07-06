@@ -118,6 +118,26 @@ body, aside, main, header, div, button, input, textarea, select, span, table, th
   .orb-float, .orb-body, .orb-eye-lid { animation: none !important; }
 }
 
+/* ===== 剧场视图（Decision Theatre 观察舱） ===== */
+/* 进行中任务节点背后的呼吸光晕；尊重 prefers-reduced-motion，降级为静态光晕 */
+@keyframes theatre-pulse { 0%, 100% { opacity: 0.16; } 50% { opacity: 0.4; } }
+.theatre-pulse { animation: theatre-pulse 1.8s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .theatre-pulse { animation: none; opacity: 0.26; } }
+
+/* 世界事件横幅入场动画（横幅本身用 inset-x-0 + mx-auto 居中，这里只负责淡入位移） */
+@keyframes theatre-banner-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+.theatre-banner { animation: theatre-banner-in 0.22s ease-out; }
+
+/* 决策树画布底纹：极淡六边形网格，颜色需与上方 --t-line 的浅/深色取值保持一致 */
+.theatre-hexbg {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='49' viewBox='0 0 28 49'%3E%3Cpath fill='none' stroke='%23dbe3ee' stroke-width='1' d='M13.99 9.25l13 7.5v15l-13 7.5L1 31.75v-15z M13.99 0l13 7.5v15l-13 7.5L1 22.5v-15z'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  opacity: 1;
+}
+.dark .theatre-hexbg {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='49' viewBox='0 0 28 49'%3E%3Cpath fill='none' stroke='%23263241' stroke-width='1' d='M13.99 9.25l13 7.5v15l-13 7.5L1 31.75v-15z M13.99 0l13 7.5v15l-13 7.5L1 22.5v-15z'/%3E%3C/svg%3E");
+}
+
 /* 细滚动条 */
 * { scrollbar-width: thin; scrollbar-color: var(--t-line) transparent; }
 /* WebKit（Chrome/Safari/WPS 浏览器）默认是自动隐藏的 overlay 滚动条，列表"下面还有"难以察觉；

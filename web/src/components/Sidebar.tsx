@@ -110,6 +110,7 @@ export function MobileNav({ onSettings }: { onSettings: () => void }) {
     { kind: "tasks", label: "任务" },
     { kind: "docs", label: "文档" },
     { kind: "team", label: "团队" },
+    { kind: "theatre", label: "🎭 剧场" },
     { kind: "usage", label: "用量" },
   ] as const;
   return (
@@ -206,8 +207,11 @@ export function Sidebar({
         <Item active={ws.view.kind === "team"} onClick={() => ws.setView({ kind: "team" })}>
           <span className="mr-1.5 font-mono text-[10.5px] text-ink-3">05</span>团队
         </Item>
+        <Item active={ws.view.kind === "theatre"} onClick={() => ws.setView({ kind: "theatre" })}>
+          <span className="mr-1.5 font-mono text-[10.5px] text-ink-3">06</span>🎭 剧场
+        </Item>
         <Item active={ws.view.kind === "usage"} onClick={() => ws.setView({ kind: "usage" })}>
-          <span className="mr-1.5 font-mono text-[10.5px] text-ink-3">06</span>用量
+          <span className="mr-1.5 font-mono text-[10.5px] text-ink-3">07</span>用量
         </Item>
 
         <SectionTitle onAdd={onNewChannel}>频道</SectionTitle>
