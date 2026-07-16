@@ -31,12 +31,16 @@ export interface WorklineSnapshot {
 export function approvalKindLabel(kind: Approval["kind"]) {
   if (kind === "plan") return "计划审批";
   if (kind === "clarification") return "等待输入";
+  if (kind === "network") return "单次网络调用";
+  if (kind === "budget") return "预算追加";
   return "风险动作";
 }
 
 function approvalMeta(kind: Approval["kind"]) {
   if (kind === "clarification") return "回应后任务自动恢复执行";
   if (kind === "plan") return "批准后项目开工";
+  if (kind === "network") return "仅批准列明工具和参数一次";
+  if (kind === "budget") return "批准后追加预算并恢复任务";
   return "处理后 AI 才能继续";
 }
 
@@ -89,7 +93,7 @@ export function computeWorkline({
       tone: "block" as const,
       label: "任务阻塞",
       title: task.title,
-      meta: task.blocked_approval_id ? "收件箱确认后恢复" : "等待补充事实、权限或选择",
+      meta: "审批已处理或上下文已变化；打开任务调整后重试",
       task,
     })),
     ...review.map((task) => ({

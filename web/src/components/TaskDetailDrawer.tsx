@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useWorkspace } from "../store";
 import type { Approval, Doc, Task, TaskEvent, Verdict } from "../types";
 import { api, billableTokens, parseTaskUsage } from "../api";
+import { formatNetworkApprovalPayload } from "../lib/approvals";
 
 const EVENT_LABEL: Record<TaskEvent["type"], string> = {
   created: "创建",
@@ -73,6 +74,7 @@ function parseClarificationPayload(payload: string) {
 }
 
 function approvalQuestion(a: Approval) {
+  if (a.kind === "network") return formatNetworkApprovalPayload(a.payload);
   if (a.kind !== "clarification") return a.payload;
   const parsed = parseClarificationPayload(a.payload);
   if (!parsed) return a.payload;
@@ -87,6 +89,8 @@ function approvalQuestion(a: Approval) {
 function approvalKindLabel(kind: Approval["kind"]) {
   if (kind === "plan") return "计划";
   if (kind === "clarification") return "输入";
+  if (kind === "network") return "网络";
+  if (kind === "budget") return "预算";
   return "审批";
 }
 
@@ -115,7 +119,11 @@ function nextActionHint(task: Task, pendingApprovals: Approval[], docs: Doc[], d
     };
   }
   if (task.status === "blocked") {
-    return { tone: "attention" as const, label: "任务已阻塞", body: "等待补充事实、权限或选择；不要把 blocked 手工推成已交付。" };
+    return {
+      tone: "attention" as const,
+      label: "任务已阻塞",
+      body: "当前没有待处理审批。可先调整预算或负责人，再恢复到待办重新尝试；也可以直接取消归档。",
+    };
   }
   if (task.status === "review") {
     return {
@@ -149,6 +157,7 @@ export function TaskDetailDrawer({
 }) {
   const ws = useWorkspace();
   const [closing, setClosing] = useState(false);
+  const [resuming, setResuming] = useState(false);
   const [revising, setRevising] = useState(false);
   const [resolvingApprovalId, setResolvingApprovalId] = useState("");
   const [approvalResponses, setApprovalResponses] = useState<Record<string, string>>({});
@@ -221,6 +230,16 @@ export function TaskDetailDrawer({
     }
   }
 
+  async function resumeBlockedTask() {
+    if (task.status !== "blocked" || pendingApprovals.length > 0 || resuming) return;
+    setResuming(true);
+    try {
+      await ws.updateTask(task.id, { status: "todo" });
+    } finally {
+      setResuming(false);
+    }
+  }
+
   async function resolveTaskApproval(approval: Approval, approve: boolean, response?: string) {
     if (approval.status !== "pending" || resolvingApprovalId) return;
     setResolvingApprovalId(approval.id);
@@ -284,6 +303,9 @@ export function TaskDetailDrawer({
       : []),
     ...(task.status === "review"
       ? [{ label: revising ? "退回中…" : "退回返工", onClick: () => void requestRevision(), disabled: revising }]
+      : []),
+    ...(task.status === "blocked" && pendingApprovalCount === 0
+      ? [{ label: resuming ? "恢复中…" : "调整后重试", onClick: () => void resumeBlockedTask(), disabled: resuming }]
       : []),
   ];
 
@@ -621,17 +643,33 @@ export function TaskDetailDrawer({
                         onClick={() => void resolveTaskApproval(a, true, a.kind === "clarification" ? responseValue : undefined)}
                         disabled={!!resolvingApprovalId}
                         className="rounded-md bg-accent px-2.5 py-1 text-[12px] font-medium text-white disabled:opacity-40"
-                        title={a.kind === "clarification" ? "确认后任务会恢复执行" : "批准该请求"}
+                        title={
+                          a.kind === "clarification"
+                            ? "确认后任务会恢复执行"
+                            : a.kind === "network"
+                              ? "只批准当前显示的目标、工具和完整参数执行一次"
+                              : "批准该请求"
+                        }
                       >
-                        {resolvingApprovalId === a.id ? "处理中…" : a.kind === "clarification" ? "确认并恢复" : "批准"}
+                        {resolvingApprovalId === a.id
+                          ? "处理中…"
+                          : a.kind === "clarification"
+                            ? "确认并恢复"
+                            : a.kind === "network"
+                              ? "批准一次并恢复"
+                              : "批准"}
                       </button>
                       <button
                         onClick={() => void resolveTaskApproval(a, false)}
                         disabled={!!resolvingApprovalId}
                         className="rounded-md border border-line bg-panel px-2.5 py-1 text-[12px] font-medium text-ink-2 hover:bg-sel disabled:opacity-40"
-                        title={a.kind === "clarification" ? "任务保持阻塞，等待后续输入" : "拒绝该请求"}
+                        title={
+                          a.kind === "clarification" || a.kind === "network"
+                            ? "任务保持阻塞，可调整后再重试或取消"
+                            : "拒绝该请求"
+                        }
                       >
-                        {a.kind === "clarification" ? "保持阻塞" : "拒绝"}
+                        {a.kind === "clarification" || a.kind === "network" ? "拒绝并保持阻塞" : "拒绝"}
                       </button>
                     </div>
                   )}

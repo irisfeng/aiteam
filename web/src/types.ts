@@ -132,11 +132,13 @@ export interface Approval {
   agent_id: string;
   title: string;
   payload: string;
-  kind: "action" | "plan" | "clarification";
+  kind: "action" | "network" | "plan" | "clarification" | "budget";
   ref_id: string | null;
   status: "pending" | "approved" | "rejected";
   created_at: number;
   resolved_at: number | null;
+  /** network grant used or invalidated */
+  consumed_at: number | null;
 }
 export interface Doc {
   id: string;

@@ -85,7 +85,8 @@ CREATE TABLE IF NOT EXISTS approvals (
   payload TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'pending',
   created_at INTEGER NOT NULL,
-  resolved_at INTEGER
+  resolved_at INTEGER,
+  consumed_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS agent_memory (
   agent_id TEXT PRIMARY KEY,
@@ -177,6 +178,7 @@ addColumnIfMissing("providers", "web_tools", "web_tools INTEGER NOT NULL DEFAULT
 addColumnIfMissing("projects", "autonomy", "autonomy TEXT NOT NULL DEFAULT 'auto'");
 addColumnIfMissing("approvals", "kind", "kind TEXT NOT NULL DEFAULT 'action'");
 addColumnIfMissing("approvals", "ref_id", "ref_id TEXT");
+addColumnIfMissing("approvals", "consumed_at", "consumed_at INTEGER");
 addColumnIfMissing("documents", "kind", "kind TEXT NOT NULL DEFAULT 'report'");
 addColumnIfMissing("messages", "model", "model TEXT NOT NULL DEFAULT ''");
 addColumnIfMissing("messages", "reply_to", "reply_to TEXT");
@@ -456,13 +458,15 @@ export interface Approval {
   agent_id: string;
   title: string;
   payload: string;
-  /** action = 高风险动作审批；plan = 项目计划把关；clarification = 任务阻塞后向用户要输入；budget = 任务超预算暂停，批准即追加预算继续 */
-  kind: "action" | "plan" | "clarification" | "budget";
-  /** plan 关联 project id；clarification/budget 关联 task id；action 可关联工具/任务 id */
+  /** action = 普通高风险动作；network = 引擎签发的单次 MCP 外发；plan = 项目计划；clarification = 阻塞输入；budget = 超预算暂停 */
+  kind: "action" | "network" | "plan" | "clarification" | "budget";
+  /** plan 关联 project id；network/clarification/budget 关联 task id；action 可关联普通动作/任务 id */
   ref_id: string | null;
   status: "pending" | "approved" | "rejected";
   created_at: number;
   resolved_at: number | null;
+  /** 一次性 network 授权的关闭时间；真实调用前消费，停止/改派/取消时也会失效关闭 */
+  consumed_at: number | null;
 }
 
 export interface TaskEvent {
@@ -1377,18 +1381,33 @@ export function createApproval(a: {
     status: "pending",
     created_at: now(),
     resolved_at: null,
+    consumed_at: null,
   };
   db.prepare(
-    "INSERT INTO approvals (id, owner_id, channel_id, agent_id, title, payload, kind, ref_id, status, created_at, resolved_at) VALUES (@id, @owner_id, @channel_id, @agent_id, @title, @payload, @kind, @ref_id, @status, @created_at, @resolved_at)"
+    "INSERT INTO approvals (id, owner_id, channel_id, agent_id, title, payload, kind, ref_id, status, created_at, resolved_at, consumed_at) VALUES (@id, @owner_id, @channel_id, @agent_id, @title, @payload, @kind, @ref_id, @status, @created_at, @resolved_at, @consumed_at)"
   ).run(approval);
   return approval;
 }
 export function resolveApproval(id: string, approve: boolean): Approval | undefined {
-  const cur = getApproval(id);
-  if (!cur || cur.status !== "pending") return cur;
-  const next: Approval = { ...cur, status: approve ? "approved" : "rejected", resolved_at: now() };
-  db.prepare("UPDATE approvals SET status = ?, resolved_at = ? WHERE id = ?").run(next.status, next.resolved_at, id);
-  return next;
+  return resolveApprovalOnce(id, approve)?.approval;
+}
+
+/**
+ * 原子落定审批。只有第一个 pending→final 的请求 changed=true；
+ * 并发/重复请求只能读到最终状态，不会再次触发恢复、外呼或消息副作用。
+ */
+export function resolveApprovalOnce(
+  id: string,
+  approve: boolean,
+): { approval: Approval; changed: boolean } | undefined {
+  const resolvedAt = now();
+  const status: Approval["status"] = approve ? "approved" : "rejected";
+  const result = db.prepare(
+    "UPDATE approvals SET status = ?, resolved_at = ? WHERE id = ? AND owner_id = ? AND status = 'pending'"
+  ).run(status, resolvedAt, id, currentOwner());
+  const approval = getApproval(id);
+  if (!approval) return undefined;
+  return { approval, changed: result.changes === 1 };
 }
 
 export function updateApprovalPayload(id: string, payload: string): Approval | undefined {
@@ -1397,6 +1416,72 @@ export function updateApprovalPayload(id: string, payload: string): Approval | u
   const next: Approval = { ...cur, payload };
   db.prepare("UPDATE approvals SET payload = ? WHERE id = ? AND owner_id = ?").run(payload, id, currentOwner());
   return next;
+}
+
+/** 原子关闭一次性授权；多进程/重复调用下只有第一个 approved+未关闭请求能成功。 */
+export function consumeApproval(id: string): boolean {
+  const consumedAt = now();
+  const result = db.prepare(
+    "UPDATE approvals SET consumed_at = ? WHERE id = ? AND owner_id = ? AND status = 'approved' AND consumed_at IS NULL"
+  ).run(consumedAt, id, currentOwner());
+  return result.changes === 1;
+}
+
+/** 停止/取消任务时关闭尚未使用的 network 授权，避免稍后重启任务沿用旧批准。 */
+export function invalidateNetworkApprovalsForTask(taskId: string): number {
+  const result = db.prepare(
+    "UPDATE approvals SET consumed_at = ? WHERE owner_id = ? AND ref_id = ? AND kind = 'network' AND status = 'approved' AND consumed_at IS NULL"
+  ).run(now(), currentOwner(), taskId);
+  return result.changes;
+}
+
+/**
+ * network MCP 审批的服务端签发点：审批插入和 doing→blocked 必须同一事务完成。
+ * 任务已停止、改派、重复阻塞或状态已变化时不创建孤立审批。
+ */
+export function createBlockingNetworkApproval(a: {
+  task_id: string;
+  agent_id: string;
+  channel_id?: string | null;
+  title: string;
+  payload: string;
+}): { approval: Approval; task: Task } | undefined {
+  const owner = currentOwner();
+  const run = db.transaction(() => {
+    const task = db.prepare(
+      "SELECT * FROM tasks WHERE id = ? AND owner_id = ?"
+    ).get(a.task_id, owner) as Task | undefined;
+    if (
+      !task ||
+      task.status !== "doing" ||
+      task.assignee_agent_id !== a.agent_id ||
+      task.blocked_approval_id !== null
+    ) return undefined;
+
+    const approval = createApproval({
+      channel_id: a.channel_id ?? task.channel_id,
+      agent_id: a.agent_id,
+      title: a.title,
+      payload: a.payload,
+      kind: "network",
+      ref_id: task.id,
+    });
+    const updatedAt = now();
+    const changed = db.prepare(
+      "UPDATE tasks SET status = 'blocked', blocked_approval_id = ?, updated_at = ? WHERE id = ? AND owner_id = ? AND status = 'doing' AND assignee_agent_id = ? AND blocked_approval_id IS NULL"
+    ).run(approval.id, updatedAt, task.id, owner, a.agent_id);
+    if (changed.changes !== 1) throw new Error("network approval task state changed");
+    return {
+      approval,
+      task: { ...task, status: "blocked" as const, blocked_approval_id: approval.id, updated_at: updatedAt },
+    };
+  });
+  try {
+    return run();
+  } catch (err) {
+    if (err instanceof Error && err.message === "network approval task state changed") return undefined;
+    throw err;
+  }
 }
 
 // ---- documents（每用户私有）----

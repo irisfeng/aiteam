@@ -32,14 +32,12 @@ const PROJECT_STATUS_TONE: Record<Task["status"], string> = {
 };
 
 function prevStatus(task: Task): Task["status"] | null {
-  if (task.status === "doing" || task.status === "review") return "todo";
   if (task.status === "done") return "review";
   if (task.status === "cancelled") return "todo";
   return null;
 }
 
 function nextStatus(task: Task): Task["status"] | null {
-  if (task.status === "doing") return "review";
   if (task.status === "review") return "done";
   return null;
 }
@@ -149,9 +147,13 @@ function TaskCard({ task, onOpenDoc, onOpenTask }: { task: Task; onOpenDoc: (doc
             <button
               onClick={() => onOpenTask(task)}
               className="rounded bg-red-50 px-1.5 font-medium text-red-600 hover:bg-red-100 dark:bg-red-950/30 dark:text-red-300 dark:hover:bg-red-950/50"
-              title="打开详情，在「审批与输入」区回应后任务自动恢复"
+              title={
+                hasPendingApproval
+                  ? "打开详情处理待审批或补充输入"
+                  : "审批已处理或上下文已变化；打开详情调整后重试"
+              }
             >
-              去处理
+              {hasPendingApproval ? "去处理" : "调整重试"}
             </button>
           )}
           {task.status === "doing" && (

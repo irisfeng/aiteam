@@ -18,7 +18,16 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 // 绝不触碰 server/data 生产工作区（那里有用户的密钥配置/项目/文档）。
 const testDataDir = mkdtempSync(join(tmpdir(), "aiteam-regress-"));
 process.env.AITEAM_DATA_DIR = testDataDir;
-const PORT = 8799;
+const PORT = await new Promise((resolve, reject) => {
+  const probe = createServer();
+  probe.once("error", reject);
+  probe.listen(0, "127.0.0.1", () => {
+    const address = probe.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+    probe.close((err) => (err ? reject(err) : resolve(port)));
+  });
+});
+const TEST_INSTANCE_ID = `regress-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 // 整合后所有路由挂在 /aiteam 前缀下（standalone 默认单一固定用户，requireUser 放行）
 const BASE = `http://localhost:${PORT}/aiteam/api`;
 
@@ -164,6 +173,21 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
   check("UX6", "收件箱：处理审批/输入后刷新工作区并回到关联任务详情",
     inboxResolutionLoop,
     `inboxResolutionLoop=${inboxResolutionLoop}`);
+  const scopedNetworkApprovalUi =
+    inboxSource.includes("parseNetworkApprovalPayload") &&
+    inboxSource.includes("一次性网络外发") &&
+    inboxSource.includes("完整参数") &&
+    inboxSource.includes("批准一次并恢复") &&
+    taskDetailSource.includes("formatNetworkApprovalPayload") &&
+    taskDetailSource.includes("调整后重试") &&
+    taskDetailSource.includes("批准一次并恢复") &&
+    worklineLibSource.includes("审批已处理或上下文已变化");
+  check(
+    "UX6B",
+    "network 审批体验：显示目标/工具/参数/单次范围，拒绝后可调整并重新尝试",
+    scopedNetworkApprovalUi,
+    `scopedNetworkApprovalUi=${scopedNetworkApprovalUi}`,
+  );
   const cancellationUi =
     taskDetailSource.includes('task.status === "review" ? "done" : "cancelled"') &&
     taskDetailSource.includes("取消只归档，不代表验收通过") &&
@@ -513,9 +537,191 @@ check(
   const strictOk = engine.mcpRequiresApprovalForTask(db.getTask(plain.id), tool) === true;
   if (beforeStrict === undefined) delete process.env.AITEAM_APPROVE_NETWORK_MCP;
   else process.env.AITEAM_APPROVE_NETWORK_MCP = beforeStrict;
+  const callA = { query: "只检索公开的 A 主题", filters: { region: "CN", freshness: 30 } };
+  const callAReordered = { filters: { freshness: 30, region: "CN" }, query: "只检索公开的 A 主题" };
+  const callB = { query: "改为外发完全不同的 B 主题" };
+  const pausedTask = db.createTask({
+    channel_id: ch.id,
+    title: "回归-network-审批时暂停任务",
+    assignee_agent_id: eng.id,
+    created_by: "user",
+    source_doc_ids: [src.id],
+  });
+  db.updateTask(pausedTask.id, { status: "doing" });
+  const genericApproval = db.createApproval({
+    channel_id: ch.id,
+    agent_id: eng.id,
+    title: "批准一项无关动作",
+    payload: "只批准整理内部文档",
+    kind: "action",
+    ref_id: pausedTask.id,
+  });
+  db.resolveApproval(genericApproval.id, true);
+  const genericDoesNotGrant = engine.taskHasApprovedNetworkGrant(pausedTask.id, tool, callA, eng.id) === false;
+  const pauseResult =
+    typeof engine.requestNetworkApprovalForTask === "function"
+      ? engine.requestNetworkApprovalForTask(
+          eng,
+          db.getTask(pausedTask.id),
+          tool,
+          callA,
+          "批准一次 A 主题检索",
+          "只允许外发本次公开查询",
+        )
+      : null;
+  const pausedAfter = db.getTask(pausedTask.id);
+  const pendingApproval = pauseResult ? db.getApproval(pauseResult.approvalId) : undefined;
+  let pendingGrant = null;
+  try { pendingGrant = JSON.parse(pendingApproval?.payload ?? "{}").network_grant; } catch { /* asserted below */ }
+  check(
+    "CAP2B",
+    "network MCP 审批创建后任务必须 blocked，且授权范围由服务端绑定真实调用",
+    Boolean(
+      pauseResult &&
+      pausedAfter?.status === "blocked" &&
+      pausedAfter.blocked_approval_id === pauseResult.approvalId &&
+      pendingApproval?.status === "pending" &&
+      pendingApproval.kind === "network" &&
+      pendingApproval.ref_id === pausedTask.id &&
+      pendingApproval.agent_id === eng.id &&
+      pendingGrant?.server_id === srv.id &&
+      pendingGrant?.server_name === srv.name &&
+      pendingGrant?.server_target === srv.url &&
+      pendingGrant?.tool === tool &&
+      pendingGrant?.input?.query === callA.query
+    ),
+    `helper=${Boolean(pauseResult)} status=${pausedAfter?.status} approval=${pendingApproval?.status}`,
+  );
+  const forgedApproval = pendingApproval
+    ? db.createApproval({
+        channel_id: ch.id,
+        agent_id: eng.id,
+        title: "伪造 network payload 的普通 action",
+        payload: pendingApproval.payload,
+        kind: "action",
+        ref_id: pausedTask.id,
+      })
+    : null;
+  if (forgedApproval) db.resolveApproval(forgedApproval.id, true);
+  const forgedActionRejected =
+    engine.taskHasApprovedNetworkGrant(pausedTask.id, tool, callA, eng.id) === false;
+  if (pendingApproval) db.resolveApproval(pendingApproval.id, true);
+  db.updateTask(pausedTask.id, { status: "doing", blocked_approval_id: null });
+  const exactGrant = engine.taskHasApprovedNetworkGrant(pausedTask.id, tool, callAReordered, eng.id) === true;
+  const changedCallRejected = engine.taskHasApprovedNetworkGrant(pausedTask.id, tool, callB, eng.id) === false;
+  const changedToolRejected =
+    engine.taskHasApprovedNetworkGrant(pausedTask.id, "mcp__web-search-prime__fetch", callA, eng.id) === false;
+  const wrongAgentRejected = engine.taskHasApprovedNetworkGrant(pausedTask.id, tool, callA, pm.id) === false;
+  const otherTask = db.createTask({
+    channel_id: ch.id,
+    title: "回归-network-错误任务范围",
+    assignee_agent_id: eng.id,
+    created_by: "user",
+  });
+  db.updateTask(otherTask.id, { status: "doing" });
+  const wrongTaskRejected = engine.taskHasApprovedNetworkGrant(otherTask.id, tool, callA, eng.id) === false;
+  db.db.prepare("UPDATE mcp_servers SET url = ? WHERE id = ?").run("https://changed.example/mcp", srv.id);
+  const changedServerRejected =
+    engine.taskHasApprovedNetworkGrant(pausedTask.id, tool, callA, eng.id) === false;
+  db.db.prepare("UPDATE mcp_servers SET url = ? WHERE id = ?").run("https://search.example/mcp", srv.id);
+  const consumed =
+    typeof engine.consumeApprovedNetworkGrant === "function" &&
+    engine.consumeApprovedNetworkGrant(pausedTask.id, tool, callAReordered, eng.id) === true;
+  const consumedPersisted = Boolean(pendingApproval && db.getApproval(pendingApproval.id)?.consumed_at);
+  const secondConsumeRejected =
+    engine.consumeApprovedNetworkGrant(pausedTask.id, tool, callAReordered, eng.id) === false;
+  const replayRejected = engine.taskHasApprovedNetworkGrant(pausedTask.id, tool, callA, eng.id) === false;
+  check(
+    "CAP2",
+    "network MCP：来源/严格任务必须审批，且授权只匹配指定工具与参数",
+    plainOk &&
+      sourcedOk &&
+      strictOk &&
+      genericDoesNotGrant &&
+      forgedActionRejected &&
+      exactGrant &&
+      changedCallRejected &&
+      changedToolRejected &&
+      wrongAgentRejected &&
+      wrongTaskRejected &&
+      changedServerRejected &&
+      consumed &&
+      consumedPersisted &&
+      secondConsumeRejected &&
+      replayRejected,
+    `plain=${plainOk} sourced=${sourcedOk} strict=${strictOk} genericBlocked=${genericDoesNotGrant}/${forgedActionRejected} exact=${exactGrant} changed=${changedCallRejected}/${changedToolRejected}/${changedServerRejected} wrongScope=${wrongAgentRejected}/${wrongTaskRejected} consumed=${consumed}/${consumedPersisted} replayBlocked=${secondConsumeRejected}/${replayRejected}`,
+  );
+  const reassignedTask = db.createTask({
+    channel_id: ch.id,
+    title: "回归-network-改派后旧授权不可复活",
+    assignee_agent_id: eng.id,
+    created_by: "user",
+    source_doc_ids: [src.id],
+  });
+  db.updateTask(reassignedTask.id, { status: "doing" });
+  const reassignedRequest = engine.requestNetworkApprovalForTask(
+    eng,
+    db.getTask(reassignedTask.id),
+    tool,
+    callA,
+    "批准一次改派前调用",
+    "改派后本授权必须永久失效",
+  );
+  const reassignedApproval = reassignedRequest
+    ? db.resolveApproval(reassignedRequest.approvalId, true)
+    : null;
+  db.updateTask(reassignedTask.id, { assignee_agent_id: pm.id });
+  if (reassignedApproval) engine.onNetworkApprovalResolved(reassignedApproval);
+  const invalidConsumed = Boolean(
+    reassignedRequest && db.getApproval(reassignedRequest.approvalId)?.consumed_at,
+  );
+  db.updateTask(reassignedTask.id, {
+    status: "doing",
+    assignee_agent_id: eng.id,
+    blocked_approval_id: null,
+  });
+  const reassignedGrantCannotRevive =
+    engine.taskHasApprovedNetworkGrant(reassignedTask.id, tool, callA, eng.id) === false;
+  check(
+    "CAP2C",
+    "network MCP：改派导致的已批准授权必须原子失效，改回原负责人也不能复活",
+    Boolean(reassignedRequest && reassignedApproval && invalidConsumed && reassignedGrantCannotRevive),
+    `requested=${Boolean(reassignedRequest)} consumed=${invalidConsumed} revived=${!reassignedGrantCannotRevive}`,
+  );
+  const mismatchedTask = db.createTask({
+    channel_id: ch.id,
+    title: "回归-network-审批状态错配不可复活",
+    assignee_agent_id: eng.id,
+    created_by: "user",
+    source_doc_ids: [src.id],
+  });
+  db.updateTask(mismatchedTask.id, { status: "doing" });
+  const mismatchedRequest = engine.requestNetworkApprovalForTask(
+    eng,
+    db.getTask(mismatchedTask.id),
+    tool,
+    callA,
+    "批准一次状态错配调用",
+    "即使任务被旁路改状态，批准也必须立即失效",
+  );
+  db.updateTask(mismatchedTask.id, { status: "review" });
+  const mismatchedApproval = mismatchedRequest
+    ? db.resolveApproval(mismatchedRequest.approvalId, true)
+    : null;
+  if (mismatchedApproval) engine.onNetworkApprovalResolved(mismatchedApproval);
+  const mismatchedConsumed = Boolean(
+    mismatchedRequest && db.getApproval(mismatchedRequest.approvalId)?.consumed_at,
+  );
+  db.updateTask(mismatchedTask.id, { status: "doing", blocked_approval_id: null });
+  const mismatchedCannotRevive =
+    !engine.taskHasApprovedNetworkGrant(mismatchedTask.id, tool, callA, eng.id);
+  check(
+    "CAP2D",
+    "network MCP：审批处理时任务状态/blocked id 已错配，批准必须关闭且不可复活",
+    Boolean(mismatchedRequest && mismatchedApproval && mismatchedConsumed && mismatchedCannotRevive),
+    `requested=${Boolean(mismatchedRequest)} consumed=${mismatchedConsumed} revived=${!mismatchedCannotRevive}`,
+  );
   db.deleteMcpServer(srv.id);
-  check("CAP2", "network MCP：普通任务可直连，来源任务/严格模式必须先审批", plainOk && sourcedOk && strictOk,
-    `plain=${plainOk} sourced=${sourcedOk} strict=${strictOk}`);
 }
 
 // DOC-HTML html 交付物：格式 + 防 XSS 校验（外链 script / 内联事件 / javascript: URI 全拒）
@@ -790,20 +996,42 @@ process.env.AITEAM_MCP_STDIO_ALLOW = [process.env.AITEAM_MCP_STDIO_ALLOW, "mcp-s
   .filter(Boolean)
   .join(",");
 const server = spawn("node", [join(root, "server/dist/index.js")], {
-  env: { ...process.env, PORT: String(PORT) },
+  env: { ...process.env, PORT: String(PORT), AITEAM_TEST_INSTANCE_ID: TEST_INSTANCE_ID },
   stdio: "ignore",
 });
+let serverExit = null;
+server.once("error", (error) => { serverExit = { error: String(error) }; });
+server.once("exit", (code, signal) => { serverExit = { code, signal }; });
 let fakeOpenAiServer = null;
 let fakeOpenAiStreamHits = 0;
-const up = await waitFor(async () => {
+const NETWORK_APPROVAL_MARKER = "NETWORK_APPROVAL_E2E";
+const NETWORK_PROBE_TOOL = "mcp__network_probe__search";
+const networkProbeFile = join(testDataDir, "network-probe-calls.jsonl");
+const networkProbeCalls = () => {
   try {
-    const r = await fetch(`${BASE}/auth/me`); // 未登录返回 401（仍表示服务已起）
-    return r.status === 401 || r.ok;
+    return readFileSync(networkProbeFile, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+  } catch {
+    return [];
+  }
+};
+try {
+const up = await waitFor(async () => {
+  if (serverExit) return false;
+  try {
+    const r = await fetch(`${BASE}/__test/instance`);
+    const body = await r.json().catch(() => ({}));
+    return r.ok && body.instance_id === TEST_INSTANCE_ID;
   } catch {
     return false;
   }
 }, 15000);
-check("A1", "服务启动可达", up);
+check("A1", "隔离服务启动可达且实例探针匹配", up, serverExit ? JSON.stringify(serverExit) : `port=${PORT}`);
+if (!up) {
+  throw new Error(`regression server failed to start: ${JSON.stringify(serverExit)}`);
+}
 
 // 鉴权：未登录访问受保护 API 应 401；登录后下发会话 cookie
 let sessionCookie = "";
@@ -839,13 +1067,34 @@ fakeOpenAiServer = createServer((req, res) => {
     const toolMessages = messages.filter((m) => m.role === "tool");
     const tools = Array.isArray(body.tools) ? body.tools.map((t) => t?.function?.name).filter(Boolean) : [];
     const hasToolResult = toolMessages.length > 0;
+    const isNetworkApprovalProbe =
+      tools.includes(NETWORK_PROBE_TOOL) &&
+      messages.some((message) => JSON.stringify(message).includes(NETWORK_APPROVAL_MARKER));
     const toolCall = (name, args) => ({
       id: `call_${name}_${Date.now()}`,
       type: "function",
       function: { name, arguments: JSON.stringify(args) },
     });
     let message = { role: "assistant", content: `AiTeam 模型通道可用：${body.model}` };
-    if (tools.includes("submit_verdict") && !hasToolResult) {
+    if (isNetworkApprovalProbe && toolMessages.length === 0) {
+      message = {
+        role: "assistant",
+        content: null,
+        tool_calls: [toolCall(NETWORK_PROBE_TOOL, { query: "公开资料：AiTeam scoped approval", limit: 2 })],
+      };
+    } else if (isNetworkApprovalProbe && toolMessages.length === 1 && tools.includes("write_document")) {
+      message = {
+        role: "assistant",
+        content: null,
+        tool_calls: [toolCall("write_document", {
+          title: "Network approval E2E delivery",
+          kind: "report",
+          content: `# Network approval E2E delivery\n\n${NETWORK_APPROVAL_MARKER}\n\nTL;DR: scoped network MCP executed exactly once after approval.\n\n## 自查表\n- 单次授权 -> 满足 -> 已由回归计数器核验。`,
+        })],
+      };
+    } else if (isNetworkApprovalProbe && toolMessages.length >= 2) {
+      message = { role: "assistant", content: "Network approval E2E completed." };
+    } else if (tools.includes("submit_verdict") && !hasToolResult) {
       message = {
         role: "assistant",
         content: null,
@@ -864,45 +1113,49 @@ fakeOpenAiServer = createServer((req, res) => {
     } else if (hasToolResult) {
       message = { role: "assistant", content: "Fake provider completed tool result follow-up." };
     }
-    const usage = { prompt_tokens: 7, completion_tokens: 5, total_tokens: 12 };
-    if (body.stream === true) {
-      // 真流式路径：模拟国内 OpenAI 兼容通道的 SSE 分片（含 stream_options.include_usage 的末尾 usage 块）
-      fakeOpenAiStreamHits++;
-      res.writeHead(200, { "Content-Type": "text/event-stream" });
-      const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
-      const chunk = (delta, finish = null) => ({ id: "chatcmpl-regression", choices: [{ index: 0, delta, finish_reason: finish }] });
-      if (message.tool_calls?.length) {
-        const tc = message.tool_calls[0];
-        const args = tc.function.arguments;
-        const half = Math.ceil(args.length / 2);
-        send(chunk({ role: "assistant", tool_calls: [{ index: 0, id: tc.id, type: "function", function: { name: tc.function.name, arguments: "" } }] }));
-        send(chunk({ tool_calls: [{ index: 0, function: { arguments: args.slice(0, half) } }] }));
-        send(chunk({ tool_calls: [{ index: 0, function: { arguments: args.slice(half) } }] }));
-        send(chunk({}, "tool_calls"));
-      } else {
-        const text = String(message.content ?? "");
-        const half = Math.ceil(text.length / 2);
-        send(chunk({ role: "assistant", content: text.slice(0, half) }));
-        send(chunk({ content: text.slice(half) }));
-        send(chunk({}, "stop"));
+    const respond = () => {
+      const usage = { prompt_tokens: 7, completion_tokens: 5, total_tokens: 12 };
+      if (body.stream === true) {
+        // 真流式路径：模拟国内 OpenAI 兼容通道的 SSE 分片（含 stream_options.include_usage 的末尾 usage 块）
+        fakeOpenAiStreamHits++;
+        res.writeHead(200, { "Content-Type": "text/event-stream" });
+        const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+        const chunk = (delta, finish = null) => ({ id: "chatcmpl-regression", choices: [{ index: 0, delta, finish_reason: finish }] });
+        if (message.tool_calls?.length) {
+          const tc = message.tool_calls[0];
+          const args = tc.function.arguments;
+          const half = Math.ceil(args.length / 2);
+          send(chunk({ role: "assistant", tool_calls: [{ index: 0, id: tc.id, type: "function", function: { name: tc.function.name, arguments: "" } }] }));
+          send(chunk({ tool_calls: [{ index: 0, function: { arguments: args.slice(0, half) } }] }));
+          send(chunk({ tool_calls: [{ index: 0, function: { arguments: args.slice(half) } }] }));
+          send(chunk({}, "tool_calls"));
+        } else {
+          const text = String(message.content ?? "");
+          const half = Math.ceil(text.length / 2);
+          send(chunk({ role: "assistant", content: text.slice(0, half) }));
+          send(chunk({ content: text.slice(half) }));
+          send(chunk({}, "stop"));
+        }
+        send({ id: "chatcmpl-regression", choices: [], usage });
+        res.write("data: [DONE]\n\n");
+        res.end();
+        return;
       }
-      send({ id: "chatcmpl-regression", choices: [], usage });
-      res.write("data: [DONE]\n\n");
-      res.end();
-      return;
-    }
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({
-      id: "chatcmpl-regression",
-      choices: [{ message, finish_reason: message.tool_calls?.length ? "tool_calls" : "stop" }],
-      usage,
-    }));
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        id: "chatcmpl-regression",
+        choices: [{ message, finish_reason: message.tool_calls?.length ? "tool_calls" : "stop" }],
+        usage,
+      }));
+    };
+    // 给 stop/cancel 回归留出稳定窗口：模型已开始生成 network tool_use，但工具尚未返回给引擎。
+    if (isNetworkApprovalProbe && toolMessages.length === 0) setTimeout(respond, 300);
+    else respond();
   });
 });
 await new Promise((resolve) => fakeOpenAiServer.listen(0, "127.0.0.1", resolve));
 const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
 
-try {
   // AUTH2 角色门控 + 多用户隔离：注册第二个用户(member)，应被挡在 admin 配置外、且看不到管理员的频道
   {
     const reg = await fetch(`${BASE}/auth/register`, {
@@ -1022,6 +1275,326 @@ try {
         agentDeliveredAfter === agentDeliveredBefore,
       `fakeDone=${fakeDone.ok} cancelled=${cancelled.ok} live=${liveStarted}/${liveCancelled.ok}/${db.getTask(live.body.id).status} downstream=${db.getTask(dependent.id).status} delivered=${deliveredBefore}->${deliveredAfter}`,
     );
+  }
+
+  // HC3E 交付状态不可由人工通用 PATCH 伪造，否则会提前解锁依赖
+  {
+    enterOwner(ownerFromUserId(testUser.id));
+    const prerequisite = db.createTask({
+      channel_id: ch.id,
+      title: "回归-运行中任务不能人工伪造交付",
+      created_by: "user",
+    });
+    db.updateTask(prerequisite.id, { status: "doing" });
+    const dependent = db.createTask({
+      channel_id: ch.id,
+      title: "回归-伪造交付不能解锁下游",
+      assignee_agent_id: pm.id,
+      depends_on: [prerequisite.id],
+      created_by: "user",
+    });
+    const manualReview = await J(`/tasks/${prerequisite.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "review" }),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const prerequisiteEvents = db.listTaskEvents(prerequisite.id);
+    const dependentEvents = db.listTaskEvents(dependent.id);
+    check(
+      "HC3E",
+      "交付状态只能由执行/验收闭环产生：禁止通用 PATCH 把 doing 推进到 review",
+      !manualReview.ok &&
+        db.getTask(prerequisite.id).status === "doing" &&
+        db.getTask(dependent.id).status === "todo" &&
+        !prerequisiteEvents.some((event) => event.type === "delivery") &&
+        !dependentEvents.some((event) => event.type === "start"),
+      `manualReview=${manualReview.ok} prerequisite=${db.getTask(prerequisite.id).status} dependent=${db.getTask(dependent.id).status}`,
+    );
+  }
+
+  // HC3F 待评审任务退回必须走 revise 接口，不能绕过返工理由、次数和审计事件
+  {
+    enterOwner(ownerFromUserId(testUser.id));
+    const reviewTask = db.createTask({
+      channel_id: ch.id,
+      title: "回归-待评审退回必须走正式返工",
+      created_by: "user",
+    });
+    db.updateTask(reviewTask.id, { status: "review" });
+    const manualTodo = await J(`/tasks/${reviewTask.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "todo" }),
+    });
+    check(
+      "HC3F",
+      "待评审任务不能用通用 PATCH 退回 todo，必须走带原因和审计的 revise",
+      !manualTodo.ok &&
+        db.getTask(reviewTask.id).status === "review" &&
+        db.getTask(reviewTask.id).revision_count === 0,
+      `manualTodo=${manualTodo.ok} status=${db.getTask(reviewTask.id).status} revisions=${db.getTask(reviewTask.id).revision_count}`,
+    );
+  }
+
+  // HC3G 运行中任务只能走 stop/cancel，不能用通用状态 PATCH 制造“已停止”假象
+  {
+    enterOwner(ownerFromUserId(testUser.id));
+    const doingTask = db.createTask({
+      channel_id: ch.id,
+      title: "回归-运行中停止必须走停止开关",
+      created_by: "user",
+    });
+    db.updateTask(doingTask.id, { status: "doing" });
+    const manualTodo = await J(`/tasks/${doingTask.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "todo" }),
+    });
+    check(
+      "HC3G",
+      "运行中任务不能用通用 PATCH 退回 todo，必须走 stop 或 cancel",
+      !manualTodo.ok && db.getTask(doingTask.id).status === "doing",
+      `manualTodo=${manualTodo.ok} status=${db.getTask(doingTask.id).status}`,
+    );
+  }
+
+  // HC3H scoped network action 审批必须恢复原任务，重复 resolve 不得重复恢复/触发
+  {
+    enterOwner(ownerFromUserId(testUser.id));
+    const noRunAgent = { ...eng, id: "network_resume_no_run" };
+    const networkServer = db.createMcpServer({
+      name: "network_resume",
+      kind: "http",
+      url: "https://network-resume.example/mcp",
+      safety: "network",
+    });
+    const tool = "mcp__network_resume__search";
+    const input = { query: "只检索公开资料", limit: 3 };
+    const task = db.createTask({
+      channel_id: ch.id,
+      title: "回归-network-批准后恢复原任务",
+      assignee_agent_id: noRunAgent.id,
+      created_by: "user",
+    });
+    db.updateTask(task.id, { status: "doing" });
+    const request = engine.requestNetworkApprovalForTask(
+      noRunAgent,
+      db.getTask(task.id),
+      tool,
+      input,
+      "批准一次公开资料检索",
+      "仅执行列明的工具和参数",
+    );
+    const malformed = await J(`/approvals/${request.approvalId}/resolve`, {
+      method: "POST",
+      body: JSON.stringify({ approve: "false" }),
+    });
+    const stillPendingAfterMalformed = db.getApproval(request.approvalId)?.status === "pending";
+    const resolved = await J(`/approvals/${request.approvalId}/resolve`, {
+      method: "POST",
+      body: JSON.stringify({ approve: true }),
+    });
+    db.db.pragma("wal_checkpoint(FULL)");
+    const afterFirst = db.getTask(task.id);
+    const firstResumeEvents = db.listTaskEvents(task.id).filter(
+      (event) => event.type === "approval" && event.summary.includes("任务恢复"),
+    ).length;
+    const repeated = await J(`/approvals/${request.approvalId}/resolve`, {
+      method: "POST",
+      body: JSON.stringify({ approve: true }),
+    });
+    db.db.pragma("wal_checkpoint(FULL)");
+    const secondResumeEvents = db.listTaskEvents(task.id).filter(
+      (event) => event.type === "approval" && event.summary.includes("任务恢复"),
+    ).length;
+    check(
+      "HC3H",
+      "network action 批准后恢复原任务且只恢复一次，不得切到无 taskId 的普通 chat",
+      resolved.ok &&
+        !malformed.ok &&
+        stillPendingAfterMalformed &&
+        repeated.ok &&
+        afterFirst?.status === "todo" &&
+        afterFirst.blocked_approval_id === null &&
+        engine.taskHasApprovedNetworkGrant(task.id, tool, input, noRunAgent.id) &&
+        firstResumeEvents === 1 &&
+        secondResumeEvents === firstResumeEvents,
+      `malformed=${malformed.ok}/${stillPendingAfterMalformed} resolved=${resolved.ok} status=${afterFirst?.status} grant=${engine.taskHasApprovedNetworkGrant(task.id, tool, input, noRunAgent.id)} resumeEvents=${firstResumeEvents}->${secondResumeEvents}`,
+    );
+    db.deleteMcpServer(networkServer.id);
+  }
+
+  // HC3I scoped network action 被拒后必须保持阻塞，重复 resolve 不得重复写入拒绝事件
+  {
+    enterOwner(ownerFromUserId(testUser.id));
+    const noRunAgent = { ...eng, id: "network_reject_no_run" };
+    const networkServer = db.createMcpServer({
+      name: "network_reject",
+      kind: "http",
+      url: "https://network-reject.example/mcp",
+      safety: "network",
+    });
+    const tool = "mcp__network_reject__search";
+    const input = { query: "禁止外发的内部材料" };
+    const task = db.createTask({
+      channel_id: ch.id,
+      title: "回归-network-拒绝后保持阻塞",
+      assignee_agent_id: noRunAgent.id,
+      created_by: "user",
+    });
+    db.updateTask(task.id, { status: "doing" });
+    const request = engine.requestNetworkApprovalForTask(
+      noRunAgent,
+      db.getTask(task.id),
+      tool,
+      input,
+      "批准一次内部材料检索",
+      "本测试应被用户拒绝",
+    );
+    const rejected = await J(`/approvals/${request.approvalId}/resolve`, {
+      method: "POST",
+      body: JSON.stringify({ approve: false }),
+    });
+    db.db.pragma("wal_checkpoint(FULL)");
+    const afterFirst = db.getTask(task.id);
+    const firstRejectEvents = db.listTaskEvents(task.id).filter(
+      (event) => event.type === "approval" && event.summary.includes("拒绝网络调用"),
+    ).length;
+    const repeated = await J(`/approvals/${request.approvalId}/resolve`, {
+      method: "POST",
+      body: JSON.stringify({ approve: false }),
+    });
+    db.db.pragma("wal_checkpoint(FULL)");
+    const secondRejectEvents = db.listTaskEvents(task.id).filter(
+      (event) => event.type === "approval" && event.summary.includes("拒绝网络调用"),
+    ).length;
+    check(
+      "HC3I",
+      "network action 被拒后保持原任务阻塞且只记录一次，不得留下可用授权",
+      rejected.ok &&
+        repeated.ok &&
+        afterFirst?.status === "blocked" &&
+        afterFirst.blocked_approval_id === request.approvalId &&
+        !engine.taskHasApprovedNetworkGrant(task.id, tool, input, noRunAgent.id) &&
+        firstRejectEvents === 1 &&
+        secondRejectEvents === firstRejectEvents,
+      `rejected=${rejected.ok} status=${afterFirst?.status} grant=${engine.taskHasApprovedNetworkGrant(task.id, tool, input, noRunAgent.id)} rejectEvents=${firstRejectEvents}->${secondRejectEvents}`,
+    );
+    db.deleteMcpServer(networkServer.id);
+  }
+
+  // HC3K 改派/取消/手工重试必须关闭旧 network grant，且已处理的 blocked 任务可从详情恢复
+  {
+    enterOwner(ownerFromUserId(testUser.id));
+    const noRunAgent = { ...eng, id: "network_context_no_run" };
+    const networkServer = db.createMcpServer({
+      name: "network_context",
+      kind: "http",
+      url: "https://network-context.example/mcp",
+      safety: "network",
+    });
+    const tool = "mcp__network_context__search";
+    const input = { query: "上下文撤销测试" };
+
+    const reassignedTask = db.createTask({
+      channel_id: ch.id,
+      title: "回归-network-路由改派关闭授权",
+      assignee_agent_id: noRunAgent.id,
+      created_by: "user",
+    });
+    db.updateTask(reassignedTask.id, { status: "doing" });
+    const reassignedRequest = engine.requestNetworkApprovalForTask(
+      noRunAgent,
+      db.getTask(reassignedTask.id),
+      tool,
+      input,
+      "批准一次改派前调用",
+      "改派后必须失效",
+    );
+    db.resolveApproval(reassignedRequest.approvalId, true);
+    db.updateTask(reassignedTask.id, { status: "todo", blocked_approval_id: null });
+    const reassigned = await J(`/tasks/${reassignedTask.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ assignee_agent_id: "network_context_new_owner" }),
+    });
+    const reassignedConsumed = Boolean(db.getApproval(reassignedRequest.approvalId)?.consumed_at);
+    await J(`/tasks/${reassignedTask.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ assignee_agent_id: noRunAgent.id }),
+    });
+    db.updateTask(reassignedTask.id, { status: "doing" });
+    const reassignedCannotRevive =
+      !engine.taskHasApprovedNetworkGrant(reassignedTask.id, tool, input, noRunAgent.id);
+
+    const cancelledTask = db.createTask({
+      channel_id: ch.id,
+      title: "回归-network-取消关闭授权",
+      assignee_agent_id: noRunAgent.id,
+      created_by: "user",
+    });
+    db.updateTask(cancelledTask.id, { status: "doing" });
+    const cancelledRequest = engine.requestNetworkApprovalForTask(
+      noRunAgent,
+      db.getTask(cancelledTask.id),
+      tool,
+      input,
+      "批准一次取消前调用",
+      "取消后必须失效",
+    );
+    db.resolveApproval(cancelledRequest.approvalId, true);
+    db.updateTask(cancelledTask.id, { status: "todo", blocked_approval_id: null });
+    const cancelled = await J(`/tasks/${cancelledTask.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "cancelled" }),
+    });
+    const cancelledConsumed = Boolean(db.getApproval(cancelledRequest.approvalId)?.consumed_at);
+    await J(`/tasks/${cancelledTask.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "todo" }),
+    });
+    db.updateTask(cancelledTask.id, { status: "doing" });
+    const cancelledCannotRevive =
+      !engine.taskHasApprovedNetworkGrant(cancelledTask.id, tool, input, noRunAgent.id);
+
+    const rejectedTask = db.createTask({
+      channel_id: ch.id,
+      title: "回归-network-拒绝后可调整重试",
+      assignee_agent_id: noRunAgent.id,
+      created_by: "user",
+    });
+    db.updateTask(rejectedTask.id, { status: "doing" });
+    const rejectedRequest = engine.requestNetworkApprovalForTask(
+      noRunAgent,
+      db.getTask(rejectedTask.id),
+      tool,
+      input,
+      "批准一次将被拒绝的调用",
+      "拒绝后从详情调整重试",
+    );
+    const rejectedApproval = db.resolveApproval(rejectedRequest.approvalId, false);
+    if (rejectedApproval) engine.onNetworkApprovalResolved(rejectedApproval);
+    const resumed = await J(`/tasks/${rejectedTask.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "todo" }),
+    });
+    const resumedEvent = db.listTaskEvents(rejectedTask.id).some(
+      (event) => event.type === "handoff" && event.summary.includes("恢复任务并重新尝试"),
+    );
+
+    check(
+      "HC3K",
+      "network grant 上下文撤销：改派/取消后不可复活，已处理的 blocked 任务可调整后重试",
+      reassigned.ok &&
+        reassignedConsumed &&
+        reassignedCannotRevive &&
+        cancelled.ok &&
+        cancelledConsumed &&
+        cancelledCannotRevive &&
+        resumed.ok &&
+        resumed.body.status === "todo" &&
+        resumed.body.blocked_approval_id === null &&
+        resumedEvent,
+      `reassigned=${reassigned.ok}/${reassignedConsumed}/${reassignedCannotRevive} cancelled=${cancelled.ok}/${cancelledConsumed}/${cancelledCannotRevive} resumed=${resumed.ok}/${resumed.body.status}/${resumedEvent}`,
+    );
+    db.deleteMcpServer(networkServer.id);
   }
 
   // HC3C clarification HTTP 闭环：用户输入必须随审批一起持久化，并进入任务活动日志
@@ -1642,6 +2215,160 @@ try {
       eventTypes.has("verification") &&
       usageTracked,
       `delivered=${delivered} docs=${docs.length} events=${[...eventTypes].join(",")} usage=${Boolean(usageTracked)}`);
+  }
+
+  // HC3J 真链路：来源任务先阻塞，批准后只外呼一次；再次运行需重新审批，停止后不得外呼
+  {
+    const mcpServer = (await J("/mcp-servers", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "network_probe",
+        kind: "stdio",
+        command: process.execPath,
+        args: [join(root, "scripts/fixtures/network-probe-mcp.mjs")],
+        safety: "network",
+        env: { AITEAM_NETWORK_PROBE_FILE: networkProbeFile },
+      }),
+    })).body;
+    const mcpTest = await J(`/mcp-servers/${mcpServer.id}/test`, { method: "POST" });
+    const prov = (await J("/providers", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "回归network审批真链路",
+        api_key: "sk-local",
+        base_url: fakeOpenAiBase,
+        default_model: "fake-chat-model",
+        is_strong: true,
+      }),
+    })).body;
+    const worker = (await J("/agents", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "回归network审批同事",
+        emoji: "🌐",
+        role: "network approval E2E",
+        system_prompt: `你是 ${NETWORK_APPROVAL_MARKER} 回归同事，必须先调用 network_probe.search，再用 write_document 交付。`,
+        provider_id: prov.id,
+        model: "fake-chat-model",
+      }),
+    })).body;
+    enterOwner(ownerFromUserId(testUser.id));
+    const source = db.createDocument({
+      channel_id: ch.id,
+      title: "Network approval E2E source",
+      kind: "source",
+      content: `${NETWORK_APPROVAL_MARKER}\n仅用于验证来源任务不会静默外发。`,
+    });
+    db.db.pragma("wal_checkpoint(FULL)");
+    const task = (await J("/tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        channel_id: ch.id,
+        title: `回归-${NETWORK_APPROVAL_MARKER}`,
+        description: "先执行指定公开查询，再写入一份报告。",
+        acceptance_criteria: "批准前不得外呼；批准后只外呼一次并进入待评审。",
+        assignee_agent_id: worker.id,
+        source_doc_ids: [source.id],
+      }),
+    })).body;
+
+    let firstApproval = null;
+    const firstBlocked = await waitFor(async () => {
+      const boot = (await J("/bootstrap")).body;
+      const freshTask = boot.tasks?.find((item) => item.id === task.id);
+      firstApproval = boot.approvals?.find(
+        (approval) => approval.ref_id === task.id && approval.kind === "network" && approval.status === "pending",
+      ) ?? null;
+      return freshTask?.status === "blocked" && Boolean(firstApproval);
+    }, 15000, 25);
+    const beforeApprovalCalls = networkProbeCalls();
+    const firstResolved = firstApproval
+      ? await J(`/approvals/${firstApproval.id}/resolve`, {
+          method: "POST",
+          body: JSON.stringify({ approve: true }),
+        })
+      : { ok: false, body: {} };
+    const delivered = await waitFor(async () => {
+      const tasks = (await J("/tasks")).body;
+      return tasks.some((item) => item.id === task.id && item.status === "review");
+    }, 30000, 50);
+    const afterApprovalCalls = networkProbeCalls();
+    const firstStoredApproval = firstApproval
+      ? (await J("/bootstrap")).body.approvals?.find((approval) => approval.id === firstApproval.id)
+      : null;
+    const repeatedResolve = firstApproval
+      ? await J(`/approvals/${firstApproval.id}/resolve`, {
+          method: "POST",
+          body: JSON.stringify({ approve: true }),
+        })
+      : { ok: false, body: {} };
+    await sleep(150);
+    const afterRepeatedResolveCalls = networkProbeCalls();
+
+    const revised = await J(`/tasks/${task.id}/revise`, {
+      method: "POST",
+      body: JSON.stringify({ reason: "验证一次性授权不能在下一轮返工复用" }),
+    });
+    let secondApproval = null;
+    const secondBlocked = await waitFor(async () => {
+      const boot = (await J("/bootstrap")).body;
+      const freshTask = boot.tasks?.find((item) => item.id === task.id);
+      secondApproval = boot.approvals?.find(
+        (approval) =>
+          approval.ref_id === task.id &&
+          approval.kind === "network" &&
+          approval.status === "pending" &&
+          approval.id !== firstApproval?.id,
+      ) ?? null;
+      return freshTask?.status === "blocked" && Boolean(secondApproval);
+    }, 15000, 25);
+    const beforeStopCalls = networkProbeCalls();
+    const secondResolved = secondApproval
+      ? await J(`/approvals/${secondApproval.id}/resolve`, {
+          method: "POST",
+          body: JSON.stringify({ approve: true }),
+        })
+      : { ok: false, body: {} };
+    const stopped = await J(`/tasks/${task.id}/stop`, { method: "POST" });
+    const stoppedAtTodo = await waitFor(async () => {
+      const tasks = (await J("/tasks")).body;
+      return tasks.some((item) => item.id === task.id && item.status === "todo");
+    }, 10000, 25);
+    const afterStopCalls = networkProbeCalls();
+    const secondStoredApproval = secondApproval
+      ? (await J("/bootstrap")).body.approvals?.find((approval) => approval.id === secondApproval.id)
+      : null;
+    const docs = (await J("/documents")).body.filter((doc) => doc.task_id === task.id);
+
+    check(
+      "HC3J",
+      "network MCP 真链路：批准前零外呼、批准后精确一次、返工需重批、停止后不再外呼",
+      mcpTest.ok &&
+        mcpTest.body.tools === 1 &&
+        firstBlocked &&
+        beforeApprovalCalls.length === 0 &&
+        firstResolved.ok &&
+        delivered &&
+        afterApprovalCalls.length === 1 &&
+        afterApprovalCalls[0]?.query === "公开资料：AiTeam scoped approval" &&
+        afterApprovalCalls[0]?.limit === 2 &&
+        Boolean(firstStoredApproval?.consumed_at) &&
+        repeatedResolve.ok &&
+        afterRepeatedResolveCalls.length === 1 &&
+        revised.ok &&
+        secondBlocked &&
+        beforeStopCalls.length === 1 &&
+        secondResolved.ok &&
+        stopped.ok &&
+        stoppedAtTodo &&
+        afterStopCalls.length === 1 &&
+        Boolean(secondStoredApproval?.consumed_at) &&
+        docs.some((doc) => doc.kind === "report" && doc.content.includes(NETWORK_APPROVAL_MARKER)),
+      `mcp=${mcpTest.ok}/${mcpTest.body.tools} blocked=${firstBlocked}/${secondBlocked} calls=${beforeApprovalCalls.length}->${afterApprovalCalls.length}->${afterRepeatedResolveCalls.length}->${afterStopCalls.length} delivered=${delivered} stop=${stoppedAtTodo} consumed=${Boolean(firstStoredApproval?.consumed_at)}/${Boolean(secondStoredApproval?.consumed_at)}`,
+    );
+
+    await J(`/mcp-servers/${mcpServer.id}`, { method: "DELETE" });
+    await J(`/providers/${prov.id}`, { method: "DELETE" });
   }
 
   {

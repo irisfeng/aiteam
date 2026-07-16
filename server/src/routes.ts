@@ -43,7 +43,8 @@ import {
   listMessages,
   listTaskEvents,
   listTasks,
-  resolveApproval,
+  invalidateNetworkApprovalsForTask,
+  resolveApprovalOnce,
   updateApprovalPayload,
   updateTask,
   createVerdict,
@@ -86,6 +87,7 @@ import {
   onMessage,
   onBudgetResolved,
   onClarificationResolved,
+  onNetworkApprovalResolved,
   onPlanResolved,
   onTaskAssigned,
   onTaskDelivered,
@@ -1168,8 +1170,8 @@ api.patch("/tasks/:id", (req, res) => {
     const nextStatus = String(status);
     const allowed: Record<string, string[]> = {
       todo: ["todo", "cancelled"],
-      doing: ["todo", "review", "cancelled"],
-      review: ["todo", "done", "cancelled"],
+      doing: ["cancelled"],
+      review: ["done", "cancelled"],
       // blocked→todo 是"审批已处理但未恢复"（如拒绝追加预算后想调整预算重跑）的人工恢复口；
       // 仍有 pending 阻塞审批时下方统一拦截，防止绕过待输入直接重启。
       blocked: ["todo", "cancelled"],
@@ -1200,7 +1202,7 @@ api.patch("/tasks/:id", (req, res) => {
   }
   const { budget_billable } = req.body ?? {};
   if (status === "cancelled" && prev.status === "doing") stopTask(prev.id);
-  if (status === "todo" && prev.status === "cancelled") clearTaskStop(prev.id);
+  if (status === "todo" && (prev.status === "cancelled" || prev.status === "blocked")) clearTaskStop(prev.id);
   const task = updateTask(req.params.id, {
     ...(title !== undefined ? { title } : {}),
     ...(description !== undefined ? { description } : {}),
@@ -1211,7 +1213,13 @@ api.patch("/tasks/:id", (req, res) => {
     ...(budget_billable !== undefined ? { budget_billable: Number(budget_billable) > 0 ? Math.round(Number(budget_billable)) : 0 } : {}),
   });
   if (!task) return res.status(404).json({ error: "task not found" });
-  if (task.assignee_agent_id !== prev?.assignee_agent_id) {
+  const assigneeChanged = task.assignee_agent_id !== prev.assignee_agent_id;
+  const contextRevoked =
+    assigneeChanged ||
+    task.status === "cancelled" ||
+    (prev.status === "blocked" && task.status === "todo");
+  if (contextRevoked) invalidateNetworkApprovalsForTask(task.id);
+  if (assigneeChanged) {
     emitTaskEvent({
       task_id: task.id,
       channel_id: task.channel_id,
@@ -1245,6 +1253,16 @@ api.patch("/tasks/:id", (req, res) => {
         type: "blocked",
         summary: "任务进入等待用户输入状态",
       });
+    } else if (task.status === "todo" && prev.status === "blocked") {
+      emitTaskEvent({
+        task_id: task.id,
+        channel_id: task.channel_id,
+        project_id: task.project_id,
+        agent_id: task.assignee_agent_id,
+        type: "handoff",
+        summary: "用户调整后恢复任务并重新尝试",
+        metadata: { previous_approval_id: prev.blocked_approval_id },
+      });
     } else if (task.status === "review") {
       emitTaskEvent({
         task_id: task.id,
@@ -1276,7 +1294,10 @@ api.patch("/tasks/:id", (req, res) => {
   }
   broadcast({ type: "task:upsert", payload: task });
   // 用户把任务指派给了新的 AI 同事 → 对方自动开工
-  if (task.assignee_agent_id && task.assignee_agent_id !== prev?.assignee_agent_id) onTaskAssigned(task);
+  if (
+    task.assignee_agent_id &&
+    (assigneeChanged || (prev.status === "blocked" && task.status === "todo"))
+  ) onTaskAssigned(task);
   // 人工把任务推进到交付态 → 解锁依赖它的任务 / 触发项目汇总
   const delivered = task.status === "review" || task.status === "done";
   const wasDelivered = prev?.status === "review" || prev?.status === "done";
@@ -1668,31 +1689,36 @@ function mergeClarificationResponse(payload: string, response: string): string {
 }
 
 api.post("/approvals/:id/resolve", (req, res) => {
-  const approve = Boolean(req.body?.approve);
+  if (typeof req.body?.approve !== "boolean") {
+    return res.status(400).json({ error: "approve must be boolean" });
+  }
+  const approve = req.body.approve;
   const before = getApproval(req.params.id);
   if (before?.status === "pending" && before.kind === "clarification" && approve) {
     const response = typeof req.body?.response === "string" ? req.body.response : "";
     updateApprovalPayload(before.id, mergeClarificationResponse(before.payload, response));
   }
-  const approval = resolveApproval(req.params.id, approve);
-  if (!approval) return res.status(404).json({ error: "approval not found" });
-  const changed = before?.status === "pending" && approval.status !== "pending";
+  const resolved = resolveApprovalOnce(req.params.id, approve);
+  if (!resolved) return res.status(404).json({ error: "approval not found" });
+  const { approval, changed } = resolved;
+  const wasApproved = approval.status === "approved";
+  if (changed && approval.kind === "network") onNetworkApprovalResolved(approval);
   if (changed) broadcast({ type: "approval:upsert", payload: approval });
   if (changed && approval.channel_id) {
     const agent = getAgent(approval.agent_id);
     const sys = insertMessage({
       channel_id: approval.channel_id,
       author_type: "system",
-      content: `${approve ? "✅ 用户批准了" : "❌ 用户拒绝了"} ${agent?.name ?? "AI"} 的审批请求「${approval.title}」`,
+      content: `${wasApproved ? "✅ 用户批准了" : "❌ 用户拒绝了"} ${agent?.name ?? "AI"} 的审批请求「${approval.title}」`,
     });
     broadcast({ type: "message:new", payload: sys });
     if (approval.kind === "plan" && approval.ref_id) {
-      onPlanResolved(approval.ref_id, approve); // 计划把关：批准开工 / 退回唤起 Lead
-    } else if (approval.kind !== "clarification" && approval.kind !== "budget") {
+      onPlanResolved(approval.ref_id, wasApproved); // 计划把关：批准开工 / 退回唤起 Lead
+    } else if (approval.kind === "action") {
       triggerAgent(approval.agent_id, approval.channel_id);
     }
   }
-  if (changed && approval.kind === "clarification") onClarificationResolved(approval, approve);
-  if (changed && approval.kind === "budget") onBudgetResolved(approval, approve); // 预算追加：批准恢复执行/拒绝保持暂停
+  if (changed && approval.kind === "clarification") onClarificationResolved(approval, wasApproved);
+  if (changed && approval.kind === "budget") onBudgetResolved(approval, wasApproved); // 预算追加：批准恢复执行/拒绝保持暂停
   res.json(approval);
 });

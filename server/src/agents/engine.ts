@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
   Agent,
@@ -17,6 +18,8 @@ import {
   listSkills,
   markRoutineRun,
   createApproval,
+  createBlockingNetworkApproval,
+  consumeApproval,
   createDocument,
   createProject,
   createTask,
@@ -30,6 +33,7 @@ import {
   getProject,
   getSkill,
   getTask,
+  invalidateNetworkApprovalsForTask,
   insertMessage,
   listAgents,
   listApprovals,
@@ -535,7 +539,7 @@ interface RunCtx {
   taskId: string | null;
   createdDocIds: string[];
   verdict: { result: "pass" | "revise"; reasons: string } | null;
-  halted: "blocked" | null;
+  halted: "blocked" | "stopped" | null;
 }
 
 function newCtx(agent: Agent, channel: Channel, kind: RunCtx["kind"], taskId: string | null = null): RunCtx {
@@ -614,6 +618,7 @@ async function runChat(agent: Agent, channel: Channel, depth: number, extraSyste
 
 const runningTasks = new Set<string>();
 const agentQueues = new Map<string, Promise<void>>();
+const resumeAfterRun = new Set<string>();
 const currentWork = new Map<string, string>(); // agentId -> 正在执行的 taskId
 const queuedCount = new Map<string, number>(); // agentId -> 排队中的任务数
 const cancelledTasks = new Set<string>(); // 用户按下停止开关的任务
@@ -634,6 +639,7 @@ function registerStream(channelId: string, stream: { abort(): void }): () => voi
 /** 停止开关（kill switch）：运行中的任务在下一个迭代边界停下；排队中的任务直接不再开工。 */
 export function stopTask(taskId: string) {
   cancelledTasks.add(taskId);
+  invalidateNetworkApprovalsForTask(taskId);
 }
 
 /** 取消任务恢复为待办时清掉旧停止标记，避免下一次认领被历史标记误杀。 */
@@ -689,10 +695,208 @@ export function mcpRequiresApprovalForTask(task: Pick<Task, "source_doc_ids"> | 
   return Boolean(task && taskHasSourceDocs(task));
 }
 
-/** 任务级网络外发授权：本任务下已有用户批准的 action 审批 → 二级审批门放行（授权范围限本任务）。 */
-export function taskHasApprovedNetworkGrant(taskId: string | null | undefined): boolean {
-  if (!taskId) return false;
-  return listApprovals().some((a) => a.ref_id === taskId && a.status === "approved" && a.kind === "action");
+function canonicalJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .filter(([, child]) => child !== undefined)
+        .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+        .map(([key, child]) => [key, canonicalJson(child)]),
+    );
+  }
+  return value;
+}
+
+interface NetworkGrantV1 {
+  v: 1;
+  server_id: string;
+  server_name: string;
+  server_target: string;
+  server_fingerprint: string;
+  tool: string;
+  input: unknown;
+  call_fingerprint: string;
+}
+
+function sha256(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(canonicalJson(value))).digest("hex");
+}
+
+function networkServerFingerprint(server: NonNullable<ReturnType<typeof mcpServerForTool>>): string {
+  return sha256({
+    id: server.id,
+    name: server.name,
+    kind: server.kind,
+    url: server.url,
+    auth_token: server.auth_token,
+    command: server.command,
+    args_json: server.args_json,
+    env_json: server.env_json,
+    safety: server.safety,
+  });
+}
+
+function createNetworkGrant(toolName: string, input: unknown): NetworkGrantV1 | null {
+  const server = mcpServerForTool(toolName);
+  if (!server || server.safety !== "network") return null;
+  const normalizedInput = canonicalJson(input);
+  const serverFingerprint = networkServerFingerprint(server);
+  return {
+    v: 1,
+    server_id: server.id,
+    server_name: server.name,
+    server_target: server.kind === "http" ? server.url : `stdio:${server.command}`,
+    server_fingerprint: serverFingerprint,
+    tool: toolName,
+    input: normalizedInput,
+    call_fingerprint: sha256({
+      server_fingerprint: serverFingerprint,
+      tool: toolName,
+      input: normalizedInput,
+    }),
+  };
+}
+
+function approvalContainsNetworkGrant(approval: Approval): boolean {
+  if (approval.kind !== "network") return false;
+  try {
+    const payload = JSON.parse(approval.payload || "{}") as { network_grant?: unknown };
+    return Boolean(payload.network_grant && typeof payload.network_grant === "object");
+  } catch {
+    return false;
+  }
+}
+
+function networkGrantFromApproval(approval: Approval, requireApproved = true): NetworkGrantV1 | null {
+  if (
+    approval.kind !== "network" ||
+    (requireApproved && approval.status !== "approved") ||
+    approval.consumed_at
+  ) return null;
+  try {
+    const payload = JSON.parse(approval.payload || "{}") as {
+      network_grant?: Partial<NetworkGrantV1>;
+    };
+    const grant = payload.network_grant;
+    if (
+      grant?.v !== 1 ||
+      typeof grant.server_id !== "string" ||
+      typeof grant.server_name !== "string" ||
+      typeof grant.server_target !== "string" ||
+      typeof grant.server_fingerprint !== "string" ||
+      typeof grant.tool !== "string" ||
+      typeof grant.call_fingerprint !== "string"
+    ) return null;
+    const current = createNetworkGrant(grant.tool, grant.input);
+    if (
+      !current ||
+      current.server_id !== grant.server_id ||
+      current.server_name !== grant.server_name ||
+      current.server_target !== grant.server_target ||
+      current.server_fingerprint !== grant.server_fingerprint ||
+      current.call_fingerprint !== grant.call_fingerprint
+    ) return null;
+    return current;
+  } catch {
+    return null;
+  }
+}
+
+function matchingApprovedNetworkGrant(
+  taskId: string | null | undefined,
+  toolName: string,
+  input: unknown,
+  agentId?: string,
+): Approval | null {
+  if (!taskId || !isMcpTool(toolName)) return null;
+  const expected = createNetworkGrant(toolName, input);
+  if (!expected) return null;
+  for (const approval of listApprovals()) {
+    if (approval.ref_id !== taskId || (agentId && approval.agent_id !== agentId)) continue;
+    const grant = networkGrantFromApproval(approval);
+    if (
+      !grant ||
+      grant.server_id !== expected.server_id ||
+      grant.tool !== expected.tool ||
+      grant.call_fingerprint !== expected.call_fingerprint
+    ) continue;
+    return approval;
+  }
+  return null;
+}
+
+/**
+ * 任务级网络外发授权必须绑定具体 MCP 工具和完整参数。
+ * 任意 action 批准、不同工具或不同查询都不能复用成网络外发通行证。
+ */
+export function taskHasApprovedNetworkGrant(
+  taskId: string | null | undefined,
+  toolName: string,
+  input: unknown,
+  agentId?: string,
+): boolean {
+  return Boolean(matchingApprovedNetworkGrant(taskId, toolName, input, agentId));
+}
+
+/** 在真正网络外呼前同步消费一次性授权；失败调用也必须重新审批。 */
+export function consumeApprovedNetworkGrant(
+  taskId: string | null | undefined,
+  toolName: string,
+  input: unknown,
+  agentId?: string,
+): boolean {
+  if (!taskId || !agentId || cancelledTasks.has(taskId)) return false;
+  const task = getTask(taskId);
+  if (
+    !task ||
+    task.status !== "doing" ||
+    task.assignee_agent_id !== agentId ||
+    task.blocked_approval_id !== null
+  ) return false;
+  const match = matchingApprovedNetworkGrant(taskId, toolName, input, agentId);
+  if (!match) return false;
+  return consumeApproval(match.id);
+}
+
+/** 由实际被拦截的 network MCP 调用生成审批范围，并暂停任务等待用户决定。 */
+export function requestNetworkApprovalForTask(
+  agent: Agent,
+  task: Task,
+  toolName: string,
+  input: unknown,
+  title: string,
+  details: string,
+): { approvalId: string; task: Task } | null {
+  const grant = createNetworkGrant(toolName, input);
+  if (!grant) throw new Error("network approval requires an enabled safety=network MCP tool");
+  if (cancelledTasks.has(task.id)) return null;
+  const created = createBlockingNetworkApproval({
+    task_id: task.id,
+    agent_id: agent.id,
+    title: title.slice(0, 200),
+    payload: JSON.stringify({ details, network_grant: grant }, null, 2),
+  });
+  if (!created) return null;
+  const { approval, task: next } = created;
+  broadcast({ type: "approval:upsert", payload: approval });
+  broadcast({ type: "task:upsert", payload: next });
+  emitTaskEvent(
+    next,
+    "blocked",
+    `${agent.name} 请求批准一次网络外发调用`,
+    { approval_id: approval.id, tool: toolName, call_fingerprint: grant.call_fingerprint },
+    agent.id,
+  );
+  emitTaskEvent(
+    next,
+    "approval",
+    `已创建单次 network MCP 审批「${approval.title}」`,
+    { approval_id: approval.id, tool: toolName, call_fingerprint: grant.call_fingerprint },
+    agent.id,
+  );
+  if (next.channel_id) audit(next.channel_id, `⏸️ 任务「${next.title}」暂停，等待批准网络调用 ${toolName}`);
+  return { approvalId: approval.id, task: next };
 }
 
 /** 任务被指派（或创建时即带负责人）后调用。依赖未满足的任务会等依赖交付后自动开工。 */
@@ -737,8 +941,27 @@ export function onTaskAssigned(task: Task) {
     .finally(() => {
       runningTasks.delete(task.id);
       if (currentWork.get(agent.id) === task.id) currentWork.delete(agent.id);
+      if (resumeAfterRun.delete(task.id)) {
+        void withOwner(ownerId, () => {
+          const latest = getTask(task.id);
+          if (latest?.status === "todo" && latest.blocked_approval_id === null) onTaskAssigned(latest);
+        });
+      }
     });
   agentQueues.set(agent.id, next);
+}
+
+/**
+ * 审批恢复可能发生在原任务 runTaskWork 刚写入 blocked、但 finally 尚未清掉 runningTasks 的窗口。
+ * 直接调用 onTaskAssigned 会被去重后永久丢失，因此必须等当前队列收尾后再按最新任务状态重试。
+ */
+function resumeAssignedTask(task: Task) {
+  if (!task.assignee_agent_id) return;
+  if (runningTasks.has(task.id)) {
+    resumeAfterRun.add(task.id);
+    return;
+  }
+  onTaskAssigned(task);
 }
 
 /** 团队视图：每位 AI 同事的实时工作状态与今日产出。 */
@@ -868,6 +1091,18 @@ async function runTaskWork(agent: Agent, taskId: string) {
       audit(channel.id, `⏹ 任务「${task.title}」已被用户停止，退回待办`);
       return;
     }
+    if (ctx.halted === "stopped") {
+      const latest = getTask(task.id);
+      if (!latest || latest.status === "cancelled") return;
+      if (latest.status === "doing" && latest.assignee_agent_id !== agent.id) {
+        const reassigned = setTaskStatus(task.id, "todo");
+        if (reassigned) {
+          emitTaskEvent(reassigned, "handoff", "任务负责人已变化，旧运行停止并交给新负责人", undefined, agent.id);
+          resumeAssignedTask(reassigned);
+        }
+      }
+      return;
+    }
 
     const verdict = await runVerification(agent, channel, task.id, lastDocIds, attempt);
     if (verdict.result === "pass") {
@@ -923,6 +1158,22 @@ export function buildWorkBrief(task: Task, channel: Channel): string {
     ? `\n## 来源文档（本任务是对以下内容做【有目标、限定范围的润色/改写】，grounding 在此——不得发明、不得越界）\n` +
       sourceDocs.map((d) => `### 来源《${d.title}》（id: ${d.id}）\n${d.content.slice(0, 8000)}`).join("\n\n")
     : "";
+  const approvedNetworkGrants = listApprovals()
+    .filter(
+      (approval) =>
+        approval.ref_id === task.id &&
+        approval.agent_id === task.assignee_agent_id &&
+        approval.status === "approved" &&
+        !approval.consumed_at,
+    )
+    .map((approval) => networkGrantFromApproval(approval))
+    .filter((grant): grant is NetworkGrantV1 => Boolean(grant));
+  const networkGrantSection = approvedNetworkGrants.length > 0
+    ? `\n## 用户刚批准的单次网络调用\n` +
+      approvedNetworkGrants
+        .map((grant) => `- 工具：${grant.tool}\n  参数：${JSON.stringify(grant.input)}\n  要求：优先原样执行；授权只可使用一次，改工具或改参数必须重新审批。`)
+        .join("\n")
+    : "";
   const transcript = buildTranscript(channel.id, 20);
   // 目标链（借鉴 Paperclip）：让任务知道自己服务于什么目标
   const project = task.project_id ? getProject(task.project_id) : undefined;
@@ -945,6 +1196,7 @@ export function buildWorkBrief(task: Task, channel: Channel): string {
     recentEvents ? `最近任务活动：\n${recentEvents}` : "",
     depSection,
     sourceSection,
+    networkGrantSection,
     polishMode
       ? `⚠️ 本任务是【定向润色 / 受限改写】：产出是对上面"来源文档"的修订，不是另写一篇。① 通读来源，严格按"详情/验收标准"限定的目标与范围改，范围外原样保留；② 新增事实/数据须来自来源或显式调研并标来源，禁凭空补全；③ 交付物开头给「改动清单」：逐条 [改了哪段]→[怎么改]→[依据来源何处]，并列「刻意未改动」部分。如已启用「定向润色/受限改写法」技能，按其方法执行。`
       : "",
@@ -1258,11 +1510,75 @@ export function onBudgetResolved(approval: Approval, approved: boolean) {
     broadcast({ type: "task:upsert", payload: next });
     emitTaskEvent(next, "approval", `用户批准追加预算，任务恢复（新预算 ${next.budget_billable.toLocaleString()} 计费 token）`, { approval_id: approval.id, status: "approved", budget_billable: next.budget_billable }, approval.agent_id);
     if (next.channel_id) audit(next.channel_id, `▶️ 用户批准追加预算，任务「${next.title}」恢复执行（新预算 ${next.budget_billable.toLocaleString()}）`);
-    if (next.assignee_agent_id) onTaskAssigned(next);
+    resumeAssignedTask(next);
   } else {
     emitTaskEvent(task, "approval", "用户拒绝追加预算，任务保持暂停", { approval_id: approval.id, status: "rejected" }, approval.agent_id);
     if (task.channel_id) audit(task.channel_id, `⏸️ 用户拒绝追加预算，任务「${task.title}」保持暂停——可在看板调整预算或转人工收尾`);
   }
+}
+
+/**
+ * 单次 network MCP 审批恢复原任务，不进入无 taskId 的普通 chat。
+ * 返回 true 表示该 action 是结构化网络审批，路由层不应再走 generic triggerAgent。
+ */
+export function onNetworkApprovalResolved(approval: Approval): boolean {
+  if (!approvalContainsNetworkGrant(approval)) return false;
+  if (!approval.ref_id) {
+    if (approval.status === "approved") consumeApproval(approval.id);
+    return true;
+  }
+  const task = getTask(approval.ref_id);
+  if (!task || task.status !== "blocked" || task.blocked_approval_id !== approval.id) {
+    if (approval.status === "approved") consumeApproval(approval.id);
+    return true;
+  }
+  const approved = approval.status === "approved";
+  const grant = networkGrantFromApproval(approval, false);
+  const sameAgent = task.assignee_agent_id === approval.agent_id;
+  const stopped = cancelledTasks.has(task.id);
+  if (approved && grant && sameAgent && !stopped) {
+    const next = updateTask(task.id, { status: "todo", blocked_approval_id: null }) ?? task;
+    broadcast({ type: "task:upsert", payload: next });
+    emitTaskEvent(
+      next,
+      "approval",
+      `用户批准单次网络调用，任务恢复：${grant.tool}`,
+      { approval_id: approval.id, status: "approved", tool: grant.tool, call_fingerprint: grant.call_fingerprint },
+      approval.agent_id,
+    );
+    if (next.channel_id) audit(next.channel_id, `▶️ 用户批准一次网络调用，任务「${next.title}」恢复执行`);
+    resumeAssignedTask(next);
+  } else {
+    // 已批准但因停止、改派或 server 配置变化而失效时也必须原子关闭；
+    // 否则恢复旧负责人/旧配置后，这张历史批准会“复活”。
+    if (approved) consumeApproval(approval.id);
+    emitTaskEvent(
+      task,
+      "approval",
+      approved
+        ? stopped
+          ? "任务已被停止，原网络调用授权失效并保持阻塞"
+          : sameAgent
+          ? "网络调用授权已失效，任务保持阻塞"
+          : "任务负责人已变化，原网络调用授权失效并保持阻塞"
+        : "用户拒绝网络调用，任务保持阻塞",
+      { approval_id: approval.id, status: approved ? "invalid" : "rejected", same_agent: sameAgent, stopped },
+      approval.agent_id,
+    );
+    if (task.channel_id) {
+      audit(
+        task.channel_id,
+        approved
+          ? stopped
+            ? `⏸️ 任务「${task.title}」已停止，原网络批准不再有效`
+            : sameAgent
+            ? `⏸️ 网络插件配置已变化，原批准不再有效；任务「${task.title}」保持阻塞`
+            : `⏸️ 任务负责人已变化，原网络批准不再有效；任务「${task.title}」保持阻塞`
+          : `⏸️ 用户拒绝网络调用，任务「${task.title}」保持阻塞`,
+      );
+    }
+  }
+  return true;
 }
 
 export function onClarificationResolved(approval: Approval, approved: boolean) {
@@ -1276,7 +1592,7 @@ export function onClarificationResolved(approval: Approval, approved: boolean) {
     broadcast({ type: "task:upsert", payload: next });
     emitTaskEvent(next, "approval", response ? `用户补充输入后任务恢复：${response}` : "用户批准了 clarification，任务恢复待办并准备继续", { approval_id: approval.id, status: "approved", response }, approval.agent_id);
     if (next.channel_id) audit(next.channel_id, response ? `▶️ 用户已补充输入，任务「${next.title}」恢复执行：${response}` : `▶️ 用户已确认，任务「${next.title}」恢复执行`);
-    if (next.assignee_agent_id) onTaskAssigned(next);
+    resumeAssignedTask(next);
   } else {
     emitTaskEvent(task, "approval", "用户拒绝了 clarification，任务保持阻塞", { approval_id: approval.id, status: "rejected" }, approval.agent_id);
     if (task.channel_id) audit(task.channel_id, `⏸️ 用户拒绝了确认请求，任务「${task.title}」保持阻塞，等待进一步输入`);
@@ -1740,7 +2056,7 @@ const TOOLS: Anthropic.ToolUnion[] = [
   {
     name: "request_approval",
     description:
-      "向用户发起审批请求。任何对外或高风险动作（发邮件、对外发布、部署、产生费用）必须先调用本工具，等待用户批准，不要直接宣称已完成。",
+      "向用户发起审批请求。任何对外或高风险动作（发邮件、对外发布、部署、产生费用）必须先调用本工具，等待用户批准，不要直接宣称已完成。network MCP 的外发审批由引擎在拦截真实调用时自动创建，不要手工伪造工具范围。",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -1949,6 +2265,18 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
       if (!prev) return `错误：找不到任务 ${input.task_id}`;
       const assignee = findAgentByName(input.assignee);
       const reviewer = findAgentByName(input.reviewer);
+      const requestedAssignee = input.assignee !== undefined ? assignee?.id ?? null : prev.assignee_agent_id;
+      const statusChanged = input.status !== undefined && input.status !== prev.status;
+      const assigneeChanged = input.assignee !== undefined && requestedAssignee !== prev.assignee_agent_id;
+      const contextChanged = statusChanged || assigneeChanged;
+      const hasPendingApproval = listApprovals().some(
+        (approval) =>
+          approval.status === "pending" &&
+          (approval.ref_id === prev.id || approval.id === prev.blocked_approval_id),
+      );
+      if (contextChanged && (prev.status === "blocked" || hasPendingApproval)) {
+        return "错误：任务有待处理审批或正处于 blocked；只有用户可以先处理审批，再调整负责人或恢复任务。";
+      }
       const task = updateTask(prev.id, {
         ...(input.status ? { status: input.status } : {}),
         ...(input.title ? { title: String(input.title) } : {}),
@@ -1958,6 +2286,7 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
         ...(input.reviewer !== undefined ? { reviewer_agent_id: reviewer?.id ?? null } : {}),
       });
       if (!task) return `错误：找不到任务 ${input.task_id}`;
+      if (contextChanged) invalidateNetworkApprovalsForTask(task.id);
       if (task.assignee_agent_id !== prev.assignee_agent_id) {
         emitTaskEvent(task, task.assignee_agent_id ? "claim" : "handoff", task.assignee_agent_id ? `${agent.name} 指派任务给 ${getAgent(task.assignee_agent_id)?.name ?? "AI 同事"}` : `${agent.name} 取消了任务指派`, undefined, task.assignee_agent_id ?? agent.id);
       }
@@ -2025,7 +2354,6 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
         agent_id: agent.id,
         title: String(input.title ?? "").slice(0, 200),
         payload: String(input.details ?? ""),
-        // 关联任务：批准后 taskHasApprovedNetworkGrant 才查得到，网络插件二级审批门才能打开。
         ref_id: ctx.taskId ?? null,
       });
       broadcast({ type: "approval:upsert", payload: approval });
@@ -2379,6 +2707,23 @@ async function llmLoop(
         results.push({ type: "tool_result", tool_use_id: tu.id, content: "任务已暂停等待用户输入，后续工具未执行。" });
         continue;
       }
+      if (ctx.kind === "work" && ctx.taskId) {
+        const liveTask = getTask(ctx.taskId);
+        const executionRevoked =
+          cancelledTasks.has(ctx.taskId) ||
+          !liveTask ||
+          liveTask.status !== "doing" ||
+          liveTask.assignee_agent_id !== agent.id;
+        if (executionRevoked) {
+          ctx.halted = "stopped";
+          results.push({
+            type: "tool_result",
+            tool_use_id: tu.id,
+            content: "⏹ 任务已停止、取消或改派；本次工具调用未执行。",
+          });
+          continue;
+        }
+      }
       status(agent, channel.id, "tool", toolLabel(tu.name));
       if (ctx.taskId) {
         const task = getTask(ctx.taskId);
@@ -2394,11 +2739,30 @@ async function llmLoop(
             audit(channel.id, `⛔ ${agent.name} 试图直接调用高危插件「${gated.name}」(${gated.safety})，已拦截——须走审批门`);
           } else if (
             mcpRequiresApprovalForTask(ctx.taskId ? getTask(ctx.taskId) : undefined, tu.name) &&
-            !taskHasApprovedNetworkGrant(ctx.taskId)
+            !consumeApprovedNetworkGrant(ctx.taskId, tu.name, tu.input, agent.id)
           ) {
             const server = mcpServerForTool(tu.name);
-            result = `⛔ 插件「${server?.name ?? tu.name}」会向外部网络发送数据；当前任务绑定了来源文档或启用了严格网络审批，必须先用 request_approval 说明要外发的查询/内容和目的，经用户批准后再执行。`;
-            audit(channel.id, `⛔ ${agent.name} 试图在带来源文档的任务中调用网络插件「${server?.name ?? tu.name}」，已拦截——须走审批门`);
+            const task = ctx.taskId ? getTask(ctx.taskId) : undefined;
+            if (!task) {
+              result = `⛔ 插件「${server?.name ?? tu.name}」需要网络外发审批，但当前调用不在任务上下文中。请先创建并认领任务，再从任务内发起该调用。`;
+            } else {
+              const requested = requestNetworkApprovalForTask(
+                agent,
+                task,
+                tu.name,
+                tu.input,
+                `批准一次网络调用：${server?.name ?? tu.name}`,
+                `该任务请求调用 ${tu.name}，完整参数见 network_grant.input。批准仅对这一工具、目标配置和参数生效一次。`,
+              );
+              if (!requested) {
+                ctx.halted = "stopped";
+                result = "⏹ 任务状态或负责人已变化，本次网络调用未执行，也未创建审批。";
+              } else {
+                ctx.halted = "blocked";
+                result = `⏸️ 已自动创建单次网络调用审批（id: ${requested.approvalId}）并暂停任务。用户批准后任务会恢复，并仅执行这一次已列明的调用。`;
+                audit(channel.id, `⛔ ${agent.name} 在来源/严格任务中调用网络插件「${server?.name ?? tu.name}」，已生成单次审批并暂停任务`);
+              }
+            }
           } else {
             const rawSig = SEARCH_DEDUP ? searchQuerySignature(tu.input) : null;
             // memo 键带 owner 前缀：searchMemo 现在是 run 级私有（天然单租户），但键规则与
