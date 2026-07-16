@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { nanoid } from "nanoid";
 import { currentOwner } from "./ownerScope.js";
-import { decryptSecret, encryptSecret } from "./secrets.js";
+import { canonicalizeSecret, decryptSecret, encryptSecret } from "./secrets.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // AITEAM_DATA_DIR：测试/多实例可指向隔离目录；不设则用默认 server/data
@@ -260,19 +260,43 @@ addColumnIfMissing("skills", "version", "version INTEGER NOT NULL DEFAULT 1");  
 addColumnIfMissing("mcp_servers", "safety", "safety TEXT NOT NULL DEFAULT 'local'");  // local | network | exec
 addColumnIfMissing("mcp_servers", "env_json", "env_json TEXT NOT NULL DEFAULT '{}'"); // stdio 子进程环境变量（如 BOCHA_API_KEY），值含密钥→sanitize 只暴露 key 名
 db.exec(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '')`);
-// 存量明文凭证迁移（幂等）：auth_token / env_json 落库一律密文，库文件单独泄漏不再等于凭证泄漏。
-// 读取侧统一走 decryptSecret（兼容前缀判断），此处只负责把老行重写为密文。
-for (const row of db.prepare("SELECT id, auth_token, env_json FROM mcp_servers").all() as {
-  id: string;
-  auth_token: string;
-  env_json: string;
-}[]) {
-  const token = encryptSecret(row.auth_token);
-  const env = row.env_json && row.env_json !== "{}" ? encryptSecret(row.env_json) : row.env_json;
-  if (token !== row.auth_token || env !== row.env_json) {
-    db.prepare("UPDATE mcp_servers SET auth_token = ?, env_json = ? WHERE id = ?").run(token, env, row.id);
-  }
-}
+// 凭证迁移在单个事务内完成：先认证已有 enc1、解开历史 enc:v1，再把明文/旧格式统一写成 enc1。
+// 任一密钥不匹配或密文损坏都会抛错并整体回滚，禁止出现部分迁移。
+(function migrateStoredSecrets() {
+  db.transaction(() => {
+    const providers = db.prepare("SELECT id, api_key FROM providers").all() as { id: string; api_key: string }[];
+    const updateProvider = db.prepare("UPDATE providers SET api_key = ? WHERE id = ?");
+    for (const row of providers) {
+      const next = canonicalizeSecret(row.api_key);
+      if (next !== row.api_key) updateProvider.run(next, row.id);
+    }
+
+    const servers = db.prepare("SELECT id, auth_token, env_json FROM mcp_servers").all() as {
+      id: string;
+      auth_token: string;
+      env_json: string;
+    }[];
+    const updateMcp = db.prepare("UPDATE mcp_servers SET auth_token = ?, env_json = ? WHERE id = ?");
+    for (const row of servers) {
+      const authToken = canonicalizeSecret(row.auth_token);
+      const envJson = row.env_json && row.env_json !== "{}" ? canonicalizeSecret(row.env_json) : "{}";
+      if (authToken !== row.auth_token || envJson !== row.env_json) updateMcp.run(authToken, envJson, row.id);
+    }
+
+    const imageRow = db.prepare("SELECT value FROM app_settings WHERE key = 'image_provider'").get() as
+      | { value: string }
+      | undefined;
+    if (imageRow?.value) {
+      const parsed = JSON.parse(imageRow.value) as Record<string, unknown>;
+      const apiKey = String(parsed.api_key ?? "");
+      const next = canonicalizeSecret(apiKey);
+      if (next !== apiKey) {
+        db.prepare("UPDATE app_settings SET value = ? WHERE key = 'image_provider'")
+          .run(JSON.stringify({ ...parsed, api_key: next }));
+      }
+    }
+  })();
+})();
 // 用户表（standalone 多用户登录）：全局表，不带 owner_id（owner = user:<id> 由此派生）
 db.exec(`CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
@@ -499,11 +523,17 @@ export function createAgent(a: {
 }
 
 // ---- providers（模型供应商 / BYOM）—— 全局共享（管理员配一套 key，所有用户共用）----
+function decryptProvider(p: Provider | undefined): Provider | undefined {
+  if (!p) return p;
+  return { ...p, api_key: decryptSecret(p.api_key) };
+}
+
 export function listProviders(): Provider[] {
-  return db.prepare("SELECT * FROM providers ORDER BY created_at").all() as Provider[];
+  return (db.prepare("SELECT * FROM providers ORDER BY created_at").all() as Provider[])
+    .map((p) => decryptProvider(p)!);
 }
 export function getProvider(id: string): Provider | undefined {
-  return db.prepare("SELECT * FROM providers WHERE id = ?").get(id) as Provider | undefined;
+  return decryptProvider(db.prepare("SELECT * FROM providers WHERE id = ?").get(id) as Provider | undefined);
 }
 export function createProvider(p: {
   name: string;
@@ -522,7 +552,7 @@ export function createProvider(p: {
     id: nanoid(10),
     name: p.name,
     base_url: p.base_url ?? "",
-    api_key: p.api_key ?? "",
+    api_key: encryptSecret(p.api_key ?? ""),
     default_model: p.default_model ?? "",
     light_model: p.light_model ?? "",
     max_tokens: p.max_tokens && p.max_tokens > 0 ? p.max_tokens : 16000,
@@ -537,7 +567,7 @@ export function createProvider(p: {
   db.prepare(
     "INSERT INTO providers (id, name, base_url, api_key, default_model, light_model, max_tokens, web_tools, is_strong, price_input_per_million, price_output_per_million, price_currency, is_official, created_at) VALUES (@id, @name, @base_url, @api_key, @default_model, @light_model, @max_tokens, @web_tools, @is_strong, @price_input_per_million, @price_output_per_million, @price_currency, @is_official, @created_at)"
   ).run(provider);
-  return provider;
+  return { ...provider, api_key: p.api_key ?? "" };
 }
 export function updateProvider(
   id: string,
@@ -555,7 +585,7 @@ export function updateProvider(
   };
   db.prepare(
     "UPDATE providers SET name = @name, base_url = @base_url, api_key = @api_key, default_model = @default_model, light_model = @light_model, max_tokens = @max_tokens, web_tools = @web_tools, is_strong = @is_strong, price_input_per_million = @price_input_per_million, price_output_per_million = @price_output_per_million, price_currency = @price_currency WHERE id = @id"
-  ).run(next);
+  ).run({ ...next, api_key: encryptSecret(next.api_key) });
   return next;
 }
 export function deleteProvider(id: string) {
@@ -599,11 +629,13 @@ export interface ImageProvider {
   model: string;
 }
 export function getImageProvider(): ImageProvider {
+  const stored = getSetting("image_provider");
+  if (!stored) return { base_url: "", api_key: "", model: "" };
   try {
-    const raw = JSON.parse(getSetting("image_provider") || "{}");
+    const raw = JSON.parse(stored);
     return {
       base_url: String(raw.base_url ?? ""),
-      api_key: String(raw.api_key ?? ""),
+      api_key: decryptSecret(String(raw.api_key ?? "")),
       model: String(raw.model ?? ""),
     };
   } catch {
@@ -618,7 +650,7 @@ export function setImageProvider(p: { base_url?: string; api_key?: string; model
     api_key: p.api_key === "-" ? "" : p.api_key ? p.api_key.trim() : cur.api_key,
     model: (p.model ?? cur.model).trim(),
   };
-  setSetting("image_provider", JSON.stringify(next));
+  setSetting("image_provider", JSON.stringify({ ...next, api_key: encryptSecret(next.api_key) }));
   return next;
 }
 /** 给前端的脱敏视图：永不下发 api_key */

@@ -20,7 +20,8 @@
     "ui:smoke": "npm run build && node scripts/ui-smoke.mjs",
     "start": "npm run start --workspace server",
     "typecheck": "npm run typecheck --workspace server && npm run typecheck --workspace web",
-    "test": "node scripts/regression.mjs"
+    "test": "npm run test:secrets && node scripts/regression.mjs",
+    "test:secrets": "node scripts/secret-regression.mjs"
   },
   "devDependencies": {
     "npm-run-all": "^4.1.5"
