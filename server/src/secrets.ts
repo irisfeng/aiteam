@@ -54,6 +54,11 @@ function loadKey(): Buffer {
   return cachedKey;
 }
 
+/** 生产启动探针必须能证明凭证密钥可用，不能等到用户首次保存 provider 时才失败。 */
+export function assertCredentialKeyReady(): void {
+  if (process.env.NODE_ENV === "production") loadKey();
+}
+
 export function isEncryptedSecret(value: string): boolean {
   return value.startsWith(ENC_PREFIX) || value.startsWith(LEGACY_V1_PREFIX);
 }
@@ -109,9 +114,18 @@ export function decryptSecret(stored: string): string {
       );
     }
   }
-  const parts = stored.slice(ENC_PREFIX.length).split(":");
   try {
+    const parts = stored.slice(ENC_PREFIX.length).split(":");
+    if (
+      parts.length !== 3 ||
+      parts.some((part) => !part || !/^[A-Za-z0-9_-]+$/.test(part))
+    ) {
+      throw new Error("invalid enc1 envelope");
+    }
     const [iv, tag, ct] = parts.map((p) => Buffer.from(p, "base64url"));
+    if (iv.length !== 12 || tag.length !== 16 || ct.length === 0) {
+      throw new Error("invalid enc1 envelope lengths");
+    }
     const decipher = crypto.createDecipheriv("aes-256-gcm", loadKey(), iv);
     decipher.setAuthTag(tag);
     return Buffer.concat([decipher.update(ct), decipher.final()]).toString("utf8");

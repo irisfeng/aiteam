@@ -87,7 +87,9 @@ npm run pack:verify --workspace desktop  # 将包内 Resources 复制到 /tmp �
 
 - 全部业务数据在单个 SQLite 文件：**`server/data/aiteam.db`**（可用 `AITEAM_DATA_DIR` 改目录）。
 - 生成图资产：`server/data/assets/`；上传临时件：`server/data/uploads-tmp/`（即用即删，不持久化二进制）。
-- **备份**：停服后复制 `aiteam.db`（+ `assets/`）即可；恢复反之。
+- **备份**：不要直接复制单个运行库。使用 SQLite `VACUUM INTO` 生成一致性快照，再打包
+  `assets/`；运行中的 WAL 数据会被正确合并。腾讯云示例见
+  [DEPLOY-tencent-vps.md](DEPLOY-tencent-vps.md#53-备份脚本-optaiteamopsbackupsh)。
 - **凭证落库**：模型 provider API key、MCP `auth_token` / env、文生图 API key 均以
   AES-256-GCM `enc1:` 密文保存。
 - **凭证密钥**：优先读取 `AITEAM_CREDENTIAL_KEY`（32 字节，64 位 hex 或 base64）；开发/测试未设时
@@ -95,6 +97,9 @@ npm run pack:verify --workspace desktop  # 将包内 Resources 复制到 /tmp �
   `credential.key` 时会拒绝加密/迁移，不会静默生成新密钥。
 - **迁移/恢复**：环境变量模式必须恢复同一个 `AITEAM_CREDENTIAL_KEY`；文件模式必须连同
   `credential.key` 一起恢复。密钥与数据库不匹配时凭证不可解，不会退回明文。
+- **密钥备份必须独立**：`AITEAM_CREDENTIAL_KEY` 应保存在密码管理器/云密钥服务或独立加密介质，
+  不要与未加密的数据库快照放在同一目录；文件模式同理，应把 `credential.key` 单独加密托管。
+  每次恢复先恢复密钥，再恢复 DB，并实际读取一次 provider/MCP/文生图配置验证可解密。
 - 只读查看：`sqlite3 server/data/aiteam.db`。无「删用户」API，清理测试账号需直接操作 DB（owner 隔离，测试号对正常用户不可见）。
 
 ### 5.1 历史 `enc:v1:` 凭证升级

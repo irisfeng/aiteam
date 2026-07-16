@@ -366,19 +366,32 @@ MaxRetentionSec=2week
 set -euo pipefail
 DATA_DIR="${AITEAM_DATA_DIR:-/var/lib/aiteam}"
 BACKUP_ROOT="/var/backups/aiteam"   # 独立于 DATA_DIR，勿落回数据盘自身
+ENV_FILE="/etc/aiteam/aiteam.env"
 KEEP=14
 DB="$DATA_DIR/aiteam.db"
 TS="$(date +%Y%m%d-%H%M%S)"; DEST="$BACKUP_ROOT/$TS"
 mkdir -p "$DEST"; chmod 700 "$BACKUP_ROOT"
 
-# 1) DB：VACUUM INTO 干净单库（自动并 WAL，无伴生文件）
+# 0) 密钥恢复前置：这里只记录模式，不把原始密钥与 DB 放进同一备份
+#    AITEAM_CREDENTIAL_KEY 必须另存密码管理器/云密钥服务；file 模式的 credential.key 也须单独加密托管。
+if grep -Eq '^AITEAM_CREDENTIAL_KEY=.{20,}$' "$ENV_FILE" 2>/dev/null; then
+  KEY_MODE=environment
+elif [ -s "$DATA_DIR/credential.key" ]; then
+  KEY_MODE=file
+else
+  echo "[fatal] 未找到凭证密钥来源，拒绝生成不可恢复的备份" >&2
+  exit 1
+fi
+printf 'credential_key_mode=%s\ncreated_at=%s\n' "$KEY_MODE" "$(date -Iseconds)" > "$DEST/RECOVERY-METADATA"
+
+# 1) DB：VACUUM INTO 干净单库（自动合并 WAL，无伴生文件）
 sqlite3 "$DB" "VACUUM INTO '$DEST/aiteam.db'"
 # 2) 校验快照（坏库早发现）
 sqlite3 "$DEST/aiteam.db" 'PRAGMA integrity_check' | head -1
 # 3) assets 打包（生成图；文档中可能含可访问链接）
 [ -d "$DATA_DIR/assets" ] && tar -czf "$DEST/assets.tar.gz" -C "$DATA_DIR" assets
 # 4) 校验和 + 锁权限（数据库内凭证为 enc1 密文，备份仍按敏感业务数据保护）
-( cd "$DEST" && sha256sum aiteam.db assets.tar.gz 2>/dev/null > SHA256SUMS || true )
+( cd "$DEST" && sha256sum aiteam.db assets.tar.gz RECOVERY-METADATA 2>/dev/null > SHA256SUMS || true )
 chmod -R 600 "$DEST"/* 2>/dev/null || true
 # 5) 轮转
 ls -1dt "$BACKUP_ROOT"/*/ 2>/dev/null | tail -n +$((KEEP+1)) | xargs -r rm -rf
@@ -386,6 +399,7 @@ ls -1dt "$BACKUP_ROOT"/*/ 2>/dev/null | tail -n +$((KEEP+1)) | xargs -r rm -rf
 # age -r <你的age公钥> -o "$DEST/aiteam.db.age" "$DEST/aiteam.db" && rm -f "$DEST/aiteam.db"
 # coscmd upload -r "$DEST" "cos://your-bucket/aiteam/$TS/" || echo "[warn] COS 上传失败"
 echo "[ok] backup -> $DEST"
+echo "[next] 确认独立密钥托管仍可取回；本目录不包含原始凭证密钥"
 ```
 
 cron（`crontab -e`，凌晨低峰，避开例行任务密集时刻）：
@@ -402,6 +416,13 @@ set -euo pipefail
 SRC="${1:?用法: restore.sh <备份目录>}"; DATA_DIR="/var/lib/aiteam"; SERVICE="aiteam"
 [ -f "$SRC/aiteam.db" ] || { echo "找不到 $SRC/aiteam.db"; exit 1; }
 sqlite3 "$SRC/aiteam.db" 'PRAGMA integrity_check' | head -1    # 先验备份本身
+# 必须先从独立密钥托管恢复 /etc/aiteam/aiteam.env 中的原 AITEAM_CREDENTIAL_KEY；
+# 若 RECOVERY-METADATA 标记 file 模式，则先把配套 credential.key 恢复到 DATA_DIR。
+if ! grep -Eq '^AITEAM_CREDENTIAL_KEY=.{20,}$' /etc/aiteam/aiteam.env 2>/dev/null \
+   && [ ! -s "$DATA_DIR/credential.key" ]; then
+  echo "[fatal] 凭证密钥尚未恢复，拒绝恢复数据库" >&2
+  exit 1
+fi
 sudo systemctl stop "$SERVICE"
 # 关键：清掉现存库与任何脏 WAL 伴生文件，否则陈旧 -wal/-shm 会污染恢复结果
 sudo rm -f "$DATA_DIR/aiteam.db" "$DATA_DIR/aiteam.db-wal" "$DATA_DIR/aiteam.db-shm"
@@ -410,8 +431,14 @@ sudo cp "$SRC/aiteam.db" "$DATA_DIR/aiteam.db"
 sudo chown -R aiteam:aiteam "$DATA_DIR" && sudo chmod -R 750 "$DATA_DIR"
 sudo systemctl start "$SERVICE"; sleep 2
 sqlite3 "$DATA_DIR/aiteam.db" 'PRAGMA integrity_check' | head -1
-echo "[ok] 恢复完成。登录 UI 抽查文档里 /aiteam/assets/*.png 能否加载。建议季度演练一次。"
+systemctl is-active --quiet "$SERVICE"
+echo "[ok] 基础恢复完成。必须登录 UI 实测 provider、MCP、文生图凭证可读取，并抽查 /aiteam/assets/*.png。建议季度演练一次。"
 ```
+
+> 数据备份与密钥备份是两个独立恢复要件。环境变量模式应把原
+> `AITEAM_CREDENTIAL_KEY` 放入密码管理器/云密钥服务或独立加密介质；文件模式应单独加密托管
+> `credential.key`。两者都不要把原始密钥和未加密 DB 快照放在同一个备份目录。恢复演练只有在
+> 服务启动、凭证可解密、资产可加载后才算通过。
 
 ---
 

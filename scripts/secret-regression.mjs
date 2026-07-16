@@ -95,6 +95,34 @@ function legacyV1Encrypt(plain, material) {
 }
 
 {
+  const dataDir = mkdtempSync(join(tmpdir(), "aiteam-secret-prod-boot-"));
+  try {
+    const child = spawnSync(process.execPath, [
+      "--input-type=module",
+      "-e",
+      `await import(${JSON.stringify(dbUrl)});`,
+    ], {
+      encoding: "utf8",
+      env: cleanEnv({
+        NODE_ENV: "production",
+        AITEAM_DATA_DIR: dataDir,
+      }),
+    });
+    const output = `${child.stdout || ""}\n${child.stderr || ""}`;
+    check(
+      "SEC-BOOT",
+      "空生产库缺少 canonical 凭证密钥时启动即 fail-closed",
+      child.status !== 0 &&
+        /AITEAM_CREDENTIAL_KEY|credential\.key/.test(output) &&
+        !existsSync(join(dataDir, "credential.key")),
+      `exit=${child.status} keyFile=${existsSync(join(dataDir, "credential.key"))}`,
+    );
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+}
+
+{
   const dataDir = mkdtempSync(join(tmpdir(), "aiteam-secret-surfaces-"));
   try {
     const child = spawnSync(process.execPath, [
@@ -277,6 +305,81 @@ function legacyV1Encrypt(plain, material) {
       "SEC-FORMAT",
       "未知 enc 前缀必须 fail-closed，禁止作为明文二次包装",
       child.status !== 0 && /未知|不支持/.test(output),
+      `exit=${child.status}`,
+    );
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+}
+
+{
+  const dataDir = mkdtempSync(join(tmpdir(), "aiteam-secret-envelope-"));
+  try {
+    const child = spawnSync(process.execPath, [
+      "--input-type=module",
+      "-e",
+      `
+        const mod = await import(${JSON.stringify(secretsUrl)});
+        const stored = mod.encryptSecret("authenticated-secret");
+        let rejected = false;
+        try { mod.canonicalizeSecret(stored + ":unauthenticated"); } catch { rejected = true; }
+        if (!rejected) process.exit(9);
+      `,
+    ], {
+      encoding: "utf8",
+      env: cleanEnv({
+        NODE_ENV: "test",
+        AITEAM_DATA_DIR: dataDir,
+        AITEAM_CREDENTIAL_KEY: "34".repeat(32),
+      }),
+    });
+    check(
+      "SEC-ENVELOPE",
+      "enc1 尾随字段与非规范信封必须 fail-closed",
+      child.status === 0,
+      `exit=${child.status}`,
+    );
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+}
+
+{
+  const dataDir = mkdtempSync(join(tmpdir(), "aiteam-secret-image-tamper-"));
+  try {
+    const child = spawnSync(process.execPath, [
+      "--input-type=module",
+      "-e",
+      `
+        const db = await import(${JSON.stringify(dbUrl)});
+        db.setImageProvider({
+          base_url: "https://images.test",
+          api_key: "image-secret",
+          model: "image-model",
+        });
+        const row = db.db.prepare("SELECT value FROM app_settings WHERE key = 'image_provider'").get();
+        const parsed = JSON.parse(row.value);
+        const last = parsed.api_key.at(-1);
+        parsed.api_key = parsed.api_key.slice(0, -1) + (last === "A" ? "B" : "A");
+        db.db.prepare("UPDATE app_settings SET value = ? WHERE key = 'image_provider'")
+          .run(JSON.stringify(parsed));
+        let rejected = false;
+        try { db.getImageProvider(); } catch { rejected = true; }
+        db.db.close();
+        if (!rejected) process.exit(9);
+      `,
+    ], {
+      encoding: "utf8",
+      env: cleanEnv({
+        NODE_ENV: "test",
+        AITEAM_DATA_DIR: dataDir,
+        AITEAM_CREDENTIAL_KEY: "35".repeat(32),
+      }),
+    });
+    check(
+      "SEC-IMAGE",
+      "文生图密文认证失败必须向上报错，不能伪装成未配置",
+      child.status === 0,
       `exit=${child.status}`,
     );
   } finally {

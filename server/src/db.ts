@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { nanoid } from "nanoid";
 import { currentOwner } from "./ownerScope.js";
-import { canonicalizeSecret, decryptSecret, encryptSecret } from "./secrets.js";
+import { assertCredentialKeyReady, canonicalizeSecret, decryptSecret, encryptSecret } from "./secrets.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // AITEAM_DATA_DIR：测试/多实例可指向隔离目录；不设则用默认 server/data
@@ -263,6 +263,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TE
 // 凭证迁移在单个事务内完成：先认证已有 enc1、解开历史 enc:v1，再把明文/旧格式统一写成 enc1。
 // 任一密钥不匹配或密文损坏都会抛错并整体回滚，禁止出现部分迁移。
 (function migrateStoredSecrets() {
+  assertCredentialKeyReady();
   db.transaction(() => {
     const providers = db.prepare("SELECT id, api_key FROM providers").all() as { id: string; api_key: string }[];
     const updateProvider = db.prepare("UPDATE providers SET api_key = ? WHERE id = ?");
@@ -631,16 +632,21 @@ export interface ImageProvider {
 export function getImageProvider(): ImageProvider {
   const stored = getSetting("image_provider");
   if (!stored) return { base_url: "", api_key: "", model: "" };
+  let raw: Record<string, unknown>;
   try {
-    const raw = JSON.parse(stored);
-    return {
-      base_url: String(raw.base_url ?? ""),
-      api_key: decryptSecret(String(raw.api_key ?? "")),
-      model: String(raw.model ?? ""),
-    };
+    const parsed = JSON.parse(stored) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { base_url: "", api_key: "", model: "" };
+    }
+    raw = parsed as Record<string, unknown>;
   } catch {
     return { base_url: "", api_key: "", model: "" };
   }
+  return {
+    base_url: String(raw.base_url ?? ""),
+    api_key: decryptSecret(String(raw.api_key ?? "")),
+    model: String(raw.model ?? ""),
+  };
 }
 export function setImageProvider(p: { base_url?: string; api_key?: string; model?: string }): ImageProvider {
   const cur = getImageProvider();
