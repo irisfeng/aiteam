@@ -104,31 +104,137 @@ npm run pack:verify --workspace desktop  # 将包内 Resources 复制到 /tmp �
 
 ### 5.1 历史 `enc:v1:` 凭证升级
 
-旧安全分支曾使用 `enc:v1:`。当前版本会在启动事务中把 provider、MCP 和文生图凭证统一迁移为
-`enc1:`，但必须拿到**当时的原始密钥**：
+旧安全分支曾使用 `enc:v1:`。不要直接启动真实数据目录试密钥；使用
+`scripts/credential-recovery.mjs`（npm 入口：`npm run credentials:recover -- ...`）先只读盘点，
+再在新副本完成迁移或清密钥救援。建议操作前先跑一次工具自身回归：
 
 ```bash
-# 1) 停服并先做 SQLite 一致性备份
-# 2) 两把密钥都用原值/固定值，切勿每次启动重新生成
-export AITEAM_CREDENTIAL_KEY=<新的固定32字节密钥>
-export AITEAM_SECRET_KEY=<生成enc:v1时使用的原始旧密钥>
+npm run build
+npm run test:credential-recovery
+```
+
+#### 安全边界
+
+- 先停服务并按上文生成 SQLite 一致性备份；后续 `--data-dir` 应指向该备份/工作副本，而不是正在服务的
+  `server/data`。
+- 四个命令都必须显式给 `--data-dir`，工具不会默认指向真实工作区。`migrate-copy` / `rescue-copy`
+  还必须给一个**父目录已存在、目标目录尚不存在**、与源目录不同且不位于源目录内部的
+  `--output-dir`；真实路径会经过 `realpath` 校验，拒绝覆盖和符号链接绕过。
+- `migrate-copy` / `rescue-copy` 会在数据库副本之后复制 `assets/`，因此必须先停服，并显式提供
+  `--confirm-source-stopped`。这项确认是数据库与资产处于同一静止窗口的操作门禁。
+- `assets/` 内出现任何符号链接时会拒绝复制，避免生成依赖输出目录外文件的非独立副本。
+- 源数据库始终只读。迁移/救援只发布新目录，并复制 `assets/`；不会复制 `credential.key`，
+  因而目标 `AITEAM_CREDENTIAL_KEY` 必须单独安全保存。
+- CLI 不读取 `credential.key`，也不使用 `AITEAM_SESSION_SECRET` 解旧格式。若历史 `enc:v1:` 实际由
+  当时的 session secret 生成，必须把**那个旧值**显式作为 `AITEAM_SECRET_KEY` 注入本工具。
+- `--json` 和报告只含格式/数量及路径，不输出凭证值，但输出副本仍包含业务数据，须按生产数据保护。
+- 任一完整性、密钥、未知密文、JSON 格式或 WAL/SHM 检查失败都会退出非零；不要换随机密钥反复尝试，
+  先保留报错和源库校验和再排查。
+
+#### 1. `inspect`：无密钥只读盘点
+
+```bash
+export SOURCE_DATA='/absolute/path/to/aiteam-backup'
+npm run credentials:recover -- inspect --data-dir "$SOURCE_DATA" --json
+```
+
+输出按 `providers`、`mcp_auth`、`mcp_env`、`image_provider` 统计：
+`empty / enc1 / legacy_v1 / plaintext / unknown_envelope / invalid`。它只分类，不尝试解密；
+出现 `unknown_envelope` 或 `invalid` 时停止，不进入迁移。
+
+#### 2. `dry-run`：在临时副本验证全部密钥
+
+先显式准备密钥，值不要写进工单、日志或共享 shell 历史：
+
+```bash
+# 目标副本使用的新固定 32 字节 key；首次生成后必须独立持久保存
+export AITEAM_CREDENTIAL_KEY="$(openssl rand -hex 32)"
+
+# 源库含 enc:v1 时必填：生成这些历史密文时使用的原始材料
+export AITEAM_SECRET_KEY='ORIGINAL_LEGACY_MATERIAL'
+
+# 仅当源库已有 enc1、且其 key 与目标 key 不同时设置；相同时不要设置
+# export AITEAM_SOURCE_CREDENTIAL_KEY='SOURCE_32_BYTE_HEX_OR_BASE64'
+
+npm run credentials:recover -- dry-run --data-dir "$SOURCE_DATA" --json
+```
+
+`dry-run` 会检查源库完整性，用 SQLite backup API 建临时副本，在副本中解密并重加密，然后验证所有
+非空凭证均为可认证的 `enc1:`；临时目录最后删除，源数据库保持不变。只有退出码为 0、
+`success=true` 且 after 中没有 `legacy_v1 / plaintext / unknown_envelope / invalid` 才能继续。
+
+#### 3. `migrate-copy`：排他生成可启动迁移副本
+
+```bash
+export OUTPUT_DATA='/absolute/path/to/aiteam-migrated-uat'
+npm run credentials:recover -- migrate-copy \
+  --data-dir "$SOURCE_DATA" \
+  --output-dir "$OUTPUT_DATA" \
+  --confirm-source-stopped \
+  --json
+```
+
+沿用 `dry-run` 已验证的三个显式变量。工具会在受限 staging 目录复制数据库与 `assets/`，事务迁移
+provider、MCP auth/env、文生图凭证，执行 secure delete + `VACUUM`、完整性和 sidecar 检查后，
+才用排他目录预留发布 `OUTPUT_DATA`，不会以 `check + rename` 覆盖竞态中出现的空目录。发布期间的
+`.aiteam-recovery-incomplete` 标记只会在异常中断后残留；看到它时应把整个输出目录视为无效并删除重跑。
+结果写入权限为 0600 的
+`credential-migration-report.json`；源目录不会被修改。
+
+#### 4. `rescue-copy`：旧密钥确实找不到时清空副本凭证
+
+这是最后手段：输出副本会清空**全部** provider API key、MCP auth/env 和文生图 API key，
+但保留账号、频道、任务、文档、项目、非秘密连接配置和 `assets/`。源目录仍只读。
+
+```bash
+export OUTPUT_DATA='/absolute/path/to/aiteam-rescued-uat'
+unset AITEAM_CREDENTIAL_KEY AITEAM_SOURCE_CREDENTIAL_KEY AITEAM_SECRET_KEY AITEAM_SESSION_SECRET
+npm run credentials:recover -- rescue-copy \
+  --data-dir "$SOURCE_DATA" \
+  --output-dir "$OUTPUT_DATA" \
+  --confirm CLEAR_ALL_CREDENTIALS \
+  --confirm-source-stopped \
+  --json
+```
+
+确认短语必须逐字为 `CLEAR_ALL_CREDENTIALS`。成功后检查
+`credential-rescue-report.json`，为该副本生成并持久保存新的 `AITEAM_CREDENTIAL_KEY`：
+
+```bash
+export AITEAM_CREDENTIAL_KEY="$(openssl rand -hex 32)"
+```
+
+再由管理员在界面重新录入并逐一测试 provider、MCP 和文生图凭证。
+
+#### 5. 迁移副本的人工 UAT 放行条件
+
+只允许启动 `OUTPUT_DATA`，不要切换或覆盖源目录：
+
+```bash
+export NODE_ENV=production
+export AITEAM_DATA_DIR="$OUTPUT_DATA"
+export AITEAM_SESSION_SECRET="$(openssl rand -base64 48)"
+# AITEAM_CREDENTIAL_KEY 必须沿用 dry-run/migrate-copy 的目标 key，
+# 或 rescue-copy 后刚生成并已安全保存的固定 key；不要在这里再次生成。
+unset AITEAM_SECRET_KEY AITEAM_SOURCE_CREDENTIAL_KEY
 npm run build
 npm start
 ```
 
-启动成功后只检查前缀数量，不输出任何凭证内容：
+满足以下条件后，迁移副本才算可进入人工测试：
 
-```bash
-sqlite3 "${AITEAM_DATA_DIR:-server/data}/aiteam.db" "
-SELECT 'providers', count(*) FROM providers WHERE api_key LIKE 'enc:v1:%'
-UNION ALL SELECT 'mcp_auth', count(*) FROM mcp_servers WHERE auth_token LIKE 'enc:v1:%'
-UNION ALL SELECT 'mcp_env', count(*) FROM mcp_servers WHERE env_json LIKE 'enc:v1:%'
-UNION ALL SELECT 'image_provider', count(*) FROM app_settings
-  WHERE key='image_provider' AND value LIKE '%enc:v1:%';"
-```
+1. 对 `OUTPUT_DATA` 再跑 `inspect`，所有非空凭证只能是 `enc1`；不得有
+   `legacy_v1 / plaintext / unknown_envelope / invalid`。
+2. 不提供任何旧密钥也能以 `NODE_ENV=production` 启动、登录并刷新工作区。
+3. `migrate-copy` 路径下，已有 provider / MCP / 文生图配置均能读取并通过各自行内测试；
+   `rescue-copy` 路径下，管理员已重新录入并逐一测试所有必需凭证。
+4. 按 [TESTING.md](TESTING.md) 至少通过 B1 基础聊天、C1 单任务交付与验收、C3 计划批准后开工、
+   C5.1 取消与 human-only 关单；首发包含联网调研时还必须通过 B2。
+5. 无 500/崩溃/空回复、密钥泄漏、审批绕过、未交付任务置 done、取消任务解锁下游，
+   且任务活动日志和交付物可正常读取。
 
-四项均为 `0` 后删除 `AITEAM_SECRET_KEY`，后续只保留固定的 `AITEAM_CREDENTIAL_KEY`。如果旧密钥
-缺失或不匹配，迁移会整笔回滚并拒绝启动；此时应恢复备份并重新录入凭证，不能反复试错真实数据库。
+任一项失败立即停止，不把 `OUTPUT_DATA` 提升为正式数据目录。全部通过后仍应保留原目录与一致性备份，
+再通过受控配置切换 `AITEAM_DATA_DIR`；不要用移动/覆盖源库的方式“就地修复”。
 
 ---
 
@@ -159,6 +265,7 @@ UNION ALL SELECT 'image_provider', count(*) FROM app_settings
 | `AITEAM_SESSION_SECRET` | 开发弱回退 | 会话签名密钥；**生产（`NODE_ENV=production`）未设则拒启**，务必设强随机串（`openssl rand -base64 48`） |
 | `AITEAM_CREDENTIAL_KEY` | 开发自动生成 `credential.key` | 凭证落库密钥（32 字节，64 位 hex 或 base64）；生产必须注入固定值或恢复已有文件 |
 | `AITEAM_SECRET_KEY` | 空 | 仅供历史 `enc:v1:` 一次性迁移；迁移完成后删除 |
+| `AITEAM_SOURCE_CREDENTIAL_KEY` | 空 | 仅供 `credentials:recover`：源库已有 `enc1:` 且源 key 与目标 `AITEAM_CREDENTIAL_KEY` 不同时显式提供 |
 | `PORT` | `8787` | 监听端口 |
 | `AITEAM_HOST` | `127.0.0.1` | 监听地址（对外/反代时按需，如 `0.0.0.0`） |
 | `AITEAM_DATA_DIR` | `server/data` | 数据目录（db / assets / uploads-tmp） |
