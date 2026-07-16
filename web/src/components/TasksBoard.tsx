@@ -12,19 +12,29 @@ const COLUMNS: { key: Task["status"]; label: string }[] = [
   { key: "blocked", label: "等待输入" },
   { key: "review", label: "待评审" },
   { key: "done", label: "完成" },
+  { key: "cancelled", label: "已取消" },
 ];
-const COLUMN_LABEL = Object.fromEntries(COLUMNS.map((c) => [c.key, c.label])) as Record<Task["status"], string>;
+const COLUMN_LABEL: Record<Task["status"], string> = {
+  todo: "待办",
+  doing: "进行中",
+  blocked: "等待输入",
+  review: "待评审",
+  done: "完成",
+  cancelled: "已取消",
+};
 const PROJECT_STATUS_TONE: Record<Task["status"], string> = {
   todo: "bg-slate-400",
   doing: "bg-accent",
   blocked: "bg-red-500",
   review: "bg-blue-500",
   done: "bg-emerald-500",
+  cancelled: "bg-slate-600",
 };
 
 function prevStatus(task: Task): Task["status"] | null {
   if (task.status === "doing" || task.status === "review") return "todo";
   if (task.status === "done") return "review";
+  if (task.status === "cancelled") return "todo";
   return null;
 }
 
@@ -46,6 +56,7 @@ function TaskCard({ task, onOpenDoc, onOpenTask }: { task: Task; onOpenDoc: (doc
   const hasPendingApproval = ws.approvals.some(
     (a) => a.status === "pending" && (a.ref_id === task.id || a.id === task.blocked_approval_id),
   );
+  const terminal = task.status === "done" || task.status === "cancelled";
   let depCount = 0;
   try {
     depCount = (JSON.parse(task.depends_on) as string[]).length;
@@ -101,7 +112,7 @@ function TaskCard({ task, onOpenDoc, onOpenTask }: { task: Task; onOpenDoc: (doc
           <select
             value={task.assignee_agent_id ?? ""}
             onChange={(e) => void ws.updateTask(task.id, { assignee_agent_id: e.target.value || null })}
-            disabled={task.status === "done"}
+            disabled={terminal}
             className="min-w-0 rounded-full border border-line bg-sel px-1.5 py-0.5 text-[11.5px] text-ink-2 outline-none disabled:opacity-50"
             title="指派给 AI 同事后会自动开工"
           >
@@ -115,7 +126,7 @@ function TaskCard({ task, onOpenDoc, onOpenTask }: { task: Task; onOpenDoc: (doc
           <select
             value={task.reviewer_agent_id ?? ""}
             onChange={(e) => void ws.updateTask(task.id, { reviewer_agent_id: e.target.value || null })}
-            disabled={task.status === "done"}
+            disabled={terminal}
             className="min-w-0 rounded-full border border-line bg-sel px-1.5 py-0.5 text-[11.5px] text-ink-2 outline-none disabled:opacity-50"
             title="指定复核人；留空则系统按交付物类型自动选择"
           >
@@ -441,7 +452,7 @@ export function TasksBoard({
           </button>
         </div>
       </header>
-      <div className="grid flex-1 grid-cols-[repeat(5,minmax(190px,1fr))] gap-3 overflow-auto p-4">
+      <div className="grid flex-1 grid-cols-[repeat(6,minmax(190px,1fr))] gap-3 overflow-auto p-4">
         {COLUMNS.map((col) => {
           const tasks = ws.tasks.filter((t) => t.status === col.key);
           // 同一项目的子任务收进折叠组卡；无项目的单任务平铺。保留列内出现顺序。

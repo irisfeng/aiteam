@@ -636,6 +636,11 @@ export function stopTask(taskId: string) {
   cancelledTasks.add(taskId);
 }
 
+/** 取消任务恢复为待办时清掉旧停止标记，避免下一次认领被历史标记误杀。 */
+export function clearTaskStop(taskId: string) {
+  cancelledTasks.delete(taskId);
+}
+
 /**
  * 频道级停止：中断该频道里正在跑的全部 agent 运行（含没有 taskId 的聊天回复）——
  * abort 在飞的流（能停正在吐字的那一轮），并置频道停止标志让多轮循环在边界也停。
@@ -693,7 +698,7 @@ export function taskHasApprovedNetworkGrant(taskId: string | null | undefined): 
 /** 任务被指派（或创建时即带负责人）后调用。依赖未满足的任务会等依赖交付后自动开工。 */
 export function onTaskAssigned(task: Task) {
   if (!task.assignee_agent_id) return;
-  if (task.status === "review" || task.status === "done" || task.status === "blocked") return;
+  if (task.status === "review" || task.status === "done" || task.status === "blocked" || task.status === "cancelled") return;
   if (runningTasks.has(task.id)) return;
   if (!depsSatisfied(task)) return; // 依赖交付时由 onTaskDelivered 解锁
   const agent = getAgent(task.assignee_agent_id);
@@ -802,7 +807,12 @@ function emitTaskEvent(task: Task, type: Parameters<typeof createTaskEvent>[0]["
 
 async function runTaskWork(agent: Agent, taskId: string) {
   let task = getTask(taskId);
-  if (!task || task.status === "done" || task.status === "review" || task.status === "blocked") return;
+  if (!task) return;
+  if (task.status === "cancelled") {
+    cancelledTasks.delete(taskId);
+    return;
+  }
+  if (task.status === "done" || task.status === "review" || task.status === "blocked") return;
   if (cancelledTasks.delete(taskId)) {
     if (task.channel_id) audit(task.channel_id, `⏹ 任务「${task.title}」已被用户停止（未开工）`);
     return;
@@ -848,6 +858,11 @@ async function runTaskWork(agent: Agent, taskId: string) {
     if (ctx.halted === "blocked" || afterRun?.status === "blocked") return;
 
     if (cancelledTasks.delete(task.id)) {
+      const latest = getTask(task.id);
+      if (latest?.status === "cancelled") {
+        audit(channel.id, `⏹ 任务「${task.title}」已取消并归档`);
+        return;
+      }
       setTaskStatus(task.id, "todo");
       emitTaskEvent(task, "handoff", "用户停止了运行，任务退回待办", undefined, agent.id);
       audit(channel.id, `⏹ 任务「${task.title}」已被用户停止，退回待办`);
@@ -1768,6 +1783,9 @@ function findAgentByName(name?: string): Agent | undefined {
 export function claimTaskForAgent(agent: Agent, taskId: string, reason = ""): { ok: true; task: Task } | { ok: false; error: string } {
   const task = getTask(taskId);
   if (!task) return { ok: false, error: `找不到任务 ${taskId}` };
+  if (task.status === "done" || task.status === "cancelled") {
+    return { ok: false, error: `任务已${task.status === "done" ? "关闭" : "取消"}，请先恢复到待办再认领。` };
+  }
   if (task.assignee_agent_id && task.assignee_agent_id !== agent.id) {
     const owner = getAgent(task.assignee_agent_id);
     return { ok: false, error: `任务已由 ${owner?.name ?? "其他 AI 同事"} 负责，不能重复认领。` };
@@ -1911,7 +1929,7 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
       if (!taskId) return "错误：task_id 不能为空。";
       const task = getTask(taskId);
       if (!task) return `错误：找不到任务 ${taskId}`;
-      if (task.status === "review" || task.status === "done") return "错误：任务已交付或已关闭，不能再请求 clarification。";
+      if (task.status === "review" || task.status === "done" || task.status === "cancelled") return "错误：任务已交付、关闭或取消，不能再请求 clarification。";
       const question = String(input.question ?? "").trim();
       if (!question) return "错误：question 不能为空。";
       const { approvalId } = requestClarificationForTask(

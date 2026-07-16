@@ -91,6 +91,7 @@ import {
   onTaskDelivered,
   oneShotComplete,
   buildSkillIndex,
+  clearTaskStop,
   readSkillBody,
   stopChannel,
   stopTask,
@@ -1166,15 +1167,16 @@ api.patch("/tasks/:id", (req, res) => {
   if (status !== undefined) {
     const nextStatus = String(status);
     const allowed: Record<string, string[]> = {
-      todo: ["todo", "done"],
-      doing: ["todo", "review", "done"],
-      review: ["todo", "done"],
+      todo: ["todo", "cancelled"],
+      doing: ["todo", "review", "cancelled"],
+      review: ["todo", "done", "cancelled"],
       // blocked→todo 是"审批已处理但未恢复"（如拒绝追加预算后想调整预算重跑）的人工恢复口；
       // 仍有 pending 阻塞审批时下方统一拦截，防止绕过待输入直接重启。
-      blocked: ["todo", "done"],
+      blocked: ["todo", "cancelled"],
       done: ["todo", "review"],
+      cancelled: ["todo"],
     };
-    if (!["todo", "doing", "review", "blocked", "done"].includes(nextStatus)) {
+    if (!["todo", "doing", "review", "blocked", "done", "cancelled"].includes(nextStatus)) {
       return res.status(400).json({ error: `invalid task status: ${nextStatus}` });
     }
     if (nextStatus === "blocked") {
@@ -1183,7 +1185,7 @@ api.patch("/tasks/:id", (req, res) => {
     if (!allowed[prev.status]?.includes(nextStatus)) {
       return res.status(400).json({ error: `invalid task transition: ${prev.status} -> ${nextStatus}` });
     }
-    if (nextStatus === "done" || (nextStatus === "todo" && prev.status === "blocked")) {
+    if (nextStatus === "done" || nextStatus === "cancelled" || (nextStatus === "todo" && prev.status === "blocked")) {
       const pendingApprovals = listApprovals().filter((approval) =>
         approval.status === "pending" &&
         (approval.ref_id === prev.id || approval.id === prev.blocked_approval_id)
@@ -1197,6 +1199,8 @@ api.patch("/tasks/:id", (req, res) => {
     }
   }
   const { budget_billable } = req.body ?? {};
+  if (status === "cancelled" && prev.status === "doing") stopTask(prev.id);
+  if (status === "todo" && prev.status === "cancelled") clearTaskStop(prev.id);
   const task = updateTask(req.params.id, {
     ...(title !== undefined ? { title } : {}),
     ...(description !== undefined ? { description } : {}),
@@ -1258,6 +1262,15 @@ api.patch("/tasks/:id", (req, res) => {
         agent_id: task.assignee_agent_id,
         type: "user_close",
         summary: "用户关闭了任务",
+      });
+    } else if (task.status === "cancelled") {
+      emitTaskEvent({
+        task_id: task.id,
+        channel_id: task.channel_id,
+        project_id: task.project_id,
+        agent_id: task.assignee_agent_id,
+        type: "cancelled",
+        summary: "用户取消并归档了任务",
       });
     }
   }

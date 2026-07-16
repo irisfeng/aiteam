@@ -71,18 +71,22 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
 
 {
   const storeSource = readFileSync(join(root, "web/src/store.tsx"), "utf8");
+  const appSource = readFileSync(join(root, "web/src/App.tsx"), "utf8");
   const onboardingSource = readFileSync(join(root, "web/src/components/Onboarding.tsx"), "utf8");
   const worklineSource = readFileSync(join(root, "web/src/components/WorklineOverview.tsx"), "utf8");
   const tasksBoardSource = readFileSync(join(root, "web/src/components/TasksBoard.tsx"), "utf8");
   const taskDetailSource = readFileSync(join(root, "web/src/components/TaskDetailDrawer.tsx"), "utf8");
   const inboxSource = readFileSync(join(root, "web/src/components/InboxView.tsx"), "utf8");
   const modalsSource = readFileSync(join(root, "web/src/components/Modals.tsx"), "utf8");
+  const worklineLibSource = readFileSync(join(root, "web/src/lib/workline.ts"), "utf8");
   const defaultWorkline = /view:\s*\{\s*kind:\s*"workline"\s*\}/.test(storeSource);
   const bootstrapKeepsView = /view:\s*keepValidView\(state\.view,\s*d\.channels\)/.test(storeSource);
   const loadDoesNotForceChannel = !/const first = data\.channels\.find[\s\S]*?openChannel\(first\.id\)/.test(storeSource);
   const onboardingTargetsWorkline =
     onboardingSource.includes("从任务运行线开始") &&
-    onboardingSource.includes("onOpenTasks") &&
+    onboardingSource.includes("onOpenWorkline") &&
+    !onboardingSource.includes("onOpenTasks") &&
+    /const openWorkline = \(\) => \{[\s\S]*?kind:\s*"workline"/.test(appSource) &&
     !onboardingSource.includes("自主闭环");
   check("UX1", "首屏体验：默认落工作台（任务运行线），首次引导指向任务运行线而非泛欢迎/自主闭环文案",
     defaultWorkline && bootstrapKeepsView && loadDoesNotForceChannel && onboardingTargetsWorkline,
@@ -160,6 +164,14 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
   check("UX6", "收件箱：处理审批/输入后刷新工作区并回到关联任务详情",
     inboxResolutionLoop,
     `inboxResolutionLoop=${inboxResolutionLoop}`);
+  const cancellationUi =
+    taskDetailSource.includes('task.status === "review" ? "done" : "cancelled"') &&
+    taskDetailSource.includes("取消只归档，不代表验收通过") &&
+    tasksBoardSource.includes('{ key: "cancelled", label: "已取消" }') &&
+    worklineLibSource.includes('t.status !== "done" && t.status !== "cancelled"');
+  check("UX7", "取消任务：UI 明确区分验收关单与取消归档，取消项不计入活跃任务",
+    cancellationUi,
+    `cancellationUi=${cancellationUi}`);
 }
 
 // C2 依赖调度 + 项目汇总
@@ -928,18 +940,88 @@ try {
     const req = engine.requestClarificationForTask(eng, t2, "确认是否关闭", "仍有待处理输入时不能直接关单。", "继续等待");
     db.db.pragma("wal_checkpoint(FULL)");
     const blockedToReview = await J(`/tasks/${t2.id}`, { method: "PATCH", body: JSON.stringify({ status: "review" }) });
-    const blockedToDonePending = await J(`/tasks/${t2.id}`, { method: "PATCH", body: JSON.stringify({ status: "done" }) });
+    const blockedToCancelledPending = await J(`/tasks/${t2.id}`, { method: "PATCH", body: JSON.stringify({ status: "cancelled" }) });
     await J(`/approvals/${req.approvalId}/resolve`, { method: "POST", body: JSON.stringify({ approve: false }) });
     db.db.pragma("wal_checkpoint(FULL)");
-    const blockedToDoneResolved = await J(`/tasks/${t2.id}`, { method: "PATCH", body: JSON.stringify({ status: "done" }) });
-    check("HC3", "任务状态 API：禁止手工进入 blocked、禁止 blocked→review、禁止待输入时关单、处理后可关闭",
+    const blockedToCancelledResolved = await J(`/tasks/${t2.id}`, { method: "PATCH", body: JSON.stringify({ status: "cancelled" }) });
+    check("HC3", "任务状态 API：禁止手工进入 blocked、禁止 blocked→review、待输入时不能取消、处理后可取消",
       !manualBlocked.ok &&
       !blockedToReview.ok &&
-      !blockedToDonePending.ok &&
-      blockedToDonePending.body.error === "task has pending approvals" &&
-      blockedToDoneResolved.ok &&
-      blockedToDoneResolved.body.status === "done",
-      `manualBlocked=${manualBlocked.ok} blockedToReview=${blockedToReview.ok} pendingClose=${blockedToDonePending.ok} resolvedClose=${blockedToDoneResolved.ok}`);
+      !blockedToCancelledPending.ok &&
+      blockedToCancelledPending.body.error === "task has pending approvals" &&
+      blockedToCancelledResolved.ok &&
+      blockedToCancelledResolved.body.status === "cancelled",
+      `manualBlocked=${manualBlocked.ok} blockedToReview=${blockedToReview.ok} pendingCancel=${blockedToCancelledPending.ok} resolvedCancel=${blockedToCancelledResolved.ok}`);
+  }
+
+  // HC3D 取消语义：取消不是交付，也不能用 done 绕过 review
+  {
+    enterOwner(ownerFromUserId(testUser.id));
+    const unfinished = db.createTask({
+      channel_id: ch.id,
+      title: "回归-未交付不能伪装关单",
+      assignee_agent_id: eng.id,
+      created_by: "user",
+    });
+    const fakeDone = await J(`/tasks/${unfinished.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "done" }),
+    });
+
+    const prerequisite = db.createTask({
+      channel_id: ch.id,
+      title: "回归-取消前置任务",
+      assignee_agent_id: eng.id,
+      created_by: "user",
+    });
+    const dependent = db.createTask({
+      channel_id: ch.id,
+      title: "回归-取消任务不得解锁下游",
+      assignee_agent_id: pm.id,
+      depends_on: [prerequisite.id],
+      created_by: "user",
+    });
+    const deliveredBefore = db.qualitySummary().coverage.delivered;
+    const agentDeliveredBefore = db.agentDailyStats(0).get(eng.id)?.delivered ?? 0;
+    const cancelled = await J(`/tasks/${prerequisite.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "cancelled" }),
+    });
+    const live = await J("/tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        channel_id: ch.id,
+        title: "回归-运行中取消保持终态",
+        assignee_agent_id: eng.id,
+      }),
+    });
+    const liveStarted = await waitFor(() => db.getTask(live.body.id)?.status === "doing", 5000, 10);
+    const liveCancelled = await J(`/tasks/${live.body.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "cancelled" }),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const deliveredAfter = db.qualitySummary().coverage.delivered;
+    const agentDeliveredAfter = db.agentDailyStats(0).get(eng.id)?.delivered ?? 0;
+    const cancelEvents = db.listTaskEvents(prerequisite.id);
+    const downstreamEvents = db.listTaskEvents(dependent.id);
+    check(
+      "HC3D",
+      "取消语义：未交付不能置 done；cancelled 不解锁依赖、不计交付或质量覆盖",
+      !fakeDone.ok &&
+        db.getTask(unfinished.id).status === "todo" &&
+        cancelled.ok &&
+        cancelled.body.status === "cancelled" &&
+        liveStarted &&
+        liveCancelled.ok &&
+        db.getTask(live.body.id).status === "cancelled" &&
+        db.getTask(dependent.id).status === "todo" &&
+        !downstreamEvents.some((event) => event.type === "start") &&
+        cancelEvents.some((event) => event.type === "cancelled") &&
+        deliveredAfter === deliveredBefore &&
+        agentDeliveredAfter === agentDeliveredBefore,
+      `fakeDone=${fakeDone.ok} cancelled=${cancelled.ok} live=${liveStarted}/${liveCancelled.ok}/${db.getTask(live.body.id).status} downstream=${db.getTask(dependent.id).status} delivered=${deliveredBefore}->${deliveredAfter}`,
+    );
   }
 
   // HC3C clarification HTTP 闭环：用户输入必须随审批一起持久化，并进入任务活动日志

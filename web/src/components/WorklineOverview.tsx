@@ -17,6 +17,7 @@ const EVENT_LABEL: Record<TaskEvent["type"], string> = {
   verification: "复核",
   approval: "审批",
   user_close: "关闭",
+  cancelled: "取消",
   failure: "失败",
 };
 const LINK_CHECK_PROJECT_PREFIX = "配置链路验收";

@@ -11,7 +11,14 @@ import { DOC_KIND_ICON } from "../lib/docMeta";
 
 const DocViewerModal = lazy(() => import("./DocsView").then((m) => ({ default: m.DocViewerModal })));
 
-const STATUS_LABEL: Record<Task["status"], string> = { todo: "待办", doing: "进行", blocked: "等待", review: "待评审", done: "完成" };
+const STATUS_LABEL: Record<Task["status"], string> = {
+  todo: "待办",
+  doing: "进行",
+  blocked: "等待",
+  review: "待评审",
+  done: "完成",
+  cancelled: "已取消",
+};
 
 /** 频道右侧任务面板（Hive 设计：进度/产出物贴着对话看，不用切视图） */
 function ChannelPanel({ channelId, onOpenDoc, onOpenTask }: { channelId: string; onOpenDoc: (d: Doc) => void; onOpenTask: (t: Task) => void }) {

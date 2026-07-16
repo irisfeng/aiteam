@@ -174,7 +174,7 @@ export function Sidebar({
 }) {
   const ws = useWorkspace();
   const pending = ws.approvals.filter((a) => a.status === "pending").length;
-  const activeTasks = ws.tasks.filter((t) => t.status !== "done").length;
+  const activeTasks = ws.tasks.filter((t) => t.status !== "done" && t.status !== "cancelled").length;
   const channels = ws.channels.filter((c) => c.kind === "channel");
   const dms = ws.channels.filter((c) => c.kind === "dm");
 

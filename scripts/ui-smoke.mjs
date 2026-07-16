@@ -279,6 +279,8 @@ async function runViewport(debugPort, baseUrl, label, viewport) {
     ok(`${label} workline visible`, await page.eval(`document.body.innerText.includes('任务运行线')`));
     ok(`${label} startup checklist visible`, await page.eval(`document.body.innerText.includes('启动前检查')`));
     ok(`${label} core acceptance control visible`, await page.eval(`document.body.innerText.includes('端到端验收') || document.body.innerText.includes('打开验收')`));
+    const onboardingOpen = await page.eval(`document.body.innerText.includes('从任务运行线开始')`);
+    if (onboardingOpen) await page.clickText("看任务线");
     await page.clickAnyText(["端到端验收", "打开验收"]);
     await page.waitText("闭环验收：AI 同事任务运行线");
     await page.waitText("责任链");
@@ -287,6 +289,34 @@ async function runViewport(debugPort, baseUrl, label, viewport) {
     ok(`${label} review checklist visible`, await page.eval(`document.body.innerText.includes('人工复核清单')`));
     ok(`${label} activity log visible`, await page.eval(`document.body.innerText.includes('活动日志')`));
     await assertNoHorizontalOverflow(page, label);
+
+    const cancelTitle = `UI取消语义-${label}-${Date.now()}`;
+    const cancelTaskId = await page.eval(`
+      (async () => {
+        const res = await fetch('/aiteam/api/tasks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: ${JSON.stringify(cancelTitle)} }),
+        });
+        const task = await res.json();
+        if (!res.ok) throw new Error(task.error || 'create task failed');
+        return task.id;
+      })()
+    `, true);
+    await page.send("Page.navigate", { url: `${baseUrl}?task=${encodeURIComponent(cancelTaskId)}` });
+    await page.waitText(cancelTitle);
+    await page.waitText("取消任务");
+    await page.eval(`window.confirm = () => true`);
+    await page.clickText("取消任务");
+    await page.waitText("已取消");
+    const cancelled = await waitFor(() => page.eval(`
+      fetch('/aiteam/api/tasks')
+        .then((res) => res.json())
+        .then((tasks) => tasks.some((task) => task.id === ${JSON.stringify(cancelTaskId)} && task.status === 'cancelled'))
+    `, true));
+    ok(`${label} cancellation is distinct from delivery close`, Boolean(cancelled));
+    await page.screenshot(`cancelled-${label}`);
+    await assertNoHorizontalOverflow(page, `${label} cancelled drawer`);
   } catch (err) {
     await page.screenshot(`failure-${label}`).catch(() => undefined);
     throw err;

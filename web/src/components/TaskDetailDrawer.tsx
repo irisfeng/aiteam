@@ -14,7 +14,16 @@ const EVENT_LABEL: Record<TaskEvent["type"], string> = {
   verification: "复核",
   approval: "审批",
   user_close: "关闭",
+  cancelled: "取消",
   failure: "失败",
+};
+const TASK_STATUS_LABEL: Record<Task["status"], string> = {
+  todo: "待办",
+  doing: "进行中",
+  blocked: "等待输入",
+  review: "待评审",
+  done: "已关闭",
+  cancelled: "已取消",
 };
 
 const VERDICT_SOURCE_LABEL: Record<Verdict["source"], string> = {
@@ -89,6 +98,12 @@ function splitAcceptanceCriteria(raw: string) {
 }
 
 function nextActionHint(task: Task, pendingApprovals: Approval[], docs: Doc[], dependencies: Task[], assignee?: { name: string } | undefined) {
+  if (task.status === "cancelled") {
+    return { tone: "idle" as const, label: "已取消", body: "任务已取消归档，不代表交付或验收通过，也不会解锁下游依赖。" };
+  }
+  if (task.status === "done") {
+    return { tone: "done" as const, label: "已关闭", body: "任务已由人类确认关闭；保留交付物、审批和活动日志供复盘。" };
+  }
   if (pendingApprovals.length > 0) {
     const clarification = pendingApprovals.some((a) => a.kind === "clarification");
     return {
@@ -118,7 +133,7 @@ function nextActionHint(task: Task, pendingApprovals: Approval[], docs: Doc[], d
     if (blockedDeps.length > 0) return { tone: "idle" as const, label: "等待依赖", body: `${blockedDeps.length} 个前置任务未交付；依赖完成后 ${assignee?.name ?? "负责人"} 会继续。` };
     return { tone: "run" as const, label: "准备开工", body: `${assignee?.name ?? "负责人"} 已归属；任务会按调度进入执行。` };
   }
-  return { tone: "done" as const, label: "已关闭", body: "任务已由人类确认关闭；保留交付物、审批和活动日志供复盘。" };
+  return { tone: "idle" as const, label: "状态待确认", body: "请返回任务看板刷新状态后继续。" };
 }
 
 export function TaskDetailDrawer({
@@ -177,16 +192,17 @@ export function TaskDetailDrawer({
     .sort((a, b) => Number(b.status === "pending") - Number(a.status === "pending") || b.created_at - a.created_at);
   const pendingApprovals = approvals.filter((a) => a.status === "pending");
   const actionHint = nextActionHint(task, pendingApprovals, docs, dependencies, assignee);
-  const closeDisabled = task.status === "done" || closing || pendingApprovals.length > 0;
+  const terminal = task.status === "done" || task.status === "cancelled";
+  const closeDisabled = terminal || closing || pendingApprovals.length > 0;
 
   async function closeTask() {
     if (closeDisabled) return;
-    // 未交付评审的任务保留人类关闭权（唯一的取消/清理路径），但要显式确认这是"取消归档"而非验收通过。
+    // 未交付评审只能取消，不能伪装成 done；只有 review → done 才表示人类验收通过。
     if (task.status !== "review" &&
-      !window.confirm(`任务「${task.title}」尚未交付评审。\n确认关闭 = 取消并归档该任务（不代表验收通过）。`)) return;
+      !window.confirm(`确认取消任务「${task.title}」？\n取消后会归档，但不计入交付、质量覆盖，也不会解锁下游依赖。`)) return;
     setClosing(true);
     try {
-      await ws.moveTask(task, "done");
+      await ws.moveTask(task, task.status === "review" ? "done" : "cancelled");
     } finally {
       setClosing(false);
     }
@@ -263,7 +279,7 @@ export function TaskDetailDrawer({
             : "border-line bg-sel text-ink-2";
   const hintActions = [
     ...(pendingApprovalCount > 0 ? [{ label: "处理", onClick: () => ws.setView({ kind: "inbox" }), disabled: false }] : []),
-    ...((task.status === "review" || task.status === "done") && latestDoc && onOpenDoc
+    ...((task.status === "review" || task.status === "done" || task.status === "cancelled") && latestDoc && onOpenDoc
       ? [{ label: task.status === "review" ? "看交付物" : "看归档", onClick: () => onOpenDoc(latestDoc), disabled: false }]
       : []),
     ...(task.status === "review"
@@ -279,7 +295,7 @@ export function TaskDetailDrawer({
           <div className="flex items-start gap-2">
             <div className="min-w-0 flex-1">
               <div className="mb-1 flex items-center gap-1.5">
-                <span className="rounded bg-sel px-1.5 py-px font-mono text-[10px] text-ink-3">{task.status}</span>
+                <span className="rounded bg-sel px-1.5 py-px text-[10px] text-ink-3">{TASK_STATUS_LABEL[task.status]}</span>
                 {project && <span className="truncate rounded bg-accent-soft px-1.5 py-px text-[10.5px] text-ink-2">{project.title}</span>}
               </div>
               <h2 className="text-[15px] font-semibold leading-snug">{task.title}</h2>
@@ -323,7 +339,7 @@ export function TaskDetailDrawer({
                 <select
                   value={task.assignee_agent_id ?? ""}
                   onChange={(e) => void updateRole("assignee", e.target.value)}
-                  disabled={!!savingRole || task.status === "done"}
+                  disabled={!!savingRole || terminal}
                   className="mt-1 w-full rounded-md border border-line bg-panel px-2 py-1 text-[12px] outline-none hover:bg-sel disabled:opacity-50"
                   title="更换负责人会写入任务活动日志；未分配任务可由 AI 同事认领"
                 >
@@ -340,7 +356,7 @@ export function TaskDetailDrawer({
                 <select
                   value={task.reviewer_agent_id ?? ""}
                   onChange={(e) => void updateRole("reviewer", e.target.value)}
-                  disabled={!!savingRole || task.status === "done"}
+                  disabled={!!savingRole || terminal}
                   className="mt-1 w-full rounded-md border border-line bg-panel px-2 py-1 text-[12px] outline-none hover:bg-sel disabled:opacity-50"
                   title="显式复核人优先于系统自动路由，并写入任务活动日志"
                 >
@@ -670,10 +686,24 @@ export function TaskDetailDrawer({
           <button
             onClick={closeTask}
             disabled={closeDisabled}
-            className="rounded-lg bg-accent px-3 py-1.5 text-[13px] font-medium text-white disabled:opacity-40"
-            title={pendingApprovalCount > 0 ? "先处理该任务的审批或输入，再关闭任务" : "关单是 human-only 操作"}
+            className={task.status === "review"
+              ? "rounded-lg bg-accent px-3 py-1.5 text-[13px] font-medium text-white disabled:opacity-40"
+              : terminal
+                ? "rounded-lg border border-line bg-sel px-3 py-1.5 text-[13px] font-medium text-ink-3 disabled:opacity-70"
+                : "rounded-lg border border-red-300 bg-red-50 px-3 py-1.5 text-[13px] font-medium text-red-700 hover:bg-red-100 disabled:opacity-40 dark:border-red-900/60 dark:bg-red-950/20 dark:text-red-300"}
+            title={pendingApprovalCount > 0
+              ? "先处理该任务的审批或输入"
+              : task.status === "review"
+                ? "验收通过后由人类确认关单"
+                : "取消只归档，不代表验收通过"}
           >
-            {task.status === "done" ? "已关闭" : closing ? "关闭中…" : "确认关闭任务"}
+            {task.status === "done"
+              ? "已关闭"
+              : task.status === "cancelled"
+                ? "已取消"
+                : closing
+                  ? task.status === "review" ? "关闭中…" : "取消中…"
+                  : task.status === "review" ? "确认关闭任务" : "取消任务"}
           </button>
           <button onClick={onClose} className="rounded-lg border border-line px-3 py-1.5 text-[13px] text-ink-2 hover:bg-sel">
             返回

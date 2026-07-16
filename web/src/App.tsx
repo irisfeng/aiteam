@@ -66,8 +66,8 @@ export default function App() {
     setModal(null);
   };
 
-  const openTasks = () => {
-    ws.setView({ kind: "tasks" });
+  const openWorkline = () => {
+    ws.setView({ kind: "workline" });
     setModal(null);
   };
 
@@ -125,7 +125,7 @@ export default function App() {
         suppress={suppressWelcome}
         onSettings={() => openSettings("providers")}
         onNewChannel={() => setModal("channel")}
-        onOpenTasks={openTasks}
+        onOpenWorkline={openWorkline}
       />
     </div>
   );

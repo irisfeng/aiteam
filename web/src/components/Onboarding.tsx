@@ -22,12 +22,12 @@ export function MockBanner({ onSettings }: { onSettings: () => void }) {
 export function WelcomeOverlay({
   onSettings,
   onNewChannel,
-  onOpenTasks,
+  onOpenWorkline,
   suppress = false,
 }: {
   onSettings: () => void;
   onNewChannel: () => void;
-  onOpenTasks: () => void;
+  onOpenWorkline: () => void;
   suppress?: boolean;
 }) {
   const ws = useWorkspace();
@@ -74,7 +74,7 @@ export function WelcomeOverlay({
 
         <div className="flex flex-col gap-3 px-5 py-4">
           <Step n="1" title="打开任务线" desc="查看待办、阻塞、待评审、交付物、审批和活动日志；可直接启动闭环验收。">
-            <button onClick={() => go(onOpenTasks)} className="shrink-0 rounded-lg bg-accent px-3 py-1 text-[12px] font-medium text-white hover:opacity-90">
+            <button onClick={() => go(onOpenWorkline)} className="shrink-0 rounded-lg bg-accent px-3 py-1 text-[12px] font-medium text-white hover:opacity-90">
               进入
             </button>
           </Step>
@@ -92,7 +92,7 @@ export function WelcomeOverlay({
 
         <div className="flex items-center justify-between gap-3 border-t border-line px-5 py-3">
           <span className="text-[11.5px] text-ink-3">高风险动作、澄清输入和项目关闭都保留人类确认。</span>
-          <button onClick={() => go(onOpenTasks)} className="rounded-lg bg-accent px-4 py-1.5 text-[13px] font-medium text-white">
+          <button onClick={() => go(onOpenWorkline)} className="rounded-lg bg-accent px-4 py-1.5 text-[13px] font-medium text-white">
             看任务线
           </button>
         </div>

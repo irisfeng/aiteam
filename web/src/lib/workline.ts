@@ -68,7 +68,7 @@ export function computeWorkline({
   const review = scopedTasks.filter((t) => t.status === "review");
   const todo = scopedTasks.filter((t) => t.status === "todo");
   const done = scopedTasks.filter((t) => t.status === "done");
-  const active = scopedTasks.filter((t) => t.status !== "done");
+  const active = scopedTasks.filter((t) => t.status !== "done" && t.status !== "cancelled");
   const unassigned = scopedTasks.filter((t) => t.status === "todo" && !t.assignee_agent_id);
 
   const attention: AttentionItem[] = [
