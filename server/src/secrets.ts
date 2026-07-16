@@ -13,12 +13,15 @@ import { fileURLToPath } from "node:url";
  *   迁移数据库时必须连同此文件一起迁移，
  *   否则存量凭证不可解（decryptSecret 会给出明确报错，不静默回退明文）。
  *
- * 密文格式 `enc1:<iv>:<tag>:<ct>`（base64url）。decrypt 对无前缀的值原样返回，
- * 兼容存量明文——启动迁移（db.ts）会把它们统一重写为密文。
+ * 密文格式 `enc1:<iv>:<tag>:<ct>`（base64url）。decrypt 对无前缀的值原样返回。
+ * 开发/测试启动可把存量明文与 enc:v1 原地规范化；生产启动只认证已有 enc1，
+ * 遇到旧格式必须 fail-closed，改走 credential-recovery 的 copy-only migrate-copy。
  */
 const ENC_PREFIX = "enc1:";
 const LEGACY_V1_PREFIX = "enc:v1:";
 const ENVELOPE_LIKE = /^enc(?::|[0-9]+:)/;
+const COPY_ONLY_MIGRATION_GUIDANCE =
+  "生产启动检测到未规范化的存量凭证，拒绝在原数据目录迁移。请先停服，依次运行 `npm run credentials:recover -- inspect ...`、`dry-run` 和 `migrate-copy` 生成并验证新数据目录，再切换 AITEAM_DATA_DIR。";
 
 // 与 db.ts 同一套数据目录解析规则（不 import db，避免环依赖）
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -136,12 +139,27 @@ export function decryptSecret(stored: string): string {
   }
 }
 
-/** 把历史明文或 enc:v1 统一迁移为 canonical enc1；已有 enc1 先认证再原样保留。 */
+function allowsInPlaceCredentialMigration(): boolean {
+  const mode = (process.env.NODE_ENV || "development").trim().toLowerCase();
+  return mode === "development" || mode === "test";
+}
+
+/**
+ * 已有 enc1 先认证再原样保留。
+ * 只有 development/test（含未显式设置 NODE_ENV 的本地开发）允许把明文或 enc:v1 原地转为 enc1；
+ * production 及其他非开发运行模式必须改走 copy-only migrate-copy。
+ */
 export function canonicalizeSecret(stored: string): string {
   if (!stored) return "";
   if (stored.startsWith(ENC_PREFIX)) {
     decryptSecret(stored);
     return stored;
+  }
+  if (
+    !allowsInPlaceCredentialMigration() &&
+    (stored.startsWith(LEGACY_V1_PREFIX) || !ENVELOPE_LIKE.test(stored))
+  ) {
+    throw new Error(COPY_ONLY_MIGRATION_GUIDANCE);
   }
   return encryptSecret(decryptSecret(stored));
 }

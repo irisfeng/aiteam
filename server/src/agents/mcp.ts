@@ -209,15 +209,36 @@ export function searchQuerySignature(input: unknown): string | null {
   return parts.join(" ").toLowerCase().replace(/\s+/g, " ").trim();
 }
 
+interface CallMcpToolOptions {
+  /** 在可能耗时的连接前后核验调用上下文；false 时 fail-closed，不触发真实 callTool。 */
+  canDispatch?: () => boolean;
+}
+
+function dispatchAllowed(options: CallMcpToolOptions): boolean {
+  try {
+    return options.canDispatch ? options.canDispatch() : true;
+  } catch {
+    return false;
+  }
+}
+
 /** 执行 MCP 工具调用，返回文本结果（供 tool_result） */
-export async function callMcpTool(name: string, input: unknown): Promise<string> {
+export async function callMcpTool(
+  name: string,
+  input: unknown,
+  options: CallMcpToolOptions = {},
+): Promise<string> {
   const m = name.match(/^mcp__(.+?)__(.+)$/);
   if (!m) return `错误：无效的 MCP 工具名 ${name}`;
   const [, serverKey, toolName] = m;
   const server = listMcpServers().find((s) => sanitizeName(s.name) === serverKey && s.enabled);
   if (!server) return `错误：MCP server「${serverKey}」不存在或已停用`;
+  if (!dispatchAllowed(options)) return "错误：任务执行权已撤销，本次 MCP 工具调用未执行";
   const conn = await ensureConnection(server);
   if (!conn) return `错误：MCP server「${server.name}」连接失败，请检查配置（设置 → MCP 插件 → 测试）`;
+  // ensureConnection 可能包含网络/进程握手；stop、取消或改派可在 await 期间发生，
+  // 因此必须紧邻真实 callTool 再校验一次，而不能只依赖授权消费前的状态。
+  if (!dispatchAllowed(options)) return "错误：任务执行权已撤销，本次 MCP 工具调用未执行";
   // 缓存是进程级全局，而结果可能含租户私有数据（检索内容/文档转换产物）——key 必须带 owner 前缀，
   // 否则多用户下 A 的结果会命中给 B。缺 owner 上下文时 fail-closed：不读不写缓存，只走真实调用。
   const owner = currentOwnerOrNull();

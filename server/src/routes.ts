@@ -43,7 +43,6 @@ import {
   listMessages,
   listTaskEvents,
   listTasks,
-  invalidateNetworkApprovalsForTask,
   resolveApprovalOnce,
   updateApprovalPayload,
   updateTask,
@@ -93,7 +92,7 @@ import {
   onTaskDelivered,
   oneShotComplete,
   buildSkillIndex,
-  clearTaskStop,
+  invalidateTaskNetworkApprovals,
   readSkillBody,
   stopChannel,
   stopTask,
@@ -373,6 +372,7 @@ api.post("/mcp-servers/:id/task-test", requireAdmin, async (req, res) => {
     }
 
     const finalTask = updateTask(task.id, { status: "review" }) ?? task;
+    invalidateTaskNetworkApprovals(task.id);
     emitTaskEvent({
       task_id: task.id,
       channel_id: task.channel_id,
@@ -517,6 +517,7 @@ api.post("/skills/:id/task-test", requireAdmin, (req, res) => {
     metadata: { skill_id: skill.id, doc_id: doc.id },
   });
   const finalTask = updateTask(task.id, { status: "review" }) ?? task;
+  invalidateTaskNetworkApprovals(task.id);
   emitTaskEvent({
     task_id: task.id,
     channel_id: task.channel_id,
@@ -1201,8 +1202,10 @@ api.patch("/tasks/:id", (req, res) => {
     }
   }
   const { budget_billable } = req.body ?? {};
+  if (budget_billable !== undefined && (prev.status === "done" || prev.status === "cancelled")) {
+    return res.status(400).json({ error: "terminal task budget is immutable; restore the task before editing budget" });
+  }
   if (status === "cancelled" && prev.status === "doing") stopTask(prev.id);
-  if (status === "todo" && (prev.status === "cancelled" || prev.status === "blocked")) clearTaskStop(prev.id);
   const task = updateTask(req.params.id, {
     ...(title !== undefined ? { title } : {}),
     ...(description !== undefined ? { description } : {}),
@@ -1214,11 +1217,9 @@ api.patch("/tasks/:id", (req, res) => {
   });
   if (!task) return res.status(404).json({ error: "task not found" });
   const assigneeChanged = task.assignee_agent_id !== prev.assignee_agent_id;
-  const contextRevoked =
-    assigneeChanged ||
-    task.status === "cancelled" ||
-    (prev.status === "blocked" && task.status === "todo");
-  if (contextRevoked) invalidateNetworkApprovalsForTask(task.id);
+  const statusChanged = task.status !== prev.status;
+  const contextRevoked = assigneeChanged || statusChanged;
+  if (contextRevoked) invalidateTaskNetworkApprovals(task.id);
   if (assigneeChanged) {
     emitTaskEvent({
       task_id: task.id,
@@ -1306,7 +1307,9 @@ api.patch("/tasks/:id", (req, res) => {
 });
 
 api.post("/tasks/:id/stop", (req, res) => {
-  stopTask(req.params.id);
+  const task = getTask(req.params.id);
+  if (!task) return res.status(404).json({ error: "task not found" });
+  stopTask(task.id);
   res.json({ ok: true });
 });
 
@@ -1319,6 +1322,7 @@ api.post("/tasks/:id/revise", (req, res) => {
   const revisions = (prev.revision_count ?? 0) + 1;
   const task = updateTask(prev.id, { status: "todo", revision_count: revisions, blocked_approval_id: null });
   if (!task) return res.status(404).json({ error: "task not found" });
+  invalidateTaskNetworkApprovals(task.id);
   // D1：人工退回同样入 verdicts 表——质量度量要能区分"机器验收退回"与"人不满意退回"
   createVerdict({
     task_id: task.id,
@@ -1366,7 +1370,9 @@ api.post("/projects/:id/close", (req, res) => {
   const project = getProject(req.params.id);
   if (!project) return res.status(404).json({ error: "project not found" });
   const projectTasks = listTasks().filter((t) => t.project_id === project.id);
-  const notDelivered = projectTasks.filter((t) => t.status !== "review" && t.status !== "done");
+  const notDelivered = projectTasks.filter(
+    (t) => t.status !== "review" && t.status !== "done" && t.status !== "cancelled",
+  );
   if (notDelivered.length > 0) {
     return res.status(400).json({
       error: "project has unfinished tasks",
@@ -1385,6 +1391,7 @@ api.post("/projects/:id/close", (req, res) => {
       approval_ids: pendingApprovals.map((a) => a.id),
     });
   }
+  for (const task of projectTasks) invalidateTaskNetworkApprovals(task.id);
   const { project: closedProject, tasks } = closeProject(req.params.id);
   if (!closedProject) return res.status(404).json({ error: "project not found" });
   for (const t of tasks) {

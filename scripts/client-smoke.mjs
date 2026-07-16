@@ -89,8 +89,11 @@ try {
     cwd: root,
     env: {
       ...process.env,
+      NODE_ENV: "production",
       PORT: String(port),
       AITEAM_DATA_DIR: dataDir,
+      AITEAM_SESSION_SECRET: "client-smoke-session-secret-32-bytes-minimum",
+      AITEAM_CREDENTIAL_KEY: "81".repeat(32),
       AITEAM_AUTH_MODE: "standalone",
       AITEAM_ALLOW_SIGNUP: "1",
       AITEAM_ADMIN_EMAILS: "client-smoke@test.local",

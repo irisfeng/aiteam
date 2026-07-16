@@ -46,15 +46,20 @@ export function WorklineView({ onOpenSettings }: { onOpenSettings?: (tab: Settin
   );
   const acceptanceDelivered = acceptanceTasks.filter((t) => t.status === "review" || t.status === "done").length;
   const acceptanceDone = acceptanceTasks.filter((t) => t.status === "done").length;
+  const acceptanceCancelled = acceptanceTasks.filter((t) => t.status === "cancelled").length;
+  const acceptanceTerminal = acceptanceTasks.length > 0 && acceptanceTasks.every(
+    (t) => t.status === "review" || t.status === "done" || t.status === "cancelled",
+  );
   const acceptanceRun = acceptanceProject
     ? {
         title: acceptanceProject.title,
         total: acceptanceTasks.length,
         delivered: acceptanceDelivered,
         done: acceptanceDone,
-        status: (acceptanceTasks.length > 0 && acceptanceDone === acceptanceTasks.length
+        cancelled: acceptanceCancelled,
+        status: (acceptanceProject.status === "done"
           ? "done"
-          : acceptanceTasks.length > 0 && acceptanceDelivered === acceptanceTasks.length
+          : acceptanceTerminal
             ? "review"
             : "running") as "running" | "review" | "done",
       }
@@ -75,8 +80,18 @@ export function WorklineView({ onOpenSettings }: { onOpenSettings?: (tab: Settin
       window.alert("该验收项目还有待处理的审批/输入，请先在收件箱处理后再关闭。");
       return;
     }
-    if (!window.confirm(`确认关闭验收项目「${acceptanceProject.title}」？\n这会把本轮验收任务归档为完成。`)) return;
-    await ws.closeProject(acceptanceProject.id);
+    const reviewCount = acceptanceTasks.filter((task) => task.status === "review").length;
+    const doneCount = acceptanceTasks.filter((task) => task.status === "done").length;
+    if (!window.confirm(
+      `确认关闭验收项目「${acceptanceProject.title}」？\n` +
+      `将把 ${reviewCount} 个待评审任务归入「完成」；` +
+      `${doneCount} 个已完成任务保持「完成」；${acceptanceCancelled} 个已取消任务保持「已取消」。`,
+    )) return;
+    try {
+      await ws.closeProject(acceptanceProject.id);
+    } catch (error) {
+      window.alert(`关闭验收项目失败：${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   async function runOrOpenAcceptance() {

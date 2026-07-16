@@ -9,8 +9,9 @@
 ```bash
 git clone <repo> && cd aiteam
 npm install
-npm run build && npm start        # 生产模式，打开 http://localhost:8787
-# 或开发模式：npm run dev          # 打开 http://localhost:5173（热更新）
+npm run dev                       # 本地开发，打开 http://localhost:5173/aiteam/（热更新）
+# 单进程构建版：npm run build && npm start
+# 打开 http://localhost:8787/aiteam/；production-like 启动需显式设置 NODE_ENV 和两类固定密钥，见 docs/TESTING.md
 ```
 
 不配置任何 key 也能跑（Mock 模式，全流程可点但回复是演示内容）。
@@ -95,11 +96,9 @@ AI 之间也会互相 `@` 接力讨论（链深限制防雪崩）。悬浮消息
 - 频道右侧 **⫿ 任务面板**：本频道任务与交付物，不切视图盯进度。
 - **📊 用量**：每日消耗曲线 + 逐次活动账本（谁、干了什么、用的哪个模型、花了多少 token）。
 - **导出工作区快照**（归档/反馈用，包含全部频道时间线、任务看板、文档清单、项目与审批状态、
-  逐条消息的模型归因）：
-  ```bash
-  curl -s localhost:8787/api/export.md -o snapshot.md     # 命令行
-  ```
-  或浏览器直接打开 `http://localhost:8787/api/export.md` 后另存。
+  逐条消息的模型归因）：先登录 AiTeam，再在同一浏览器打开
+  `http://localhost:8787/aiteam/api/export.md` 后另存。该接口需要登录态；不带会话 Cookie 的
+  `curl` 会返回 `401`。
   注意：即使用开发模式（5173 端口），API 端口也固定是 8787；超长消息自动截断到 1500 字。
 
 ## 进阶：扩编与赋能

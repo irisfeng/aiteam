@@ -177,6 +177,7 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
     inboxSource.includes("parseNetworkApprovalPayload") &&
     inboxSource.includes("一次性网络外发") &&
     inboxSource.includes("完整参数") &&
+    inboxSource.includes("wrap-anywhere") &&
     inboxSource.includes("批准一次并恢复") &&
     taskDetailSource.includes("formatNetworkApprovalPayload") &&
     taskDetailSource.includes("调整后重试") &&
@@ -196,6 +197,39 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
   check("UX7", "取消任务：UI 明确区分验收关单与取消归档，取消项不计入活跃任务",
     cancellationUi,
     `cancellationUi=${cancellationUi}`);
+  const cancelledProjectCloseUi =
+    tasksBoardSource.includes('t.status === "review" || t.status === "done" || t.status === "cancelled"') &&
+    tasksBoardSource.includes("statusCounts.review") &&
+    tasksBoardSource.includes("statusCounts.cancelled") &&
+    tasksBoardSource.includes("已取消任务保持「已取消」") &&
+    worklineSource.includes('task.status === "review" || task.status === "done" || task.status === "cancelled"') &&
+    worklineSource.includes("closableCancelledCount") &&
+    worklineSource.includes("已取消任务保持「已取消」") &&
+    worklineSource.includes('linkCheckProject?.status === "done"') &&
+    worklineSource.includes("linkCheckCancelled") &&
+    worklineViewSource.includes("acceptanceTerminal") &&
+    worklineViewSource.includes('acceptanceProject.status === "done"') &&
+    worklineViewSource.includes("acceptanceCancelled");
+  check(
+    "UX7B",
+    "取消项目：任务看板与工作台都允许终态项目关单，并准确区分待评审与已取消数量",
+    cancelledProjectCloseUi,
+    `cancelledProjectCloseUi=${cancelledProjectCloseUi}`,
+  );
+  const testingSource = readFileSync(join(root, "docs/TESTING.md"), "utf8");
+  const guideSource = readFileSync(join(root, "docs/GUIDE.md"), "utf8");
+  const manualUatPaths =
+    testingSource.includes("http://localhost:8787/aiteam/") &&
+    testingSource.includes("http://localhost:5173/aiteam/") &&
+    testingSource.includes("http://localhost:8787/aiteam/api/export.md") &&
+    testingSource.includes("会返回 `401`") &&
+    guideSource.includes("http://localhost:8787/aiteam/api/export.md");
+  check(
+    "UX8",
+    "人工 UAT 文档：入口包含 /aiteam/，导出路径正确并明确需要登录态",
+    manualUatPaths,
+    `manualUatPaths=${manualUatPaths}`,
+  );
 }
 
 // C2 依赖调度 + 项目汇总
@@ -721,6 +755,115 @@ check(
     Boolean(mismatchedRequest && mismatchedApproval && mismatchedConsumed && mismatchedCannotRevive),
     `requested=${Boolean(mismatchedRequest)} consumed=${mismatchedConsumed} revived=${!mismatchedCannotRevive}`,
   );
+  const invalidationTask = db.createTask({
+    channel_id: ch.id,
+    title: "回归-network-批量原子失效",
+    assignee_agent_id: eng.id,
+    created_by: "user",
+  });
+  const pendingNetwork = db.createApproval({
+    channel_id: ch.id,
+    agent_id: eng.id,
+    title: "待处理 network 审批",
+    kind: "network",
+    ref_id: invalidationTask.id,
+  });
+  const approvedNetwork = db.createApproval({
+    channel_id: ch.id,
+    agent_id: eng.id,
+    title: "已批准未消费 network 审批",
+    kind: "network",
+    ref_id: invalidationTask.id,
+  });
+  db.resolveApproval(approvedNetwork.id, true);
+  const unrelatedAction = db.createApproval({
+    channel_id: ch.id,
+    agent_id: eng.id,
+    title: "不应被波及的普通审批",
+    kind: "action",
+    ref_id: invalidationTask.id,
+  });
+  const invalidated = engine.invalidateTaskNetworkApprovals(invalidationTask.id);
+  const pendingAfterInvalidation = db.getApproval(pendingNetwork.id);
+  const approvedAfterInvalidation = db.getApproval(approvedNetwork.id);
+  const actionAfterInvalidation = db.getApproval(unrelatedAction.id);
+  const repeatedInvalidation = engine.invalidateTaskNetworkApprovals(invalidationTask.id);
+  check(
+    "CAP2E",
+    "network MCP：任务上下文撤销时 pending→rejected、approved→consumed 一次原子收口",
+    invalidated === 2 &&
+      pendingAfterInvalidation?.status === "rejected" &&
+      Boolean(pendingAfterInvalidation.resolved_at) &&
+      approvedAfterInvalidation?.status === "approved" &&
+      Boolean(approvedAfterInvalidation.consumed_at) &&
+      actionAfterInvalidation?.status === "pending" &&
+      repeatedInvalidation === 0,
+    `changed=${invalidated}->${repeatedInvalidation} pending=${pendingAfterInvalidation?.status}/${Boolean(pendingAfterInvalidation?.resolved_at)} approved=${approvedAfterInvalidation?.status}/${Boolean(approvedAfterInvalidation?.consumed_at)} action=${actionAfterInvalidation?.status}`,
+  );
+  const makeApprovedGrantTask = (title) => {
+    const task = db.createTask({
+      channel_id: ch.id,
+      title,
+      assignee_agent_id: eng.id,
+      created_by: "user",
+      source_doc_ids: [src.id],
+    });
+    db.updateTask(task.id, { status: "doing" });
+    const request = engine.requestNetworkApprovalForTask(
+      eng,
+      db.getTask(task.id),
+      tool,
+      callA,
+      `批准一次 ${title} 调用`,
+      "进入新的阻塞边界后，本授权必须永久失效",
+    );
+    const approval = request ? db.resolveApproval(request.approvalId, true) : null;
+    db.updateTask(task.id, { status: "doing", blocked_approval_id: null });
+    return { task: db.getTask(task.id), request, approval };
+  };
+  const clarificationGrant = makeApprovedGrantTask("clarification 前");
+  const clarificationWasGranted = Boolean(
+    clarificationGrant.request &&
+    clarificationGrant.approval &&
+    engine.taskHasApprovedNetworkGrant(clarificationGrant.task.id, tool, callA, eng.id),
+  );
+  const clarificationBlock = engine.requestClarificationForTask(
+    eng,
+    clarificationGrant.task,
+    "是否调整任务范围？",
+    "用户的新输入可能改变外发内容。",
+    "保持原范围",
+  );
+  db.updateTask(clarificationGrant.task.id, { status: "doing", blocked_approval_id: null });
+  const clarificationGrantClosed = Boolean(
+    clarificationGrant.request &&
+    db.getApproval(clarificationGrant.request.approvalId)?.consumed_at &&
+    !engine.taskHasApprovedNetworkGrant(clarificationGrant.task.id, tool, callA, eng.id),
+  );
+  db.resolveApproval(clarificationBlock.approvalId, false);
+  db.updateTask(clarificationGrant.task.id, { status: "cancelled", blocked_approval_id: null });
+
+  const budgetGrant = makeApprovedGrantTask("预算暂停前");
+  const budgetWasGranted = Boolean(
+    budgetGrant.request &&
+    budgetGrant.approval &&
+    engine.taskHasApprovedNetworkGrant(budgetGrant.task.id, tool, callA, eng.id),
+  );
+  const budgetBlock = engine.requestBudgetPauseForTask(eng, budgetGrant.task, 100, 100);
+  db.updateTask(budgetGrant.task.id, { status: "doing", blocked_approval_id: null });
+  const budgetGrantClosed = Boolean(
+    budgetGrant.request &&
+    db.getApproval(budgetGrant.request.approvalId)?.consumed_at &&
+    !engine.taskHasApprovedNetworkGrant(budgetGrant.task.id, tool, callA, eng.id),
+  );
+  db.resolveApproval(budgetBlock.approvalId, false);
+  db.updateTask(budgetGrant.task.id, { status: "cancelled", blocked_approval_id: null });
+  check(
+    "CAP2F",
+    "network MCP：clarification/预算暂停形成新决策边界，旧授权必须关闭且恢复后不可复活",
+    clarificationWasGranted && clarificationGrantClosed && budgetWasGranted && budgetGrantClosed,
+    `clarification=${clarificationWasGranted}/${clarificationGrantClosed} budget=${budgetWasGranted}/${budgetGrantClosed}`,
+  );
   db.deleteMcpServer(srv.id);
 }
 
@@ -1006,7 +1149,25 @@ let fakeOpenAiServer = null;
 let fakeOpenAiStreamHits = 0;
 const NETWORK_APPROVAL_MARKER = "NETWORK_APPROVAL_E2E";
 const NETWORK_PROBE_TOOL = "mcp__network_probe__search";
+const NETWORK_RECONNECT_MARKER = "NETWORK_RECONNECT_STOP_E2E";
+const NETWORK_RECONNECT_PROBE_TOOL = "mcp__network_reconnect_probe__search";
+const STOP_DURING_VERIFICATION_MARKER = "STOP_DURING_VERIFICATION_E2E";
+const CANCEL_REOPEN_DURING_VERIFICATION_MARKER = "CANCEL_REOPEN_DURING_VERIFICATION_E2E";
+const REASSIGN_DURING_WORK_MARKER = "REASSIGN_DURING_WORK_E2E";
+let heldStopVerificationResponse = null;
+let stopVerificationHoldUsed = false;
+let heldCancelReopenVerificationResponse = null;
+let cancelReopenVerificationHoldUsed = false;
+let cancelReopenVerifierCalls = 0;
+let cancelReopenWorkRequests = 0;
+let heldReassignWorkResponse = null;
+let reassignWorkHoldUsed = false;
+let reassignWorkRequests = 0;
+let heldNetworkReconnectResponse = null;
+let networkReconnectHoldUsed = false;
 const networkProbeFile = join(testDataDir, "network-probe-calls.jsonl");
+const networkReconnectProbeFile = join(testDataDir, "network-reconnect-probe-calls.jsonl");
+const networkReconnectConnectFile = join(testDataDir, "network-reconnect-connects.log");
 const networkProbeCalls = () => {
   try {
     return readFileSync(networkProbeFile, "utf8")
@@ -1015,6 +1176,13 @@ const networkProbeCalls = () => {
       .map((line) => JSON.parse(line));
   } catch {
     return [];
+  }
+};
+const lineCount = (path) => {
+  try {
+    return readFileSync(path, "utf8").split("\n").filter(Boolean).length;
+  } catch {
+    return 0;
   }
 };
 try {
@@ -1070,13 +1238,39 @@ fakeOpenAiServer = createServer((req, res) => {
     const isNetworkApprovalProbe =
       tools.includes(NETWORK_PROBE_TOOL) &&
       messages.some((message) => JSON.stringify(message).includes(NETWORK_APPROVAL_MARKER));
+    const isNetworkReconnectProbe =
+      tools.includes(NETWORK_RECONNECT_PROBE_TOOL) &&
+      messages.some((message) => JSON.stringify(message).includes(NETWORK_RECONNECT_MARKER));
+    const hasApprovedNetworkGrantBrief =
+      messages.some((message) => JSON.stringify(message).includes("用户刚批准的单次网络调用"));
+    const isStopDuringVerificationProbe =
+      messages.some((message) => JSON.stringify(message).includes(STOP_DURING_VERIFICATION_MARKER));
+    const isCancelReopenDuringVerificationProbe =
+      messages.some((message) => JSON.stringify(message).includes(CANCEL_REOPEN_DURING_VERIFICATION_MARKER));
+    const isReassignDuringWorkProbe =
+      messages.some((message) => JSON.stringify(message).includes(REASSIGN_DURING_WORK_MARKER));
+    if (isCancelReopenDuringVerificationProbe && tools.includes("write_document") && !hasToolResult) {
+      cancelReopenWorkRequests++;
+    }
+    if (isReassignDuringWorkProbe && tools.includes("write_document") && !hasToolResult) {
+      reassignWorkRequests++;
+    }
     const toolCall = (name, args) => ({
       id: `call_${name}_${Date.now()}`,
       type: "function",
       function: { name, arguments: JSON.stringify(args) },
     });
     let message = { role: "assistant", content: `AiTeam 模型通道可用：${body.model}` };
-    if (isNetworkApprovalProbe && toolMessages.length === 0) {
+    if (isNetworkReconnectProbe && toolMessages.length === 0) {
+      message = {
+        role: "assistant",
+        content: null,
+        tool_calls: [toolCall(NETWORK_RECONNECT_PROBE_TOOL, {
+          query: "must-not-run-after-stop",
+          limit: 1,
+        })],
+      };
+    } else if (isNetworkApprovalProbe && toolMessages.length === 0) {
       message = {
         role: "assistant",
         content: null,
@@ -1094,6 +1288,18 @@ fakeOpenAiServer = createServer((req, res) => {
       };
     } else if (isNetworkApprovalProbe && toolMessages.length >= 2) {
       message = { role: "assistant", content: "Network approval E2E completed." };
+    } else if (isCancelReopenDuringVerificationProbe && tools.includes("submit_verdict") && !hasToolResult) {
+      cancelReopenVerifierCalls++;
+      message = {
+        role: "assistant",
+        content: null,
+        tool_calls: [toolCall("submit_verdict", {
+          result: cancelReopenVerifierCalls === 1 ? "revise" : "pass",
+          reasons: cancelReopenVerifierCalls === 1
+            ? "hold first verdict so cancellation can race with retry"
+            : "rerun after old worker drained",
+        })],
+      };
     } else if (tools.includes("submit_verdict") && !hasToolResult) {
       message = {
         role: "assistant",
@@ -1149,7 +1355,39 @@ fakeOpenAiServer = createServer((req, res) => {
       }));
     };
     // 给 stop/cancel 回归留出稳定窗口：模型已开始生成 network tool_use，但工具尚未返回给引擎。
-    if (isNetworkApprovalProbe && toolMessages.length === 0) setTimeout(respond, 300);
+    if (
+      isNetworkReconnectProbe &&
+      hasApprovedNetworkGrantBrief &&
+      toolMessages.length === 0 &&
+      !networkReconnectHoldUsed
+    ) {
+      networkReconnectHoldUsed = true;
+      heldNetworkReconnectResponse = respond;
+    } else if (
+      isReassignDuringWorkProbe &&
+      tools.includes("write_document") &&
+      hasToolResult &&
+      !reassignWorkHoldUsed
+    ) {
+      reassignWorkHoldUsed = true;
+      heldReassignWorkResponse = respond;
+    } else if (
+      isCancelReopenDuringVerificationProbe &&
+      tools.includes("submit_verdict") &&
+      !hasToolResult &&
+      !cancelReopenVerificationHoldUsed
+    ) {
+      cancelReopenVerificationHoldUsed = true;
+      heldCancelReopenVerificationResponse = respond;
+    } else if (
+      isStopDuringVerificationProbe &&
+      tools.includes("submit_verdict") &&
+      !hasToolResult &&
+      !stopVerificationHoldUsed
+    ) {
+      stopVerificationHoldUsed = true;
+      heldStopVerificationResponse = respond;
+    } else if (isNetworkApprovalProbe && toolMessages.length === 0) setTimeout(respond, 300);
     else respond();
   });
 });
@@ -1170,8 +1408,44 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
     const forbidden = (await fetch(`${BASE}/image-provider`, { method: "PUT", ...mHdr, body: JSON.stringify({ model: "x" }) })).status === 403;
     const memberBoot = await (await fetch(`${BASE}/bootstrap`, { headers: { Cookie: memberCookie } })).json();
     const isolated = Array.isArray(memberBoot.channels) && !memberBoot.channels.some((c) => c.id === ch.id);
+    enterOwner(ownerFromUserId(testUser.id));
+    const stopScopeServer = db.createMcpServer({
+      name: "stop_scope_probe",
+      kind: "http",
+      url: "https://stop-scope.example/mcp",
+      safety: "network",
+    });
+    const stopScopeTool = "mcp__stop_scope_probe__search";
+    const stopScopeInput = { query: "验证跨租户 stop 不得污染进程状态" };
+    const stopScopeTask = db.createTask({
+      channel_id: ch.id,
+      title: "回归-stop-跨租户隔离",
+      assignee_agent_id: eng.id,
+      created_by: "user",
+    });
+    db.updateTask(stopScopeTask.id, { status: "doing" });
+    const crossTenantStop = await fetch(`${BASE}/tasks/${stopScopeTask.id}/stop`, { method: "POST", ...mHdr });
+    const missingStop = await fetch(`${BASE}/tasks/nonexistent-stop-${Date.now()}/stop`, { method: "POST", ...mHdr });
+    enterOwner(ownerFromUserId(testUser.id));
+    const stopScopeRequest = engine.requestNetworkApprovalForTask(
+      eng,
+      db.getTask(stopScopeTask.id),
+      stopScopeTool,
+      stopScopeInput,
+      "验证 stop 权限隔离",
+      "跨租户请求不得给本任务写入进程级停止标记",
+    );
+    if (stopScopeRequest) db.resolveApproval(stopScopeRequest.approvalId, false);
+    db.updateTask(stopScopeTask.id, { status: "cancelled", blocked_approval_id: null });
+    db.deleteMcpServer(stopScopeServer.id);
     check("AUTH2", "角色门控：member 注册为 member + 被挡在 admin 配置外(403) + 看不到他人频道",
       regBody.role === "member" && forbidden && isolated);
+    check(
+      "AUTH2B",
+      "任务停止权限：跨租户/不存在任务均 404，且不得污染受害任务的进程级停止状态",
+      crossTenantStop.status === 404 && missingStop.status === 404 && Boolean(stopScopeRequest),
+      `crossTenant=${crossTenantStop.status} missing=${missingStop.status} stateClean=${Boolean(stopScopeRequest)}`,
+    );
   }
 
   // B1 聊天管线（mock 应答）
@@ -1226,6 +1500,7 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
       title: "回归-取消前置任务",
       assignee_agent_id: eng.id,
       created_by: "user",
+      budget_billable: 120,
     });
     const dependent = db.createTask({
       channel_id: ch.id,
@@ -1239,6 +1514,26 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
     const cancelled = await J(`/tasks/${prerequisite.id}`, {
       method: "PATCH",
       body: JSON.stringify({ status: "cancelled" }),
+    });
+    const cancelledBudgetEdit = await J(`/tasks/${prerequisite.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ budget_billable: 999 }),
+    });
+    const doneTask = db.createTask({
+      channel_id: ch.id,
+      title: "回归-完成任务预算冻结",
+      assignee_agent_id: eng.id,
+      created_by: "user",
+      status: "review",
+      budget_billable: 240,
+    });
+    const doneClosed = await J(`/tasks/${doneTask.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "done" }),
+    });
+    const doneBudgetEdit = await J(`/tasks/${doneTask.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ budget_billable: 999 }),
     });
     const live = await J("/tasks", {
       method: "POST",
@@ -1265,6 +1560,11 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
         db.getTask(unfinished.id).status === "todo" &&
         cancelled.ok &&
         cancelled.body.status === "cancelled" &&
+        !cancelledBudgetEdit.ok &&
+        db.getTask(prerequisite.id).budget_billable === 120 &&
+        doneClosed.ok &&
+        !doneBudgetEdit.ok &&
+        db.getTask(doneTask.id).budget_billable === 240 &&
         liveStarted &&
         liveCancelled.ok &&
         db.getTask(live.body.id).status === "cancelled" &&
@@ -1273,7 +1573,7 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
         cancelEvents.some((event) => event.type === "cancelled") &&
         deliveredAfter === deliveredBefore &&
         agentDeliveredAfter === agentDeliveredBefore,
-      `fakeDone=${fakeDone.ok} cancelled=${cancelled.ok} live=${liveStarted}/${liveCancelled.ok}/${db.getTask(live.body.id).status} downstream=${db.getTask(dependent.id).status} delivered=${deliveredBefore}->${deliveredAfter}`,
+      `fakeDone=${fakeDone.ok} cancelled=${cancelled.ok} frozenBudget=${!cancelledBudgetEdit.ok}/${!doneBudgetEdit.ok} live=${liveStarted}/${liveCancelled.ok}/${db.getTask(live.body.id).status} downstream=${db.getTask(dependent.id).status} delivered=${deliveredBefore}->${deliveredAfter}`,
     );
   }
 
@@ -1597,6 +1897,88 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
     db.deleteMcpServer(networkServer.id);
   }
 
+  // HC3N 已批准但未消费的精确 network grant 不能跨执行边界复活：
+  // 自动交付、人工 done、人工 revise、项目 close 都必须永久关闭旧授权。
+  {
+    enterOwner(ownerFromUserId(testUser.id));
+    const noRunAgent = { ...eng, id: "network_lifecycle_no_run" };
+    const networkServer = db.createMcpServer({
+      name: "network_lifecycle",
+      kind: "http",
+      url: "https://network-lifecycle.example/mcp",
+      safety: "network",
+    });
+    const tool = "mcp__network_lifecycle__search";
+    const input = { query: "授权生命周期边界", limit: 1 };
+    const issueApprovedGrant = (title, projectId = null) => {
+      const task = db.createTask({
+        channel_id: ch.id,
+        project_id: projectId,
+        title,
+        assignee_agent_id: noRunAgent.id,
+        created_by: "user",
+      });
+      db.updateTask(task.id, { status: "doing" });
+      const request = engine.requestNetworkApprovalForTask(
+        noRunAgent,
+        db.getTask(task.id),
+        tool,
+        input,
+        `批准一次调用：${title}`,
+        "离开本次执行上下文后必须失效",
+      );
+      if (request) db.resolveApproval(request.approvalId, true);
+      db.updateTask(task.id, { status: "review", blocked_approval_id: null });
+      return { task: db.getTask(task.id), approvalId: request?.approvalId ?? "" };
+    };
+    const closedAndCannotRevive = ({ task, approvalId }) => {
+      const consumed = Boolean(db.getApproval(approvalId)?.consumed_at);
+      db.updateTask(task.id, {
+        status: "doing",
+        assignee_agent_id: noRunAgent.id,
+        blocked_approval_id: null,
+      });
+      return consumed && !engine.taskHasApprovedNetworkGrant(task.id, tool, input, noRunAgent.id);
+    };
+
+    const delivered = issueApprovedGrant("回归-network-交付关闭授权");
+    engine.onTaskDelivered(delivered.task);
+    const deliveryClosed = closedAndCannotRevive(delivered);
+
+    const done = issueApprovedGrant("回归-network-done关闭授权");
+    const doneResult = await J(`/tasks/${done.task.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "done" }),
+    });
+    const doneClosed = doneResult.ok && closedAndCannotRevive(done);
+
+    const revised = issueApprovedGrant("回归-network-revise关闭授权");
+    const reviseResult = await J(`/tasks/${revised.task.id}/revise`, {
+      method: "POST",
+      body: JSON.stringify({ reason: "新一轮返工不得继承旧网络批准" }),
+    });
+    const reviseClosed = reviseResult.ok && closedAndCannotRevive(revised);
+
+    const project = db.createProject({
+      channel_id: ch.id,
+      lead_agent_id: pm.id,
+      title: "回归-network-项目关单关闭授权",
+      goal: "项目关闭后旧 network grant 不得复活",
+      status: "review",
+    });
+    const projectTask = issueApprovedGrant("回归-network-project-close关闭授权", project.id);
+    const closeResult = await J(`/projects/${project.id}/close`, { method: "POST" });
+    const projectCloseClosed = closeResult.ok && closedAndCannotRevive(projectTask);
+
+    check(
+      "HC3N",
+      "network grant 生命周期：delivery/review/done/revise/project close 后旧授权不可跨运行复活",
+      deliveryClosed && doneClosed && reviseClosed && projectCloseClosed,
+      `delivery=${deliveryClosed} done=${doneResult.ok}/${doneClosed} revise=${reviseResult.ok}/${reviseClosed} projectClose=${closeResult.ok}/${projectCloseClosed}`,
+    );
+    db.deleteMcpServer(networkServer.id);
+  }
+
   // HC3C clarification HTTP 闭环：用户输入必须随审批一起持久化，并进入任务活动日志
   {
     const task = db.createTask({ channel_id: ch.id, title: "回归-HTTP-输入恢复", assignee_agent_id: eng.id, created_by: "user" });
@@ -1818,6 +2200,96 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
     check("HC4B", "项目关单硬门：未交付/待审批项目不能通过 API 绕过人类验收直接关闭",
       ok,
       `unfinishedBlocked=${!closeBeforeDelivery.ok} taskApprovalBlocked=${!closeWithApproval.ok} projectApprovalBlocked=${!closeWithProjectApproval.ok} final=${finalProject.status}/${finalTask.status}`);
+  }
+
+  // HC4C 取消是终态但不是交付：混合 review/cancelled 项目可关单，且 cancelled 必须保持取消
+  {
+    const project = db.createProject({
+      channel_id: ch.id,
+      lead_agent_id: pm.id,
+      title: "回归-混合终态项目关单",
+      goal: "验证取消任务不阻塞项目归档，也不会被伪装成已交付。",
+      status: "review",
+    });
+    const reviewTask = db.createTask({
+      channel_id: ch.id,
+      project_id: project.id,
+      title: "HC4C-已交付任务",
+      created_by: "user",
+      status: "review",
+    });
+    const cancelledTask = db.createTask({
+      channel_id: ch.id,
+      project_id: project.id,
+      title: "HC4C-已取消任务",
+      created_by: "user",
+      status: "cancelled",
+    });
+    const closed = await J(`/projects/${project.id}/close`, { method: "POST" });
+    const finalProject = db.getProject(project.id);
+    const finalReviewTask = db.getTask(reviewTask.id);
+    const finalCancelledTask = db.getTask(cancelledTask.id);
+    const reviewCloseEvents = db.listTaskEvents(reviewTask.id).filter((event) => event.type === "user_close");
+    const cancelledCloseEvents = db.listTaskEvents(cancelledTask.id).filter((event) => event.type === "user_close");
+    const ok =
+      closed.ok &&
+      finalProject.status === "done" &&
+      finalReviewTask.status === "done" &&
+      finalCancelledTask.status === "cancelled" &&
+      reviewCloseEvents.length === 1 &&
+      cancelledCloseEvents.length === 0;
+    check(
+      "HC4C",
+      "项目混合终态关单：review 转完成，cancelled 保持取消且不计作人工验收",
+      ok,
+      `close=${closed.ok} project=${finalProject.status} review=${finalReviewTask.status}/${reviewCloseEvents.length} cancelled=${finalCancelledTask.status}/${cancelledCloseEvents.length}`,
+    );
+  }
+
+  // HC4D 全取消项目也应可归档，但不能制造任何已交付/人工验收记录
+  {
+    const project = db.createProject({
+      channel_id: ch.id,
+      lead_agent_id: pm.id,
+      title: "回归-全取消项目关单",
+      goal: "验证项目可结束，但取消项始终保持取消语义。",
+      status: "running",
+    });
+    const cancelledTasks = [
+      db.createTask({
+        channel_id: ch.id,
+        project_id: project.id,
+        title: "HC4D-取消任务一",
+        created_by: "user",
+        status: "cancelled",
+      }),
+      db.createTask({
+        channel_id: ch.id,
+        project_id: project.id,
+        title: "HC4D-取消任务二",
+        created_by: "user",
+        status: "cancelled",
+      }),
+    ];
+    const closed = await J(`/projects/${project.id}/close`, { method: "POST" });
+    const finalProject = db.getProject(project.id);
+    const finalTasks = cancelledTasks.map((task) => db.getTask(task.id));
+    const closeEvents = cancelledTasks.flatMap((task) =>
+      db.listTaskEvents(task.id).filter((event) => event.type === "user_close"),
+    );
+    const ok =
+      closed.ok &&
+      finalProject.status === "done" &&
+      finalTasks.every((task) => task.status === "cancelled") &&
+      closeEvents.length === 0 &&
+      Array.isArray(closed.body.tasks) &&
+      closed.body.tasks.length === 0;
+    check(
+      "HC4D",
+      "项目全取消关单：项目可归档，取消任务保持 cancelled 且不产生人工验收",
+      ok,
+      `close=${closed.ok} project=${finalProject.status} tasks=${finalTasks.map((task) => task.status).join(",")} changed=${closed.body.tasks?.length} events=${closeEvents.length}`,
+    );
   }
 
   // HC5 产品内协作演练入口：HTTP 启动三步项目，任务带 DAG/负责人/复核人，活动日志结构化可观测，最终进入待评审汇总
@@ -2217,6 +2689,442 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
       `delivered=${delivered} docs=${docs.length} events=${[...eventTypes].join(",")} usage=${Boolean(usageTracked)}`);
   }
 
+  // HC3L 停止发生在验收 await 期间：即使 verifier 已准备返回 pass，也必须停止交付；
+  // worker 收尾后停止标记应已清理，用户重新指派一次即可正常重跑。
+  {
+    const prov = (await J("/providers", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "回归验收中停止供应商",
+        api_key: "sk-local",
+        base_url: fakeOpenAiBase,
+        default_model: "fake-chat-model",
+        is_strong: true,
+      }),
+    })).body;
+    const worker = (await J("/agents", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "回归验收中停止同事",
+        emoji: "🛑",
+        role: "verification stop regression",
+        system_prompt: `你是 ${STOP_DURING_VERIFICATION_MARKER} 回归同事，必须用 write_document 交付。`,
+        provider_id: prov.id,
+        model: "fake-chat-model",
+      }),
+    })).body;
+    const task = (await J("/tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        channel_id: ch.id,
+        title: `回归-${STOP_DURING_VERIFICATION_MARKER}`,
+        description: "写入交付物，并在自动验收期间验证停止优先。",
+        acceptance_criteria: "停止后不得进入待评审；重新指派一次即可正常重跑。",
+        assignee_agent_id: worker.id,
+      }),
+    })).body;
+
+    const verificationHeld = await waitFor(() => typeof heldStopVerificationResponse === "function", 30000, 25);
+    const stopped = verificationHeld
+      ? await J(`/tasks/${task.id}/stop`, { method: "POST" })
+      : { ok: false, body: {} };
+    const releaseVerification = heldStopVerificationResponse;
+    heldStopVerificationResponse = null;
+    if (releaseVerification) releaseVerification();
+
+    const stoppedAtTodo = await waitFor(async () => {
+      const tasks = (await J("/tasks")).body;
+      return tasks.some((item) => item.id === task.id && item.status === "todo");
+    }, 10000, 25);
+    const workerSettled = await waitFor(async () => {
+      const team = (await J("/team")).body;
+      const member = team.members?.find((item) => item.agent_id === worker.id);
+      return member?.state === "idle" && member.queued === 0;
+    }, 10000, 25);
+    const stoppedEvents = (await J(`/tasks/${task.id}/events`)).body;
+    const noFinalDeliveryAfterStop = !stoppedEvents.some(
+      (event) => event.type === "delivery" && event.summary.includes("转入待评审"),
+    );
+
+    let reassigned = false;
+    let reran = false;
+    if (stoppedAtTodo && workerSettled) {
+      const unassigned = await J(`/tasks/${task.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ assignee_agent_id: null }),
+      });
+      const assigned = await J(`/tasks/${task.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ assignee_agent_id: worker.id }),
+      });
+      reassigned = unassigned.ok && assigned.ok;
+      reran = await waitFor(async () => {
+        const tasks = (await J("/tasks")).body;
+        return tasks.some((item) => item.id === task.id && item.status === "review");
+      }, 30000, 25);
+    }
+    await J(`/providers/${prov.id}`, { method: "DELETE" });
+
+    check(
+      "HC3L",
+      "验收期间停止：stop 优先于 verifier pass，worker 收尾清标记后一次重指派即可重跑",
+      verificationHeld &&
+        stopped.ok &&
+        stoppedAtTodo &&
+        workerSettled &&
+        noFinalDeliveryAfterStop &&
+        reassigned &&
+        reran,
+      `held=${verificationHeld} stopped=${stopped.ok} todo=${stoppedAtTodo} settled=${workerSettled} noFinalDelivery=${noFinalDeliveryAfterStop} reassigned=${reassigned} reran=${reran}`,
+    );
+  }
+
+  // HC3M 取消后立即恢复待办不能清掉旧 worker 的 stop 标记；
+  // 即使验收返回 revise，旧 worker 也不得偷偷进入下一轮，排空后再重指派才允许新运行。
+  {
+    const workRequestsBefore = cancelReopenWorkRequests;
+    const prov = (await J("/providers", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "回归取消立即恢复供应商",
+        api_key: "sk-local",
+        base_url: fakeOpenAiBase,
+        default_model: "fake-chat-model",
+        is_strong: true,
+      }),
+    })).body;
+    const worker = (await J("/agents", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "回归取消立即恢复同事",
+        emoji: "⏹️",
+        role: "cancel reopen race regression",
+        system_prompt: `你是 ${CANCEL_REOPEN_DURING_VERIFICATION_MARKER} 回归同事，必须用 write_document 交付。`,
+        provider_id: prov.id,
+        model: "fake-chat-model",
+      }),
+    })).body;
+    const task = (await J("/tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        channel_id: ch.id,
+        title: `回归-${CANCEL_REOPEN_DURING_VERIFICATION_MARKER}`,
+        description: "验收被挂起时取消，再立即恢复待办，旧 worker 必须先排空。",
+        acceptance_criteria: "旧 worker 不得进入第二轮；排空后重新指派才允许重新执行。",
+        assignee_agent_id: worker.id,
+      }),
+    })).body;
+
+    const verificationHeld = await waitFor(
+      () =>
+        typeof heldCancelReopenVerificationResponse === "function" &&
+        cancelReopenWorkRequests === workRequestsBefore + 1,
+      30000,
+      25,
+    );
+    const cancelled = verificationHeld
+      ? await J(`/tasks/${task.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ status: "cancelled" }),
+        })
+      : { ok: false, body: {} };
+    const reopened = cancelled.ok
+      ? await J(`/tasks/${task.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ status: "todo" }),
+        })
+      : { ok: false, body: {} };
+    const releaseVerification = heldCancelReopenVerificationResponse;
+    heldCancelReopenVerificationResponse = null;
+    if (releaseVerification) releaseVerification();
+
+    const oldWorkerSettled = await waitFor(async () => {
+      const team = (await J("/team")).body;
+      const member = team.members?.find((item) => item.agent_id === worker.id);
+      return member?.state === "idle" && member.queued === 0;
+    }, 10000, 25);
+    const afterOldWorker = (await J("/tasks")).body.find((item) => item.id === task.id);
+    const eventsAfterOldWorker = (await J(`/tasks/${task.id}/events`)).body;
+    const oldWorkerDidNotRetry =
+      cancelReopenWorkRequests === workRequestsBefore + 1 &&
+      afterOldWorker?.status === "todo" &&
+      !eventsAfterOldWorker.some(
+        (event) => event.type === "delivery" && event.summary.includes("转入待评审"),
+      );
+
+    let reassigned = false;
+    let reran = false;
+    if (oldWorkerSettled && oldWorkerDidNotRetry) {
+      const unassigned = await J(`/tasks/${task.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ assignee_agent_id: null }),
+      });
+      const assigned = await J(`/tasks/${task.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ assignee_agent_id: worker.id }),
+      });
+      reassigned = unassigned.ok && assigned.ok;
+      reran = await waitFor(async () => {
+        const tasks = (await J("/tasks")).body;
+        return (
+          tasks.some((item) => item.id === task.id && item.status === "review") &&
+          cancelReopenWorkRequests === workRequestsBefore + 2
+        );
+      }, 30000, 25);
+    }
+    await J(`/providers/${prov.id}`, { method: "DELETE" });
+
+    check(
+      "HC3M",
+      "验收中取消后立即恢复：旧 stop 标记保留至 worker 排空，之后一次重指派才启动新运行",
+      verificationHeld &&
+        cancelled.ok &&
+        reopened.ok &&
+        oldWorkerSettled &&
+        oldWorkerDidNotRetry &&
+        reassigned &&
+        reran,
+      `held=${verificationHeld} cancelled=${cancelled.ok} reopened=${reopened.ok} settled=${oldWorkerSettled} oldRuns=${cancelReopenWorkRequests - workRequestsBefore} oldDidNotRetry=${oldWorkerDidNotRetry} reassigned=${reassigned} reran=${reran}`,
+    );
+  }
+
+  // HC3O 无工具最终响应仍在 await 时改派：旧 worker 不得进入 verification/交付；
+  // 原运行排空后必须由新负责人重新执行完整 work 请求。
+  {
+    const workRequestsBefore = reassignWorkRequests;
+    const prov = (await J("/providers", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "回归无工具响应改派供应商",
+        api_key: "sk-local",
+        base_url: fakeOpenAiBase,
+        default_model: "fake-chat-model",
+        is_strong: true,
+      }),
+    })).body;
+    const oldWorker = (await J("/agents", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "回归改派旧负责人",
+        emoji: "1️⃣",
+        role: "old worker during final response",
+        system_prompt: `你是 ${REASSIGN_DURING_WORK_MARKER} 的旧负责人，必须用 write_document 交付。`,
+        provider_id: prov.id,
+        model: "fake-chat-model",
+      }),
+    })).body;
+    const newWorker = (await J("/agents", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "回归改派新负责人",
+        emoji: "2️⃣",
+        role: "new worker after reassignment",
+        system_prompt: `你是 ${REASSIGN_DURING_WORK_MARKER} 的新负责人，必须用 write_document 重新执行任务。`,
+        provider_id: prov.id,
+        model: "fake-chat-model",
+      }),
+    })).body;
+    const task = (await J("/tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        channel_id: ch.id,
+        title: `回归-${REASSIGN_DURING_WORK_MARKER}`,
+        description: "旧负责人最终无工具响应等待期间改派，新负责人必须重新执行。",
+        acceptance_criteria: "旧 worker 不得验收交付；新负责人必须产生第二次 work 请求并进入待评审。",
+        assignee_agent_id: oldWorker.id,
+      }),
+    })).body;
+
+    const workHeld = await waitFor(
+      () =>
+        typeof heldReassignWorkResponse === "function" &&
+        reassignWorkRequests === workRequestsBefore + 1,
+      30000,
+      25,
+    );
+    const reassigned = workHeld
+      ? await J(`/tasks/${task.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ assignee_agent_id: newWorker.id }),
+        })
+      : { ok: false, body: {} };
+    const releaseWork = heldReassignWorkResponse;
+    heldReassignWorkResponse = null;
+    if (releaseWork) releaseWork();
+
+    const settled = await waitFor(async () => {
+      const tasks = (await J("/tasks")).body;
+      const freshTask = tasks.find((item) => item.id === task.id);
+      const team = (await J("/team")).body;
+      const oldMember = team.members?.find((item) => item.agent_id === oldWorker.id);
+      const newMember = team.members?.find((item) => item.agent_id === newWorker.id);
+      return (
+        freshTask?.status === "review" &&
+        oldMember?.state === "idle" &&
+        newMember?.state === "idle" &&
+        oldMember.queued === 0 &&
+        newMember.queued === 0
+      );
+    }, 30000, 25);
+    const freshTask = (await J("/tasks")).body.find((item) => item.id === task.id);
+    const events = (await J(`/tasks/${task.id}/events`)).body;
+    const handedOff = events.some(
+      (event) =>
+        event.type === "handoff" &&
+        event.summary.includes("旧运行停止并交给新负责人"),
+    );
+    const newWorkerActuallyRan = reassignWorkRequests === workRequestsBefore + 2;
+    await J(`/providers/${prov.id}`, { method: "DELETE" });
+
+    check(
+      "HC3O",
+      "最终响应期间改派：旧 worker 退出，新负责人重新执行后才允许验收交付",
+      workHeld &&
+        reassigned.ok &&
+        settled &&
+        freshTask?.assignee_agent_id === newWorker.id &&
+        handedOff &&
+        newWorkerActuallyRan,
+      `held=${workHeld} reassigned=${reassigned.ok} settled=${settled} assignee=${freshTask?.assignee_agent_id === newWorker.id} handoff=${handedOff} workRuns=${reassignWorkRequests - workRequestsBefore}`,
+    );
+  }
+
+  // HC3P 一次性授权已消费、MCP 正在重连时 stop：连接完成后必须再次校验执行权，
+  // 不得因为授权已消费就继续真实外呼。
+  {
+    const mcpServer = (await J("/mcp-servers", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "network_reconnect_probe",
+        kind: "stdio",
+        command: process.execPath,
+        args: [join(root, "scripts/fixtures/network-probe-mcp.mjs")],
+        safety: "network",
+        env: {
+          AITEAM_NETWORK_PROBE_FILE: networkReconnectProbeFile,
+          AITEAM_NETWORK_PROBE_CONNECT_FILE: networkReconnectConnectFile,
+          AITEAM_NETWORK_PROBE_CONNECT_DELAY_MS: "700",
+        },
+      }),
+    })).body;
+    const prov = (await J("/providers", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "回归network重连停止供应商",
+        api_key: "sk-local",
+        base_url: fakeOpenAiBase,
+        default_model: "fake-chat-model",
+        is_strong: true,
+      }),
+    })).body;
+    const worker = (await J("/agents", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "回归network重连停止同事",
+        emoji: "🔌",
+        role: "network reconnect stop regression",
+        system_prompt: `你是 ${NETWORK_RECONNECT_MARKER} 回归同事，必须调用 network_reconnect_probe.search。`,
+        provider_id: prov.id,
+        model: "fake-chat-model",
+      }),
+    })).body;
+    enterOwner(ownerFromUserId(testUser.id));
+    const source = db.createDocument({
+      channel_id: ch.id,
+      title: "Network reconnect stop source",
+      kind: "source",
+      content: `${NETWORK_RECONNECT_MARKER}\n验证授权消费后重连期间 stop 不得外呼。`,
+    });
+    const task = (await J("/tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        channel_id: ch.id,
+        title: `回归-${NETWORK_RECONNECT_MARKER}`,
+        description: "执行一次需审批的公开查询。",
+        acceptance_criteria: "重连期间 stop 后真实 MCP 调用数必须为 0。",
+        assignee_agent_id: worker.id,
+        source_doc_ids: [source.id],
+      }),
+    })).body;
+
+    let approval = null;
+    const firstBlocked = await waitFor(async () => {
+      const boot = (await J("/bootstrap")).body;
+      const freshTask = boot.tasks?.find((item) => item.id === task.id);
+      approval = boot.approvals?.find(
+        (item) => item.ref_id === task.id && item.kind === "network" && item.status === "pending",
+      ) ?? null;
+      return (
+        freshTask?.status === "blocked" &&
+        Boolean(approval) &&
+        lineCount(networkReconnectConnectFile) >= 1
+      );
+    }, 30000, 25);
+    const resolved = approval
+      ? await J(`/approvals/${approval.id}/resolve`, {
+          method: "POST",
+          body: JSON.stringify({ approve: true }),
+        })
+      : { ok: false, body: {} };
+    const approvedCallHeld = await waitFor(
+      () => typeof heldNetworkReconnectResponse === "function",
+      30000,
+      25,
+    );
+    const disabled = approvedCallHeld
+      ? await J(`/mcp-servers/${mcpServer.id}/toggle`, {
+          method: "POST",
+          body: JSON.stringify({ enabled: false }),
+        })
+      : { ok: false, body: {} };
+    const enabled = disabled.ok
+      ? await J(`/mcp-servers/${mcpServer.id}/toggle`, {
+          method: "POST",
+          body: JSON.stringify({ enabled: true }),
+        })
+      : { ok: false, body: {} };
+    const connectsBeforeReconnect = lineCount(networkReconnectConnectFile);
+    const releaseApprovedCall = heldNetworkReconnectResponse;
+    heldNetworkReconnectResponse = null;
+    if (releaseApprovedCall) releaseApprovedCall();
+
+    const reconnectStarted = await waitFor(
+      () => lineCount(networkReconnectConnectFile) > connectsBeforeReconnect,
+      10000,
+      10,
+    );
+    const consumedBeforeStop = Boolean(approval && db.getApproval(approval.id)?.consumed_at);
+    const stopped = reconnectStarted
+      ? await J(`/tasks/${task.id}/stop`, { method: "POST" })
+      : { ok: false, body: {} };
+    const settled = await waitFor(async () => {
+      const tasks = (await J("/tasks")).body;
+      const freshTask = tasks.find((item) => item.id === task.id);
+      const team = (await J("/team")).body;
+      const member = team.members?.find((item) => item.agent_id === worker.id);
+      return freshTask?.status === "todo" && member?.state === "idle" && member.queued === 0;
+    }, 15000, 25);
+    const callsAfterStop = lineCount(networkReconnectProbeFile);
+    await J(`/mcp-servers/${mcpServer.id}`, { method: "DELETE" });
+    await J(`/providers/${prov.id}`, { method: "DELETE" });
+
+    check(
+      "HC3P",
+      "network MCP 重连撤销：grant 已消费后 stop 仍能阻止真实 callTool 外呼",
+      firstBlocked &&
+        resolved.ok &&
+        approvedCallHeld &&
+        disabled.ok &&
+        enabled.ok &&
+        reconnectStarted &&
+        consumedBeforeStop &&
+        stopped.ok &&
+        settled &&
+        callsAfterStop === 0,
+      `blocked=${firstBlocked} resolved=${resolved.ok} held=${approvedCallHeld} toggled=${disabled.ok}/${enabled.ok} reconnect=${reconnectStarted} consumed=${consumedBeforeStop} stopped=${stopped.ok} settled=${settled} calls=${callsAfterStop}`,
+    );
+  }
+
   // HC3J 真链路：来源任务先阻塞，批准后只外呼一次；再次运行需重新审批，停止后不得外呼
   {
     const mcpServer = (await J("/mcp-servers", {
@@ -2331,8 +3239,22 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
       : { ok: false, body: {} };
     const stopped = await J(`/tasks/${task.id}/stop`, { method: "POST" });
     const stoppedAtTodo = await waitFor(async () => {
-      const tasks = (await J("/tasks")).body;
-      return tasks.some((item) => item.id === task.id && item.status === "todo");
+      const boot = (await J("/bootstrap")).body;
+      const freshTask = boot.tasks?.find((item) => item.id === task.id);
+      const pendingNetworkApproval = boot.approvals?.some(
+        (approval) =>
+          approval.ref_id === task.id &&
+          approval.kind === "network" &&
+          approval.status === "pending",
+      );
+      const team = (await J("/team")).body;
+      const member = team.members?.find((item) => item.agent_id === worker.id);
+      return (
+        freshTask?.status === "todo" &&
+        !pendingNetworkApproval &&
+        member?.state === "idle" &&
+        member.queued === 0
+      );
     }, 10000, 25);
     const afterStopCalls = networkProbeCalls();
     const secondStoredApproval = secondApproval

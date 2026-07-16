@@ -166,6 +166,7 @@ export function TaskDetailDrawer({
   const [expandedVerdicts, setExpandedVerdicts] = useState<Record<string, boolean>>({});
   const [budgetInput, setBudgetInput] = useState("");
   const [savingBudget, setSavingBudget] = useState(false);
+  const [actionError, setActionError] = useState("");
 
   useEffect(() => {
     let alive = true;
@@ -180,6 +181,7 @@ export function TaskDetailDrawer({
 
   useEffect(() => {
     setBudgetInput(task.budget_billable > 0 ? String(task.budget_billable) : "");
+    setActionError("");
   }, [task.id, task.budget_billable]);
   const assignee = ws.agentById(task.assignee_agent_id);
   const reviewer = ws.agentById(task.reviewer_agent_id);
@@ -203,15 +205,21 @@ export function TaskDetailDrawer({
   const actionHint = nextActionHint(task, pendingApprovals, docs, dependencies, assignee);
   const terminal = task.status === "done" || task.status === "cancelled";
   const closeDisabled = terminal || closing || pendingApprovals.length > 0;
+  const captureActionError = (error: unknown) => {
+    setActionError(error instanceof Error ? error.message : String(error));
+  };
 
   async function closeTask() {
     if (closeDisabled) return;
     // 未交付评审只能取消，不能伪装成 done；只有 review → done 才表示人类验收通过。
     if (task.status !== "review" &&
       !window.confirm(`确认取消任务「${task.title}」？\n取消后会归档，但不计入交付、质量覆盖，也不会解锁下游依赖。`)) return;
+    setActionError("");
     setClosing(true);
     try {
       await ws.moveTask(task, task.status === "review" ? "done" : "cancelled");
+    } catch (error) {
+      captureActionError(error);
     } finally {
       setClosing(false);
     }
@@ -221,10 +229,13 @@ export function TaskDetailDrawer({
     if (task.status !== "review" || revising) return;
     const reason = window.prompt("退回返工原因", "请按验收标准补全缺口后重新交付。");
     if (reason === null) return;
+    setActionError("");
     setRevising(true);
     try {
       await api.requestRevision(task.id, reason);
       await ws.refreshWorkspace();
+    } catch (error) {
+      captureActionError(error);
     } finally {
       setRevising(false);
     }
@@ -232,9 +243,12 @@ export function TaskDetailDrawer({
 
   async function resumeBlockedTask() {
     if (task.status !== "blocked" || pendingApprovals.length > 0 || resuming) return;
+    setActionError("");
     setResuming(true);
     try {
       await ws.updateTask(task.id, { status: "todo" });
+    } catch (error) {
+      captureActionError(error);
     } finally {
       setResuming(false);
     }
@@ -242,20 +256,26 @@ export function TaskDetailDrawer({
 
   async function resolveTaskApproval(approval: Approval, approve: boolean, response?: string) {
     if (approval.status !== "pending" || resolvingApprovalId) return;
+    setActionError("");
     setResolvingApprovalId(approval.id);
     try {
       await ws.resolveApproval(approval.id, approve, response);
+    } catch (error) {
+      captureActionError(error);
     } finally {
       setResolvingApprovalId("");
     }
   }
 
   async function saveBudget() {
-    if (savingBudget) return;
+    if (savingBudget || terminal) return;
     const n = Math.max(0, Math.round(Number(budgetInput) || 0));
+    setActionError("");
     setSavingBudget(true);
     try {
       await ws.updateTask(task.id, { budget_billable: n });
+    } catch (error) {
+      captureActionError(error);
     } finally {
       setSavingBudget(false);
     }
@@ -263,6 +283,7 @@ export function TaskDetailDrawer({
 
   async function updateRole(kind: "assignee" | "reviewer", agentId: string) {
     if (savingRole) return;
+    setActionError("");
     setSavingRole(kind);
     try {
       await ws.updateTask(
@@ -271,6 +292,8 @@ export function TaskDetailDrawer({
           ? { assignee_agent_id: agentId || null }
           : { reviewer_agent_id: agentId || null },
       );
+    } catch (error) {
+      captureActionError(error);
     } finally {
       setSavingRole("");
     }
@@ -350,6 +373,11 @@ export function TaskDetailDrawer({
               )}
             </div>
           </div>
+          {actionError && (
+            <div role="alert" className="mt-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-[11.5px] text-red-700 dark:border-red-900/60 dark:bg-red-950/20 dark:text-red-300">
+              操作失败：{actionError}
+            </div>
+          )}
         </header>
 
         <div className="flex-1 space-y-4 overflow-y-auto px-4 py-3">
@@ -505,11 +533,12 @@ export function TaskDetailDrawer({
                     onKeyDown={(e) => e.key === "Enter" && void saveBudget()}
                     inputMode="numeric"
                     placeholder="不限"
-                    className="w-20 rounded-md border border-line bg-paper px-1.5 py-0.5 text-[11.5px] font-mono text-ink outline-none focus:border-accent/50"
+                    disabled={terminal}
+                    className="w-20 rounded-md border border-line bg-paper px-1.5 py-0.5 text-[11.5px] font-mono text-ink outline-none focus:border-accent/50 disabled:opacity-50"
                   />
                   <button
                     onClick={() => void saveBudget()}
-                    disabled={savingBudget}
+                    disabled={savingBudget || terminal}
                     className="rounded-md border border-line px-2 py-0.5 text-[11px] text-ink-2 hover:bg-sel disabled:opacity-40"
                   >
                     {savingBudget ? "保存中…" : "保存"}

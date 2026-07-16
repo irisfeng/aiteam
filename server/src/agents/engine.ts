@@ -33,7 +33,7 @@ import {
   getProject,
   getSkill,
   getTask,
-  invalidateNetworkApprovalsForTask,
+  invalidateNetworkApprovalsForTask as invalidateNetworkApprovalsForTaskInDb,
   insertMessage,
   listAgents,
   listApprovals,
@@ -639,12 +639,23 @@ function registerStream(channelId: string, stream: { abort(): void }): () => voi
 /** 停止开关（kill switch）：运行中的任务在下一个迭代边界停下；排队中的任务直接不再开工。 */
 export function stopTask(taskId: string) {
   cancelledTasks.add(taskId);
-  invalidateNetworkApprovalsForTask(taskId);
+  invalidateTaskNetworkApprovals(taskId);
 }
 
-/** 取消任务恢复为待办时清掉旧停止标记，避免下一次认领被历史标记误杀。 */
-export function clearTaskStop(taskId: string) {
-  cancelledTasks.delete(taskId);
+/**
+ * 关闭任务上下文绑定的 network 审批并把最终状态推送给前端。
+ * DB 更新是单语句原子操作；广播只负责让当前连接立即收敛到数据库真相。
+ */
+export function invalidateTaskNetworkApprovals(taskId: string): number {
+  const changed = invalidateNetworkApprovalsForTaskInDb(taskId);
+  if (changed > 0) {
+    for (const approval of listApprovals()) {
+      if (approval.kind === "network" && approval.ref_id === taskId) {
+        broadcast({ type: "approval:upsert", payload: approval });
+      }
+    }
+  }
+  return changed;
 }
 
 /**
@@ -839,6 +850,17 @@ export function taskHasApprovedNetworkGrant(
   return Boolean(matchingApprovedNetworkGrant(taskId, toolName, input, agentId));
 }
 
+function taskExecutionIsCurrent(taskId: string, agentId: string): boolean {
+  if (cancelledTasks.has(taskId)) return false;
+  const task = getTask(taskId);
+  return Boolean(
+    task &&
+    task.status === "doing" &&
+    task.assignee_agent_id === agentId &&
+    task.blocked_approval_id === null
+  );
+}
+
 /** 在真正网络外呼前同步消费一次性授权；失败调用也必须重新审批。 */
 export function consumeApprovedNetworkGrant(
   taskId: string | null | undefined,
@@ -846,14 +868,7 @@ export function consumeApprovedNetworkGrant(
   input: unknown,
   agentId?: string,
 ): boolean {
-  if (!taskId || !agentId || cancelledTasks.has(taskId)) return false;
-  const task = getTask(taskId);
-  if (
-    !task ||
-    task.status !== "doing" ||
-    task.assignee_agent_id !== agentId ||
-    task.blocked_approval_id !== null
-  ) return false;
+  if (!taskId || !agentId || !taskExecutionIsCurrent(taskId, agentId)) return false;
   const match = matchingApprovedNetworkGrant(taskId, toolName, input, agentId);
   if (!match) return false;
   return consumeApproval(match.id);
@@ -939,9 +954,11 @@ export function onTaskAssigned(task: Task) {
         audit(t.channel_id, `⚠️ ${agent.name} 处理任务「${task.title}」失败：${err?.message ?? err}。任务已退回待办，重新指派负责人即可重试。`);
     }))
     .finally(() => {
+      const stoppedBeforeResume = cancelledTasks.delete(task.id);
+      const shouldResume = resumeAfterRun.delete(task.id);
       runningTasks.delete(task.id);
       if (currentWork.get(agent.id) === task.id) currentWork.delete(agent.id);
-      if (resumeAfterRun.delete(task.id)) {
+      if (!stoppedBeforeResume && shouldResume) {
         void withOwner(ownerId, () => {
           const latest = getTask(task.id);
           if (latest?.status === "todo" && latest.blocked_approval_id === null) onTaskAssigned(latest);
@@ -997,6 +1014,8 @@ export function recoverInFlightTasks() {
 
 /** 任务交付（review/done）后调用：解锁依赖它的任务，并检查项目是否可汇总。 */
 export function onTaskDelivered(task: Task) {
+  // delivery/review 已结束本次执行尝试；未使用的单次网络授权不能带入返工或重新打开后的下一次运行。
+  invalidateTaskNetworkApprovals(task.id);
   for (const t of listTasks()) {
     if (t.status !== "todo" || !t.assignee_agent_id) continue;
     if (!taskDependsOn(t).includes(task.id)) continue;
@@ -1009,7 +1028,11 @@ export function onTaskDelivered(task: Task) {
 }
 
 function setTaskStatus(taskId: string, statusValue: Task["status"]): Task | undefined {
+  const previous = getTask(taskId);
   const t = updateTask(taskId, { status: statusValue });
+  if (t && previous?.status === "doing" && statusValue !== "doing") {
+    invalidateTaskNetworkApprovals(taskId);
+  }
   if (t) broadcast({ type: "task:upsert", payload: t });
   return t;
 }
@@ -1028,15 +1051,55 @@ function emitTaskEvent(task: Task, type: Parameters<typeof createTaskEvent>[0]["
   return event;
 }
 
+/** 消费一次任务停止标记并统一收尾；返回 true 表示当前 worker 必须立即退出。 */
+function finishStoppedTask(task: Task, channel: Channel, agent: Agent): boolean {
+  if (!cancelledTasks.delete(task.id)) return false;
+  // stop 必须压过审批/输入落定触发的延迟恢复；否则这里消费 stop 后，
+  // finally 仍可能看到 resumeAfterRun 并把刚退回待办的任务重新启动。
+  resumeAfterRun.delete(task.id);
+  const latest = getTask(task.id);
+  if (latest?.status === "cancelled") {
+    audit(channel.id, `⏹ 任务「${task.title}」已取消并归档`);
+    return true;
+  }
+  const todo = setTaskStatus(task.id, "todo") ?? latest ?? task;
+  emitTaskEvent(todo, "handoff", "用户停止了运行，任务退回待办", undefined, agent.id);
+  audit(channel.id, `⏹ 任务「${task.title}」已被用户停止，退回待办`);
+  return true;
+}
+
+/**
+ * 模型 await 返回后重新核验执行权。无工具最终响应期间也可能发生取消、关单或改派，
+ * 旧 worker 只能在任务仍 doing 且负责人未变时继续验收/交付。
+ */
+function finishRevokedTaskExecution(task: Task, channel: Channel, agent: Agent): boolean {
+  const latest = getTask(task.id);
+  if (latest?.status === "doing" && latest.assignee_agent_id === agent.id) return false;
+  if (latest?.status === "doing" && latest.assignee_agent_id !== agent.id) {
+    const reassigned = setTaskStatus(task.id, "todo") ?? latest;
+    emitTaskEvent(
+      reassigned,
+      "handoff",
+      "任务负责人已变化，旧运行停止并交给新负责人",
+      undefined,
+      agent.id,
+    );
+    if (reassigned.assignee_agent_id) resumeAssignedTask(reassigned);
+  }
+  return true;
+}
+
 async function runTaskWork(agent: Agent, taskId: string) {
   let task = getTask(taskId);
   if (!task) return;
   if (task.status === "cancelled") {
     cancelledTasks.delete(taskId);
+    resumeAfterRun.delete(taskId);
     return;
   }
   if (task.status === "done" || task.status === "review" || task.status === "blocked") return;
   if (cancelledTasks.delete(taskId)) {
+    resumeAfterRun.delete(taskId);
     if (task.channel_id) audit(task.channel_id, `⏹ 任务「${task.title}」已被用户停止（未开工）`);
     return;
   }
@@ -1080,31 +1143,13 @@ async function runTaskWork(agent: Agent, taskId: string) {
     const afterRun = getTask(task.id);
     if (ctx.halted === "blocked" || afterRun?.status === "blocked") return;
 
-    if (cancelledTasks.delete(task.id)) {
-      const latest = getTask(task.id);
-      if (latest?.status === "cancelled") {
-        audit(channel.id, `⏹ 任务「${task.title}」已取消并归档`);
-        return;
-      }
-      setTaskStatus(task.id, "todo");
-      emitTaskEvent(task, "handoff", "用户停止了运行，任务退回待办", undefined, agent.id);
-      audit(channel.id, `⏹ 任务「${task.title}」已被用户停止，退回待办`);
-      return;
-    }
-    if (ctx.halted === "stopped") {
-      const latest = getTask(task.id);
-      if (!latest || latest.status === "cancelled") return;
-      if (latest.status === "doing" && latest.assignee_agent_id !== agent.id) {
-        const reassigned = setTaskStatus(task.id, "todo");
-        if (reassigned) {
-          emitTaskEvent(reassigned, "handoff", "任务负责人已变化，旧运行停止并交给新负责人", undefined, agent.id);
-          resumeAssignedTask(reassigned);
-        }
-      }
-      return;
-    }
+    if (finishStoppedTask(task, channel, agent)) return;
+    if (finishRevokedTaskExecution(task, channel, agent) || ctx.halted === "stopped") return;
 
     const verdict = await runVerification(agent, channel, task.id, lastDocIds, attempt);
+    // 验收也是可耗时的模型运行；stop 可能在 await 期间到达，必须在处理 pass/revise 前再检查一次。
+    if (finishStoppedTask(task, channel, agent)) return;
+    if (finishRevokedTaskExecution(task, channel, agent)) return;
     if (verdict.result === "pass") {
       if (verdict.reasons) audit(channel.id, `✅ 验收通过：任务「${task.title}」`);
       break;
@@ -1472,6 +1517,9 @@ export function requestBudgetPauseForTask(agent: Agent, task: Task, spent: numbe
     const active = getApproval(task.blocked_approval_id);
     if (active?.kind === "budget" && active.status === "pending") return { approvalId: active.id, task };
   }
+  // 预算触线意味着当前执行上下文已暂停；此前批准但尚未消费的 network grant
+  // 不得跨越新的预算决策继续生效。
+  invalidateTaskNetworkApprovals(task.id);
   const approval = createApproval({
     channel_id: task.channel_id,
     agent_id: agent.id,
@@ -2127,6 +2175,9 @@ export function requestClarificationForTask(
       return { approvalId: active.id, task };
     }
   }
+  // 用户补充输入可能改变任务语义；旧执行上下文中的一次性外发授权必须先关闭，
+  // 即使进程在随后创建 clarification 审批前退出也只会过度收紧，不会放宽权限。
+  invalidateTaskNetworkApprovals(task.id);
   const approval = createApproval({
     channel_id: task.channel_id,
     agent_id: agent.id,
@@ -2286,7 +2337,7 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
         ...(input.reviewer !== undefined ? { reviewer_agent_id: reviewer?.id ?? null } : {}),
       });
       if (!task) return `错误：找不到任务 ${input.task_id}`;
-      if (contextChanged) invalidateNetworkApprovalsForTask(task.id);
+      if (contextChanged) invalidateTaskNetworkApprovals(task.id);
       if (task.assignee_agent_id !== prev.assignee_agent_id) {
         emitTaskEvent(task, task.assignee_agent_id ? "claim" : "handoff", task.assignee_agent_id ? `${agent.name} 指派任务给 ${getAgent(task.assignee_agent_id)?.name ?? "AI 同事"}` : `${agent.name} 取消了任务指派`, undefined, task.assignee_agent_id ?? agent.id);
       }
@@ -2779,11 +2830,21 @@ async function llmLoop(
               result = `⚠️ 本次运行的外部插件调用已达上限（${MCP_CALLS_PER_RUN} 次）。外部检索按次计费，请基于已获得的信息完成工作，不要再尝试调用插件。`;
             } else {
               mcpCalls++;
-              result = await callMcpTool(tu.name, tu.input);
+              let dispatchRevoked = false;
+              result = await callMcpTool(tu.name, tu.input, {
+                canDispatch: () => {
+                  const allowed = !ctx.taskId || taskExecutionIsCurrent(ctx.taskId, agent.id);
+                  if (!allowed) dispatchRevoked = true;
+                  return allowed;
+                },
+              });
+              if (dispatchRevoked) ctx.halted = "stopped";
               // 持久化审计：插件调用此前只发瞬态 status，事后无法从时间线/账本判断用没用某插件。
               // 仿配图那条落一行可核查的 system 消息——只记 server:tool 名，绝不写参数/密钥/返回内容。
               const mcp = tu.name.match(/^mcp__(.+?)__(.+)$/);
-              audit(channel.id, `🔌 ${agent.name} 调用了插件 ${mcp ? `${mcp[1]}:${mcp[2]}` : tu.name}`);
+              if (!dispatchRevoked) {
+                audit(channel.id, `🔌 ${agent.name} 调用了插件 ${mcp ? `${mcp[1]}:${mcp[2]}` : tu.name}`);
+              }
               // 仅缓存成功结果（失败不入 memo → 允许换插件用同查询兜底，不破坏降级链）
               const failed = result.startsWith("MCP 工具执行失败") || result.startsWith("工具返回错误") || result.startsWith("错误：");
               if (sig && !failed) searchMemo.set(sig, result);

@@ -132,8 +132,25 @@ function emptyCounts() {
 function classify(value, emptyValues = new Set([""])) {
   if (typeof value !== "string") return "invalid";
   if (emptyValues.has(value)) return "empty";
-  if (value.startsWith("enc1:")) return "enc1";
-  if (value.startsWith("enc:v1:")) return "legacy_v1";
+  if (value.startsWith("enc1:")) {
+    const parts = value.slice("enc1:".length).split(":");
+    if (parts.length !== 3 || parts.some((part) => !part || !/^[A-Za-z0-9_-]+$/.test(part))) {
+      return "invalid";
+    }
+    const decoded = parts.map((part) => Buffer.from(part, "base64url"));
+    if (decoded.some((part, index) => part.toString("base64url") !== parts[index])) return "invalid";
+    const [iv, tag, ciphertext] = decoded;
+    return iv.length === 12 && tag.length === 16 && ciphertext.length > 0 ? "enc1" : "invalid";
+  }
+  if (value.startsWith("enc:v1:")) {
+    const payload = value.slice("enc:v1:".length);
+    if (
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(payload) ||
+      payload.length % 4 !== 0
+    ) return "invalid";
+    const raw = Buffer.from(payload, "base64");
+    return raw.length > 28 && raw.toString("base64") === payload ? "legacy_v1" : "invalid";
+  }
   if (ENVELOPE_LIKE.test(value)) return "unknown_envelope";
   return "plaintext";
 }

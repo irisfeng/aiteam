@@ -212,8 +212,8 @@ function TaskCard({ task, onOpenDoc, onOpenTask }: { task: Task; onOpenDoc: (doc
 
 /**
  * 项目级折叠卡：把同一项目在某列里的子任务收成一张可展开的组卡，给看板封顶。
- * 当项目全部任务都已交付（project-wide 都在 review）时，在「待评审」列露出
- * 「✅ 确认关闭项目」——一次决策批量关单，守住 human-only 签核又不必逐卡点。
+ * 当项目全部任务都进入终态时，仅在一个对应列露出「✅ 确认关闭项目」：
+ * review 会转 done，cancelled 保持取消，守住 human-only 签核又不必逐卡点。
  */
 function ProjectGroup({
   projectId,
@@ -246,11 +246,15 @@ function ProjectGroup({
     .filter((e) => e.task_id && taskIds.has(e.task_id))
     .sort((a, b) => a.created_at - b.created_at);
   const revisionTotal = allTasks.reduce((sum, t) => sum + (t.revision_count ?? 0), 0);
-  const delivered = allTasks.filter((t) => t.status === "review" || t.status === "done").length;
-  const allDelivered = allTasks.length > 0 && allTasks.every((t) => t.status === "review" || t.status === "done");
-  const closeBlockedByApproval = column === "review" && allDelivered && pendingApprovals.length > 0 && project?.status !== "done";
-  const canClose = column === "review" && allDelivered && pendingApprovals.length === 0 && project?.status !== "done";
   const statusCounts = Object.fromEntries(COLUMNS.map((c) => [c.key, allTasks.filter((t) => t.status === c.key).length])) as Record<Task["status"], number>;
+  const delivered = allTasks.filter((t) => t.status === "review" || t.status === "done").length;
+  const allTerminal = allTasks.length > 0 && allTasks.every(
+    (t) => t.status === "review" || t.status === "done" || t.status === "cancelled",
+  );
+  const closeColumn: Task["status"] =
+    statusCounts.review > 0 ? "review" : statusCounts.cancelled > 0 ? "cancelled" : "done";
+  const closeBlockedByApproval = column === closeColumn && allTerminal && pendingApprovals.length > 0 && project?.status !== "done";
+  const canClose = column === closeColumn && allTerminal && pendingApprovals.length === 0 && project?.status !== "done";
   const progressPct = allTasks.length > 0 ? Math.round((delivered / allTasks.length) * 100) : 0;
   const nextHint =
     statusCounts.blocked > 0
@@ -269,12 +273,15 @@ function ProjectGroup({
     if (closing) return;
     if (!window.confirm(
       `确认关闭项目「${project?.title ?? "项目"}」？\n` +
-      `将把 ${allTasks.length} 个已交付任务归入「完成」。\n` +
+      `将把 ${statusCounts.review} 个待评审任务归入「完成」；` +
+      `${statusCounts.done} 个已完成任务保持「完成」；${statusCounts.cancelled} 个已取消任务保持「已取消」。\n` +
       `交付物 ${projectDocs.length} 个，返工 ${revisionTotal} 次，活动事件 ${projectEvents.length} 条。`
     )) return;
     setClosing(true);
     try {
       await ws.closeProject(projectId);
+    } catch (error) {
+      window.alert(`关闭项目失败：${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setClosing(false);
     }
@@ -332,10 +339,10 @@ function ProjectGroup({
               </span>
             </button>
           )}
-          {allDelivered && (
+          {allTerminal && (
             <div className="mt-2 rounded-md border border-line bg-paper/70 px-2 py-1.5">
               <div className="mb-1 flex items-center justify-between gap-2 text-[11px] font-medium text-ink-2">
-                <span>验收摘要</span>
+                <span>关单摘要</span>
                 <span className={pendingApprovals.length > 0 ? "text-amber-600" : "text-emerald-600"}>
                   {pendingApprovals.length > 0 ? "仍有待处理" : "可人工关单"}
                 </span>
@@ -375,7 +382,7 @@ function ProjectGroup({
             onClick={close}
             disabled={closing}
             className="w-full rounded-md bg-accent px-2 py-1 text-[12px] font-medium text-white hover:opacity-90 disabled:opacity-50"
-            title="一次性把本项目全部已交付任务关单并归档"
+            title="归档项目：待评审任务转完成，已取消任务保持取消"
           >
             {closing ? "关闭中…" : "✅ 确认关闭项目"}
           </button>

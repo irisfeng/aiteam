@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
-import { mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { nanoid } from "nanoid";
@@ -10,8 +11,94 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // AITEAM_DATA_DIR：测试/多实例可指向隔离目录；不设则用默认 server/data
 const dataDir = process.env.AITEAM_DATA_DIR || join(__dirname, "..", "data");
 mkdirSync(dataDir, { recursive: true });
+const dbPath = join(dataDir, "aiteam.db");
 
-export const db = new Database(join(dataDir, "aiteam.db"));
+type StoredImageProvider = Record<string, unknown> & { api_key?: string | null };
+
+function parseStoredImageProvider(value: string): StoredImageProvider {
+  const parsed = JSON.parse(value) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("image_provider 配置格式损坏，拒绝迁移");
+  }
+  const provider = parsed as StoredImageProvider;
+  if (provider.api_key != null && typeof provider.api_key !== "string") {
+    throw new Error("image_provider api_key 必须是字符串或空值，拒绝迁移");
+  }
+  return provider;
+}
+
+/**
+ * Production copy-only 门禁必须早于 journal_mode、CREATE/ALTER 等任何数据库写入。
+ * 把现有 db/WAL/SHM 镜像到临时目录后扫描凭证列，避免 SQLite 在源目录补建 -shm；
+ * plaintext/enc:v1/坏 enc1 会直接抛错。
+ */
+function preflightProductionCredentials(path: string): void {
+  if (process.env.NODE_ENV !== "production" || !existsSync(path)) return;
+  const probeDir = mkdtempSync(join(tmpdir(), "aiteam-credential-preflight-"));
+  const probePath = join(probeDir, "aiteam.db");
+  try {
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const source = `${path}${suffix}`;
+      if (existsSync(source)) copyFileSync(source, `${probePath}${suffix}`);
+    }
+    const probe = new Database(probePath, { readonly: true, fileMustExist: true });
+    const tableColumns = (table: string): Set<string> => {
+      const exists = probe.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?"
+      ).get(table);
+      if (!exists) return new Set();
+      return new Set(
+        (probe.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[])
+          .map((column) => column.name)
+      );
+    };
+    const validate = (value: unknown, emptyValues = new Set([""])) => {
+      if (typeof value !== "string") throw new Error("凭证字段格式损坏，必须是字符串");
+      if (!emptyValues.has(value)) canonicalizeSecret(value);
+    };
+    try {
+      probe.pragma("query_only = ON");
+      const providerColumns = tableColumns("providers");
+      if (providerColumns.has("api_key")) {
+        for (const row of probe.prepare("SELECT api_key FROM providers").all() as { api_key: unknown }[]) {
+          validate(row.api_key);
+        }
+      }
+      const mcpColumns = tableColumns("mcp_servers");
+      if (mcpColumns.has("auth_token")) {
+        for (const row of probe.prepare("SELECT auth_token FROM mcp_servers").all() as { auth_token: unknown }[]) {
+          validate(row.auth_token);
+        }
+      }
+      if (mcpColumns.has("env_json")) {
+        for (const row of probe.prepare("SELECT env_json FROM mcp_servers").all() as { env_json: unknown }[]) {
+          validate(row.env_json, new Set(["", "{}"]));
+        }
+      }
+      const settingColumns = tableColumns("app_settings");
+      if (settingColumns.has("key") && settingColumns.has("value")) {
+        const row = probe.prepare(
+          "SELECT value FROM app_settings WHERE key = 'image_provider'"
+        ).get() as { value: unknown } | undefined;
+        if (row?.value != null) {
+          if (typeof row.value !== "string") throw new Error("image_provider 配置格式损坏，拒绝迁移");
+          const parsed = parseStoredImageProvider(row.value);
+          validate(parsed.api_key ?? "");
+        }
+      }
+    } finally {
+      probe.close();
+    }
+  } finally {
+    rmSync(probeDir, { recursive: true, force: true });
+  }
+}
+
+// 生产缺密钥或含旧格式时，在创建/修改数据库文件前失败。
+assertCredentialKeyReady();
+preflightProductionCredentials(dbPath);
+
+export const db = new Database(dbPath);
 db.pragma("journal_mode = WAL");
 
 db.exec(`
@@ -262,8 +349,8 @@ addColumnIfMissing("skills", "version", "version INTEGER NOT NULL DEFAULT 1");  
 addColumnIfMissing("mcp_servers", "safety", "safety TEXT NOT NULL DEFAULT 'local'");  // local | network | exec
 addColumnIfMissing("mcp_servers", "env_json", "env_json TEXT NOT NULL DEFAULT '{}'"); // stdio 子进程环境变量（如 BOCHA_API_KEY），值含密钥→sanitize 只暴露 key 名
 db.exec(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '')`);
-// 凭证迁移在单个事务内完成：先认证已有 enc1、解开历史 enc:v1，再把明文/旧格式统一写成 enc1。
-// 任一密钥不匹配或密文损坏都会抛错并整体回滚，禁止出现部分迁移。
+// 启动凭证门禁：生产只认证已有 enc1，遇到 plaintext/enc:v1 直接拒启并指向 copy-only migrate-copy；
+// 仅开发/测试允许在事务内把旧格式原地规范化。任一错误均整体回滚，禁止部分迁移。
 (function migrateStoredSecrets() {
   assertCredentialKeyReady();
   db.transaction(() => {
@@ -290,8 +377,8 @@ db.exec(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TE
       | { value: string }
       | undefined;
     if (imageRow?.value) {
-      const parsed = JSON.parse(imageRow.value) as Record<string, unknown>;
-      const apiKey = String(parsed.api_key ?? "");
+      const parsed = parseStoredImageProvider(imageRow.value);
+      const apiKey = parsed.api_key ?? "";
       const next = canonicalizeSecret(apiKey);
       if (next !== apiKey) {
         db.prepare("UPDATE app_settings SET value = ? WHERE key = 'image_provider'")
@@ -1338,20 +1425,25 @@ export function updateProject(
 }
 /**
  * 项目级批量关单（human-only 的关闭动作，一次决策关掉整个项目）：
- * 把该项目所有"待评审/进行中/待办"的任务一次性置 done，并把项目本身置 done。
+ * 只把该项目的"待评审"任务置 done；已取消任务保持 cancelled，避免伪装成交付验收。
+ * 路由层负责阻止仍含待办/进行中/阻塞任务的项目进入本函数。
  * 返回被改动的任务（供前端/SSE 增量更新）与项目。
  */
 export function closeProject(projectId: string): { project: Project | undefined; tasks: Task[] } {
-  const project = getProject(projectId);
-  if (!project) return { project: undefined, tasks: [] };
-  const open = (db.prepare("SELECT * FROM tasks WHERE owner_id = ? AND project_id = ? AND status != 'done'").all(currentOwner(), projectId) as Task[]);
-  const updated: Task[] = [];
-  for (const t of open) {
-    const next = updateTask(t.id, { status: "done" });
-    if (next) updated.push(next);
-  }
-  const nextProject = updateProject(projectId, { status: "done" });
-  return { project: nextProject, tasks: updated };
+  return db.transaction(() => {
+    const project = getProject(projectId);
+    if (!project) return { project: undefined, tasks: [] };
+    const open = db
+      .prepare("SELECT * FROM tasks WHERE owner_id = ? AND project_id = ? AND status = 'review'")
+      .all(currentOwner(), projectId) as Task[];
+    const updated: Task[] = [];
+    for (const t of open) {
+      const next = updateTask(t.id, { status: "done" });
+      if (next) updated.push(next);
+    }
+    const nextProject = updateProject(projectId, { status: "done" });
+    return { project: nextProject, tasks: updated };
+  })();
 }
 
 // ---- approvals（每用户私有）----
@@ -1427,11 +1519,29 @@ export function consumeApproval(id: string): boolean {
   return result.changes === 1;
 }
 
-/** 停止/取消任务时关闭尚未使用的 network 授权，避免稍后重启任务沿用旧批准。 */
+/**
+ * 停止/取消/改派任务时原子关闭全部尚未结束的 network 审批：
+ * pending → rejected，approved+未消费 → consumed，避免旧审批或旧授权稍后复活。
+ */
 export function invalidateNetworkApprovalsForTask(taskId: string): number {
-  const result = db.prepare(
-    "UPDATE approvals SET consumed_at = ? WHERE owner_id = ? AND ref_id = ? AND kind = 'network' AND status = 'approved' AND consumed_at IS NULL"
-  ).run(now(), currentOwner(), taskId);
+  const closedAt = now();
+  const result = db.prepare(`
+    UPDATE approvals
+    SET
+      status = CASE WHEN status = 'pending' THEN 'rejected' ELSE status END,
+      resolved_at = CASE WHEN status = 'pending' THEN ? ELSE resolved_at END,
+      consumed_at = CASE
+        WHEN status = 'approved' AND consumed_at IS NULL THEN ?
+        ELSE consumed_at
+      END
+    WHERE owner_id = ?
+      AND ref_id = ?
+      AND kind = 'network'
+      AND (
+        status = 'pending'
+        OR (status = 'approved' AND consumed_at IS NULL)
+      )
+  `).run(closedAt, closedAt, currentOwner(), taskId);
   return result.changes;
 }
 

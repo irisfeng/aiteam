@@ -113,6 +113,13 @@ async function probeProductionServer(dataDir, credentialKey) {
   try {
     const dbPath = join(dataDir, "aiteam.db");
     const db = new Database(dbPath);
+    const validEnc1 = `enc1:${[
+      Buffer.alloc(12, 1),
+      Buffer.alloc(16, 2),
+      Buffer.from("structurally-valid"),
+    ].map((part) => part.toString("base64url")).join(":")}`;
+    const malformedEnc1 = "enc1:AA:BB:CC";
+    const malformedLegacy = "enc:v1:AA==";
     db.exec(`
       CREATE TABLE providers (id TEXT PRIMARY KEY, name TEXT, api_key TEXT NOT NULL DEFAULT '');
       CREATE TABLE mcp_servers (id TEXT PRIMARY KEY, auth_token TEXT NOT NULL DEFAULT '', env_json TEXT NOT NULL DEFAULT '{}');
@@ -120,10 +127,16 @@ async function probeProductionServer(dataDir, credentialKey) {
     `);
     db.prepare("INSERT INTO providers (id, name, api_key) VALUES (?, ?, ?)")
       .run("provider-1", "provider-one", "provider-secret-value");
+    db.prepare("INSERT INTO providers (id, name, api_key) VALUES (?, ?, ?)")
+      .run("provider-2", "provider-malformed", malformedEnc1);
+    db.prepare("INSERT INTO providers (id, name, api_key) VALUES (?, ?, ?)")
+      .run("provider-3", "provider-unknown", "enc:v2:opaque");
     db.prepare("INSERT INTO mcp_servers (id, auth_token, env_json) VALUES (?, ?, ?)")
       .run("mcp-1", legacyV1Encrypt("mcp-secret-value", "legacy-material"), "{}");
+    db.prepare("INSERT INTO mcp_servers (id, auth_token, env_json) VALUES (?, ?, ?)")
+      .run("mcp-2", malformedLegacy, validEnc1);
     db.prepare("INSERT INTO app_settings (key, value) VALUES ('image_provider', ?)")
-      .run(JSON.stringify({ base_url: "https://images.test", api_key: "enc1:AA:BB:CC", model: "image-model" }));
+      .run(JSON.stringify({ base_url: "https://images.test", api_key: validEnc1, model: "image-model" }));
     db.close();
 
     const before = sha256(dbPath);
@@ -140,7 +153,12 @@ async function probeProductionServer(dataDir, credentialKey) {
       "只读检查仅报告凭证格式计数，不输出秘密且不修改源数据库",
       child.status === 0 &&
         report?.surfaces?.providers?.plaintext === 1 &&
+        report?.surfaces?.providers?.invalid === 1 &&
+        report?.surfaces?.providers?.unknown_envelope === 1 &&
         report?.surfaces?.mcp_auth?.legacy_v1 === 1 &&
+        report?.surfaces?.mcp_auth?.invalid === 1 &&
+        report?.surfaces?.mcp_env?.empty === 1 &&
+        report?.surfaces?.mcp_env?.enc1 === 1 &&
         report?.surfaces?.image_provider?.enc1 === 1 &&
         before === after &&
         !serialized.includes("provider-secret-value") &&
@@ -341,6 +359,8 @@ async function probeProductionServer(dataDir, credentialKey) {
         !existsSync(join(outputDir, ".aiteam-recovery-incomplete")) &&
         !existsSync(`${outputDb}-wal`) &&
         !existsSync(`${outputDb}-shm`) &&
+        !rawOutput.includes(Buffer.from(providerLegacy)) &&
+        !rawOutput.includes(Buffer.from(imageLegacy)) &&
         !rawOutput.includes(Buffer.from("copy-provider-secret-value")) &&
         !rawOutput.includes(Buffer.from("copy-mcp-auth-secret-value")) &&
         !rawOutput.includes(Buffer.from("copy-mcp-env-secret-value")) &&
@@ -366,6 +386,7 @@ async function probeProductionServer(dataDir, credentialKey) {
     const seedKey = "73".repeat(32);
     const unrecoverableLegacy = legacyV1Encrypt("rescue-provider-secret-value", "lost-legacy-material");
     const imageLegacy = legacyV1Encrypt("rescue-image-secret-value", "lost-image-material");
+    const corruptCanonical = "enc1:corrupt:credential:value";
     const seed = spawnSync(process.execPath, [
       "--input-type=module",
       "-e",
@@ -391,7 +412,7 @@ async function probeProductionServer(dataDir, credentialKey) {
         db.db.prepare("UPDATE providers SET api_key = ? WHERE id = ?")
           .run(${JSON.stringify(unrecoverableLegacy)}, provider.id);
         db.db.prepare("UPDATE mcp_servers SET auth_token = ?, env_json = ? WHERE id = ?")
-          .run("enc1:corrupt:credential:value", JSON.stringify({ TOKEN: "rescue-mcp-env-secret-value" }), mcp.id);
+          .run(${JSON.stringify(corruptCanonical)}, JSON.stringify({ TOKEN: "rescue-mcp-env-secret-value" }), mcp.id);
         const image = JSON.parse(db.getSetting("image_provider"));
         db.setSetting("image_provider", JSON.stringify({
           ...image,
@@ -497,6 +518,9 @@ async function probeProductionServer(dataDir, credentialKey) {
         !existsSync(join(outputDir, ".aiteam-recovery-incomplete")) &&
         !existsSync(`${outputDb}-wal`) &&
         !existsSync(`${outputDb}-shm`) &&
+        !rawOutput.includes(Buffer.from(unrecoverableLegacy)) &&
+        !rawOutput.includes(Buffer.from(imageLegacy)) &&
+        !rawOutput.includes(Buffer.from(corruptCanonical)) &&
         !rawOutput.includes(Buffer.from("rescue-provider-secret-value")) &&
         !rawOutput.includes(Buffer.from("rescue-mcp-env-secret-value")) &&
         !rawOutput.includes(Buffer.from("rescue-image-secret-value")) &&

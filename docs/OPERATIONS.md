@@ -96,7 +96,10 @@ npm run pack:verify --workspace desktop  # 将包内 Resources 复制到 /tmp �
   才在数据目录自动生成 `credential.key`（0600）。生产环境既未注入环境变量、也没有已有
   `credential.key` 时会拒绝加密/迁移，不会静默生成新密钥。
 - **迁移/恢复**：环境变量模式必须恢复同一个 `AITEAM_CREDENTIAL_KEY`；文件模式必须连同
-  `credential.key` 一起恢复。密钥与数据库不匹配时凭证不可解，不会退回明文。
+  `credential.key` 一起恢复。密钥与数据库不匹配时凭证不可解，不会退回明文。生产启动只认证已有
+  `enc1:`；发现非空 plaintext 或 `enc:v1:` 会在修改数据库前拒绝启动，并要求走下文的 copy-only
+  `migrate-copy`。启动预检会把现有 `aiteam.db` 及其 `-wal` / `-shm` 镜像到系统临时目录后读取，
+  包括“旧凭证只存在于 WAL”的情况也会拒启，同时不会在源数据目录补建 SQLite 伴生文件。
 - **密钥备份必须独立**：`AITEAM_CREDENTIAL_KEY` 应保存在密码管理器/云密钥服务或独立加密介质，
   不要与未加密的数据库快照放在同一目录；文件模式同理，应把 `credential.key` 单独加密托管。
   每次恢复先恢复密钥，再恢复 DB，并实际读取一次 provider/MCP/文生图配置验证可解密。
@@ -117,6 +120,9 @@ npm run test:credential-recovery
 
 - 先停服务并按上文生成 SQLite 一致性备份；后续 `--data-dir` 应指向该备份/工作副本，而不是正在服务的
   `server/data`。
+- 这是应用强制门禁，不只是操作建议：`NODE_ENV=production` 时，即使提供了正确
+  `AITEAM_SECRET_KEY`，启动进程也不会原地改写 plaintext / `enc:v1:`。只有 development/test
+  为兼容本地夹具与隔离测试目录保留事务内原地规范化能力。
 - 四个命令都必须显式给 `--data-dir`，工具不会默认指向真实工作区。`migrate-copy` / `rescue-copy`
   还必须给一个**父目录已存在、目标目录尚不存在**、与源目录不同且不位于源目录内部的
   `--output-dir`；真实路径会经过 `realpath` 校验，拒绝覆盖和符号链接绕过。
@@ -248,7 +254,8 @@ npm start
 | `/aiteam/` 打开空白/404 | 没 build 过前端 → `npm run build`（`web/dist` 不存在时不托管前端） |
 | 登录态失效 | 重启换了 `AITEAM_SESSION_SECRET` → 沿用原 secret 或重新登录 |
 | 生产报缺少凭证落库密钥 | 固定设置 `AITEAM_CREDENTIAL_KEY`，或恢复与数据库配套的 `credential.key`；不要生成新密钥覆盖旧库 |
-| 报历史 `enc:v1` 解密失败 | 需要原 `AITEAM_SECRET_KEY`；找不到时从备份恢复或重新录入凭证 |
+| 生产启动提示未规范化凭证并指向 `migrate-copy` | 数据库仍含 plaintext / `enc:v1:`；不要反复重启或直接改真实库，按 §5.1 在副本执行 `inspect` → `dry-run` → `migrate-copy` |
+| 恢复工具报历史 `enc:v1` 解密失败 | `migrate-copy` 需要原 `AITEAM_SECRET_KEY`；找不到时走 `rescue-copy` 并重新录入凭证 |
 | 一直 Mock 模式 | 没配带 key 的 provider → 设置 → 模型 加一个 |
 | 任务长时间停在 `doing` | 富方案（检索 + 配图 + 强模型验收 + 返工）端到端常 3–5 分钟，属正常；看 audit 进度，真卡死再排查 |
 | audit 出现「联网工具适配…400 Failed to deserialize…降级为仅搜索」 | 国内端点不接受官方 web_search 工具组合，引擎已自动降级用检索插件，**非致命** |
@@ -264,7 +271,7 @@ npm start
 |------|------|------|
 | `AITEAM_SESSION_SECRET` | 开发弱回退 | 会话签名密钥；**生产（`NODE_ENV=production`）未设则拒启**，务必设强随机串（`openssl rand -base64 48`） |
 | `AITEAM_CREDENTIAL_KEY` | 开发自动生成 `credential.key` | 凭证落库密钥（32 字节，64 位 hex 或 base64）；生产必须注入固定值或恢复已有文件 |
-| `AITEAM_SECRET_KEY` | 空 | 仅供历史 `enc:v1:` 一次性迁移；迁移完成后删除 |
+| `AITEAM_SECRET_KEY` | 空 | 仅供 `credentials:recover` 解历史 `enc:v1:`；不能让生产启动绕过 copy-only 门禁，迁移完成后删除 |
 | `AITEAM_SOURCE_CREDENTIAL_KEY` | 空 | 仅供 `credentials:recover`：源库已有 `enc1:` 且源 key 与目标 `AITEAM_CREDENTIAL_KEY` 不同时显式提供 |
 | `PORT` | `8787` | 监听端口 |
 | `AITEAM_HOST` | `127.0.0.1` | 监听地址（对外/反代时按需，如 `0.0.0.0`） |
@@ -306,10 +313,12 @@ git pull
 npm install                 # 依赖有变时
 npm run build
 pkill -f "node dist/index.js"
-AITEAM_SESSION_SECRET=<同一串> AITEAM_CREDENTIAL_KEY=<同一串> PORT=8787 \
+AITEAM_SESSION_SECRET=<原会话密钥> AITEAM_CREDENTIAL_KEY=<原32字节凭证密钥> PORT=8787 \
   nohup npm start > /tmp/aiteam-server.log 2>&1 &
 curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8787/aiteam/   # 期望 200
 ```
+
+`AITEAM_SESSION_SECRET` 与 `AITEAM_CREDENTIAL_KEY` 用途和格式不同，必须分别恢复，不能共用同一个值。
 
 若使用数据目录中的 `credential.key`，上面的 `AITEAM_CREDENTIAL_KEY` 可省略，但升级、迁机和恢复时
 必须保留该文件。生产部署更推荐由受控环境文件/密钥管理器注入固定 `AITEAM_CREDENTIAL_KEY`。

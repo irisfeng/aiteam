@@ -82,7 +82,7 @@ function ApprovalPayload({ approval }: { approval: Approval }) {
             <div>
               <dt className="text-[11px] font-medium text-ink-3">完整参数：</dt>
               <dd>
-                <pre className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap rounded-md bg-panel px-2 py-1.5 font-mono text-[11.5px]">
+                <pre className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap wrap-anywhere rounded-md bg-panel px-2 py-1.5 font-mono text-[11.5px]">
                   {JSON.stringify(parsed.input, null, 2)}
                 </pre>
               </dd>

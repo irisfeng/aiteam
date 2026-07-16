@@ -7,6 +7,8 @@ import * as z from "zod/v4";
 
 const counterFile = process.env.AITEAM_NETWORK_PROBE_FILE;
 if (!counterFile) throw new Error("AITEAM_NETWORK_PROBE_FILE is required");
+const connectFile = process.env.AITEAM_NETWORK_PROBE_CONNECT_FILE;
+const connectDelayMs = Math.max(0, Number(process.env.AITEAM_NETWORK_PROBE_CONNECT_DELAY_MS ?? 0));
 
 const server = new McpServer({
   name: "aiteam-network-approval-probe",
@@ -35,4 +37,8 @@ server.registerTool(
   },
 );
 
+if (connectFile) appendFileSync(connectFile, `${Date.now()}\n`, "utf8");
+if (connectDelayMs > 0) {
+  await new Promise((resolve) => setTimeout(resolve, connectDelayMs));
+}
 await server.connect(new StdioServerTransport());

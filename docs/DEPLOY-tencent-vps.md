@@ -210,11 +210,13 @@ AITEAM_DAILY_TOKEN_BUDGET=2000000
 # TASK_MAX_REVISIONS=1
 ```
 
-> **旧 `enc:v1:` 数据升级**：只有从旧安全分支迁入数据库时才临时增加
-> `AITEAM_SECRET_KEY=<生成旧密文时的原始密钥>`，并同时保留新的
-> `AITEAM_CREDENTIAL_KEY`。先备份，再启动一次；确认库内所有 `enc:v1:` 已变为 `enc1:` 后立刻从
-> EnvironmentFile 删除 `AITEAM_SECRET_KEY`。旧密钥找不到时不要对真实库试错，应恢复备份并在 UI
-> 重新录入凭证。
+> **旧 plaintext / `enc:v1:` 数据升级**：源库含 `enc:v1:` 时才临时增加
+> `AITEAM_SECRET_KEY=<生成旧密文时的原始密钥>`；只有 plaintext 时不需要旧密钥。为输出副本准备固定的
+> `AITEAM_CREDENTIAL_KEY`。**不要直接启动真实数据目录试密钥或原地迁移**：先停服并生成一致性
+> 备份，再按 [OPERATIONS §5.1](OPERATIONS.md#51-历史-encv1-凭证升级) 对备份依次执行
+> `inspect`、`dry-run` 和 `migrate-copy`，只启动新的 `OUTPUT_DATA` 做人工 UAT；验证通过后再切换
+> `AITEAM_DATA_DIR`。确认输出库已全部转为 `enc1:` 后，立刻从环境文件删除
+> `AITEAM_SECRET_KEY`。旧密钥找不到时走 `rescue-copy` 并在输出副本中重新录入凭证，禁止对真实库试错。
 
 ### 4.3 Nginx 反代 `/etc/nginx/conf.d/multi-app.conf`
 （加入已有 Nginx 配置作为新 server 块；三项目都没有反代时新装 Nginx 后放入此文件）
@@ -387,7 +389,12 @@ printf 'credential_key_mode=%s\ncreated_at=%s\n' "$KEY_MODE" "$(date -Iseconds)"
 # 1) DB：VACUUM INTO 干净单库（自动合并 WAL，无伴生文件）
 sqlite3 "$DB" "VACUUM INTO '$DEST/aiteam.db'"
 # 2) 校验快照（坏库早发现）
-sqlite3 "$DEST/aiteam.db" 'PRAGMA integrity_check' | head -1
+INTEGRITY="$(sqlite3 "$DEST/aiteam.db" 'PRAGMA integrity_check')"
+if [ "$INTEGRITY" != "ok" ]; then
+  echo "[fatal] 备份快照完整性校验失败：" >&2
+  printf '%s\n' "$INTEGRITY" >&2
+  exit 1
+fi
 # 3) assets 打包（生成图；文档中可能含可访问链接）
 [ -d "$DATA_DIR/assets" ] && tar -czf "$DEST/assets.tar.gz" -C "$DATA_DIR" assets
 # 4) 校验和 + 锁权限（数据库内凭证为 enc1 密文，备份仍按敏感业务数据保护）
@@ -415,7 +422,12 @@ cron（`crontab -e`，凌晨低峰，避开例行任务密集时刻）：
 set -euo pipefail
 SRC="${1:?用法: restore.sh <备份目录>}"; DATA_DIR="/var/lib/aiteam"; SERVICE="aiteam"
 [ -f "$SRC/aiteam.db" ] || { echo "找不到 $SRC/aiteam.db"; exit 1; }
-sqlite3 "$SRC/aiteam.db" 'PRAGMA integrity_check' | head -1    # 先验备份本身
+SOURCE_INTEGRITY="$(sqlite3 "$SRC/aiteam.db" 'PRAGMA integrity_check')"
+if [ "$SOURCE_INTEGRITY" != "ok" ]; then
+  echo "[fatal] 备份源完整性校验失败：" >&2
+  printf '%s\n' "$SOURCE_INTEGRITY" >&2
+  exit 1
+fi
 # 必须先从独立密钥托管恢复 /etc/aiteam/aiteam.env 中的原 AITEAM_CREDENTIAL_KEY；
 # 若 RECOVERY-METADATA 标记 file 模式，则先把配套 credential.key 恢复到 DATA_DIR。
 if ! grep -Eq '^AITEAM_CREDENTIAL_KEY=.{20,}$' /etc/aiteam/aiteam.env 2>/dev/null \
@@ -430,7 +442,12 @@ sudo cp "$SRC/aiteam.db" "$DATA_DIR/aiteam.db"
 [ -f "$SRC/assets.tar.gz" ] && { sudo rm -rf "$DATA_DIR/assets"; sudo tar -xzf "$SRC/assets.tar.gz" -C "$DATA_DIR"; }
 sudo chown -R aiteam:aiteam "$DATA_DIR" && sudo chmod -R 750 "$DATA_DIR"
 sudo systemctl start "$SERVICE"; sleep 2
-sqlite3 "$DATA_DIR/aiteam.db" 'PRAGMA integrity_check' | head -1
+RESTORED_INTEGRITY="$(sqlite3 "$DATA_DIR/aiteam.db" 'PRAGMA integrity_check')"
+if [ "$RESTORED_INTEGRITY" != "ok" ]; then
+  echo "[fatal] 恢复后数据库完整性校验失败：" >&2
+  printf '%s\n' "$RESTORED_INTEGRITY" >&2
+  exit 1
+fi
 systemctl is-active --quiet "$SERVICE"
 echo "[ok] 基础恢复完成。必须登录 UI 实测 provider、MCP、文生图凭证可读取，并抽查 /aiteam/assets/*.png。建议季度演练一次。"
 ```
@@ -590,8 +607,10 @@ find "$DATA_DIR/assets" -type f -mtime +90 -print -delete
    **默认就只听回环**——同机 Nginx 反代/本地访问照常，公网无法直连（防火墙之外的第二层）。已实测：默认仅 `LISTEN 127.0.0.1:PORT`；`AITEAM_HOST=0.0.0.0`（容器/反代异机时）则听全网卡。**本场景 EnvironmentFile 里 `AITEAM_HOST` 可不设或显式设 `127.0.0.1`。**
 2. **会话密钥 fail-fast ✅ 已合入**（`server/src/session.ts:12-17`，commit 0983fb6）：生产缺 `AITEAM_SESSION_SECRET` 直接拒启。
 3. **MCP `/mcp-servers/:id/test` 补 `requireAdmin` ✅ 已合入**（`server/src/routes.ts:208`，commit 0983fb6）。
-4. **凭证落库加密与旧格式迁移 ✅ 已合入**（`server/src/secrets.ts` / `server/src/db.ts`）：
-   provider、MCP、文生图凭证统一为 `enc1:`；生产缺固定凭证密钥时 fail-closed；旧 `enc:v1:` 仅在提供原密钥时事务迁移。
+4. **凭证落库加密与 copy-only 旧格式迁移 ✅ 已合入**（`server/src/secrets.ts` / `server/src/db.ts`）：
+   provider、MCP、文生图新凭证统一为 `enc1:`；生产缺固定凭证密钥时 fail-closed，且发现 plaintext /
+   `enc:v1:` 会在原库写入前拒启并指向 `inspect` / `dry-run` / `migrate-copy`。仅 development/test
+   为隔离夹具保留事务内原地规范化。
 
 可选（按需，未合入）：
 5. **请求体上限放宽**（`server/src/index.ts:26`）：若内部有粘贴长上下文需求，`express.json({limit:"1mb"})` → `"5mb"`（同时确认反代 `client_max_body_size` ≥ 此值）。
@@ -628,7 +647,7 @@ find "$DATA_DIR/assets" -type f -mtime +90 -print -delete
 | 数据盘被 assets 撑满 | 文生图持续累积、无自动清理 | 殃及另两项目 | 磁盘水位告警 + 可选 assets 清理 cron（§9） |
 | 跨 owner_id 迁移版本回滚不带库 | 只回滚代码、保留已迁移的库 | 旧代码不认新 schema，启动即报错 | 回滚必须连库一起回到迁移前的备份 DB（§6.2） |
 | 三项目横向感染 | 同用户/共享目录可互读 | 一个被打穿牵连其余 | 独立 OS 用户 + systemd 沙箱 + 独立 data（§4.1/§7） |
-| 凭证密钥与数据库不匹配 | 重启时生成新值 / 迁机漏带原密钥 / 旧 `enc:v1:` 缺原密钥 | provider、MCP、文生图凭证无法解密，启动迁移回滚 | 固定保存 `AITEAM_CREDENTIAL_KEY`；密钥与 DB 分开受控备份；旧库先演练迁移，失败则恢复备份并重新录入 |
+| 凭证密钥不匹配或库内仍有旧格式 | 重启时生成新值 / 迁机漏带原密钥 / 库内仍有 plaintext / `enc:v1:` | provider、MCP、文生图凭证无法认证；生产在修改原库前拒启 | 固定保存 `AITEAM_CREDENTIAL_KEY`；旧库按 §5.1 在副本完成 `inspect` / `dry-run` / `migrate-copy`，旧密钥丢失则走 `rescue-copy` |
 | 升级停机错过例行任务 | 升级窗口压在例行任务密集时刻 | 当天错过的时刻不补跑 | 升级窗口避开例行任务密集时刻（§9） |
 
 ---

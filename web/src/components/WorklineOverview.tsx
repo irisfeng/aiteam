@@ -209,6 +209,7 @@ export function WorklineOverview({
     total: number;
     delivered: number;
     done: number;
+    cancelled: number;
     status: "running" | "review" | "done";
   } | null;
   onOpenAcceptanceReview?: () => void;
@@ -267,6 +268,7 @@ export function WorklineOverview({
     .reverse();
   const firstByStatus = (status: Task["status"]) => scopedTasks.find((t) => t.status === status);
   const { running, blocked, blockedWithoutPendingApproval, review, todo, done, active, unassigned } = wl;
+  const cancelled = scopedTasks.filter((task) => task.status === "cancelled");
   const inputOrApprovalCount = scopedApprovals.length + blockedWithoutPendingApproval.length;
   const claimed = scopedTasks.filter((t) => t.assignee_agent_id);
   const attentionItems = wl.attention.map((item) => ({
@@ -285,7 +287,7 @@ export function WorklineOverview({
   const firstDone = firstByStatus("done");
   const firstTask = scopedTasks[0];
   const claimTask = unassigned[0] ?? claimed[0] ?? firstTask;
-  const allClosed = scopedTasks.length > 0 && active.length === 0;
+  const noActiveTasks = scopedTasks.length > 0 && active.length === 0;
   const closableProject = [...ws.projects]
     .filter((project) => project.status !== "done" && (!channelId || project.channel_id === channelId))
     .sort((a, b) => b.updated_at - a.updated_at)
@@ -297,9 +299,14 @@ export function WorklineOverview({
         approval.status === "pending" &&
         (approval.ref_id === project.id || (approval.ref_id ? ids.has(approval.ref_id) : false))
       );
-      return !hasPendingApproval && tasks.every((task) => task.status === "review" || task.status === "done");
+      return !hasPendingApproval && tasks.every(
+        (task) => task.status === "review" || task.status === "done" || task.status === "cancelled",
+      );
     });
   const closableProjectTasks = closableProject ? scopedTasks.filter((task) => task.project_id === closableProject.id) : [];
+  const closableReviewCount = closableProjectTasks.filter((task) => task.status === "review").length;
+  const closableDoneCount = closableProjectTasks.filter((task) => task.status === "done").length;
+  const closableCancelledCount = closableProjectTasks.filter((task) => task.status === "cancelled").length;
   const latestLinkCheckProject = [...ws.projects]
     .filter((p) => p.title.startsWith(LINK_CHECK_PROJECT_PREFIX) && (!channelId || p.channel_id === channelId))
     .sort((a, b) => {
@@ -314,10 +321,12 @@ export function WorklineOverview({
       : latestLinkCheckProject;
   const linkCheckTasks = linkCheckProject ? ws.tasks.filter((t) => t.project_id === linkCheckProject.id) : [];
   const linkCheckDelivered = linkCheckTasks.filter((t) => t.status === "review" || t.status === "done").length;
-  const linkCheckDone = linkCheckTasks.filter((t) => t.status === "done").length;
-  const linkCheckReady = linkCheckTasks.length > 0 && linkCheckDelivered === linkCheckTasks.length;
-  const linkCheckClosed = linkCheckTasks.length > 0 && linkCheckDone === linkCheckTasks.length;
-  const linkCheckOpen = Boolean(linkCheckProject && !linkCheckClosed);
+  const linkCheckCancelled = linkCheckTasks.filter((t) => t.status === "cancelled").length;
+  const linkCheckReady = linkCheckTasks.length > 0 && linkCheckTasks.every(
+    (task) => task.status === "review" || task.status === "done" || task.status === "cancelled",
+  );
+  const linkCheckClosed = linkCheckProject?.status === "done";
+  const linkCheckOpen = Boolean(linkCheckProject && linkCheckProject.status !== "done");
   const parseEventMeta = (event: TaskEvent) => {
     try {
       return JSON.parse(event.metadata_json || "{}") as Record<string, unknown>;
@@ -415,7 +424,7 @@ export function WorklineOverview({
       : blockedWithoutPendingApproval.length > 0
         ? `回应 ${blockedWithoutPendingApproval.length} 个阻塞任务，避免 AI 空转。`
         : closableProject
-          ? `项目「${closableProject.title}」已全部交付，确认后归档 ${closableProjectTasks.length} 个任务。`
+          ? `项目「${closableProject.title}」已全部进入终态：${closableReviewCount} 个待评审，${closableDoneCount} 个已完成，${closableCancelledCount} 个已取消；确认后归档项目。`
         : review.length > 0
           ? `复核 ${review.length} 个交付；通过后由你关单，未过则退回返工。`
           : running.length > 0
@@ -424,8 +433,8 @@ export function WorklineOverview({
               ? `给 ${unassigned.length} 个待办任务指定 AI 同事或让它认领。`
               : todo.length > 0
                 ? `${todo.length} 个任务等待依赖解锁或自动开工。`
-                : allClosed
-                  ? "本轮项目已关闭，可从最终交付物复盘。"
+                : noActiveTasks
+                  ? `当前无活跃任务：${done.length} 个完成，${cancelled.length} 个取消。${done.length > 0 ? "可查看已完成任务的交付物。" : ""}`
                   : "先启动一个核心场景，生成带依赖、复核和关单的任务链。";
   const nextActionCta =
     scopedApprovals.length > 0
@@ -447,7 +456,7 @@ export function WorklineOverview({
               ? { label: "指定负责人", onClick: () => onOpenTask(unassigned[0]), primary: false, disabled: false }
               : firstTodo
                 ? { label: "查看待办", onClick: () => onOpenTask(firstTodo), primary: false, disabled: false }
-                : allClosed && firstDone
+                : noActiveTasks && firstDone
                   ? { label: "查看归档", onClick: () => onOpenTask(firstDone), primary: false, disabled: false }
                   : onStartScenario
                     ? {
@@ -463,10 +472,19 @@ export function WorklineOverview({
     const project = ws.projects.find((p) => p.id === projectId);
     const tasks = ws.tasks.filter((task) => task.project_id === projectId);
     if (!project || tasks.length === 0) return;
-    if (!window.confirm(`确认关闭项目「${project.title}」？\n这会把 ${tasks.length} 个已交付任务归档为完成。`)) return;
+    const reviewCount = tasks.filter((task) => task.status === "review").length;
+    const doneCount = tasks.filter((task) => task.status === "done").length;
+    const cancelledCount = tasks.filter((task) => task.status === "cancelled").length;
+    if (!window.confirm(
+      `确认关闭项目「${project.title}」？\n` +
+      `将把 ${reviewCount} 个待评审任务归入「完成」；` +
+      `${doneCount} 个已完成任务保持「完成」；${cancelledCount} 个已取消任务保持「已取消」。`,
+    )) return;
     setClosingProjectId(projectId);
     try {
       await ws.closeProject(projectId);
+    } catch (error) {
+      window.alert(`关闭项目失败：${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setClosingProjectId(null);
     }
@@ -584,8 +602,18 @@ export function WorklineOverview({
 
   async function closeLinkCheckProject() {
     if (!linkCheckProject || !linkCheckReady) return;
-    if (!window.confirm(`确认关闭配置验收项目「${linkCheckProject.title}」？\n这会把本轮模型/MCP/Skills 自检任务归档为完成。`)) return;
-    await ws.closeProject(linkCheckProject.id);
+    const reviewCount = linkCheckTasks.filter((task) => task.status === "review").length;
+    const doneCount = linkCheckTasks.filter((task) => task.status === "done").length;
+    if (!window.confirm(
+      `确认关闭配置验收项目「${linkCheckProject.title}」？\n` +
+      `将把 ${reviewCount} 个待评审任务归入「完成」；` +
+      `${doneCount} 个已完成任务保持「完成」；${linkCheckCancelled} 个已取消任务保持「已取消」。`,
+    )) return;
+    try {
+      await ws.closeProject(linkCheckProject.id);
+    } catch (error) {
+      window.alert(`关闭配置验收项目失败：${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   return (
@@ -708,8 +736,8 @@ export function WorklineOverview({
             <FlowStep
               index={6}
               label="关单"
-              value={allClosed ? "已关闭" : active.length > 0 ? `${active.length} 未关闭` : "等待交付"}
-              state={allClosed ? "done" : review.length > 0 ? "active" : "idle"}
+              value={closableProject ? "待确认关单" : noActiveTasks ? `${done.length} 完成 · ${cancelled.length} 取消` : active.length > 0 ? `${active.length} 未关闭` : "等待交付"}
+              state={closableProject ? "active" : noActiveTasks ? "done" : review.length > 0 ? "active" : "idle"}
               onClick={firstReview ? () => onOpenTask(firstReview) : firstDone ? () => onOpenTask(firstDone) : undefined}
             />
           </div>
@@ -814,12 +842,13 @@ export function WorklineOverview({
                     {acceptanceRun.status === "done"
                       ? "项目已由人确认关闭。"
                       : acceptanceRun.status === "review"
-                        ? "所有任务已交付，等待人类复核并关单。"
+                        ? `所有任务已进入终态：${acceptanceRun.delivered} 个已交付，${acceptanceRun.cancelled} 个已取消；等待人类复核并关单。`
                         : "AI 同事正在认领、执行和交付；完成后会进入待复核。"}
                   </div>
                 </div>
                 <span className="rounded bg-sel px-2 py-1 font-mono text-[11px] text-ink-3">
                   {acceptanceRun.delivered}/{acceptanceRun.total} delivered
+                  {acceptanceRun.cancelled > 0 ? ` · ${acceptanceRun.cancelled} cancelled` : ""}
                 </span>
                 {acceptanceRun.status === "review" && (
                   <>
@@ -908,12 +937,13 @@ export function WorklineOverview({
                     {linkCheckClosed
                       ? "项目已由人确认关闭。"
                       : linkCheckReady
-                        ? "模型/MCP/Skills 演练已进入复核，可人工关单。"
+                        ? `模型/MCP/Skills 演练已进入终态：${linkCheckDelivered} 个已交付，${linkCheckCancelled} 个已取消；可人工关单。`
                         : "正在把所有已配置模型、MCP、Skills 演练任务收敛到同一项目。"}
                   </div>
                 </div>
                 <span className="rounded bg-sel px-2 py-1 font-mono text-[11px] text-ink-3">
                   {linkCheckDelivered}/{linkCheckTasks.length} delivered
+                  {linkCheckCancelled > 0 ? ` · ${linkCheckCancelled} cancelled` : ""}
                 </span>
                 {linkCheckTasks.length > 0 && (
                   <button

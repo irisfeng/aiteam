@@ -315,6 +315,16 @@ async function runViewport(debugPort, baseUrl, label, viewport) {
         .then((tasks) => tasks.some((task) => task.id === ${JSON.stringify(cancelTaskId)} && task.status === 'cancelled'))
     `, true));
     ok(`${label} cancellation is distinct from delivery close`, Boolean(cancelled));
+    const terminalBudgetDisabled = await page.eval(`
+      (() => {
+        const budgetLabel = [...document.querySelectorAll('label')]
+          .find((element) => element.textContent?.includes('设置预算'));
+        const input = budgetLabel?.querySelector('input');
+        const button = budgetLabel?.querySelector('button');
+        return Boolean(input?.disabled && button?.disabled);
+      })()
+    `);
+    ok(`${label} terminal task budget controls are disabled`, terminalBudgetDisabled);
     await page.screenshot(`cancelled-${label}`);
     await assertNoHorizontalOverflow(page, `${label} cancelled drawer`);
   } catch (err) {
@@ -340,8 +350,11 @@ try {
     cwd: root,
     env: {
       ...process.env,
+      NODE_ENV: "production",
       PORT: String(appPort),
       AITEAM_DATA_DIR: dataDir,
+      AITEAM_SESSION_SECRET: "ui-smoke-session-secret-32-bytes-minimum",
+      AITEAM_CREDENTIAL_KEY: "82".repeat(32),
       AITEAM_AUTH_MODE: "standalone",
       AITEAM_ALLOW_SIGNUP: "1",
       AITEAM_ADMIN_EMAILS: "ui-smoke@test.local",
