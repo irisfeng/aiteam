@@ -4,7 +4,7 @@
 > 这五个只有真 key 才能验证的环节。每步给出「操作 → 预期 → 重点观察」，✅ 处可勾选。
 >
 > **测试分两层**：
-> - **机制层（已自动化）**：`npm run build && npm test` 跑完整回归（DAG 调度/计划把关/
+> - **机制层（已自动化）**：`npm run build && npm test` 先跑凭证加密/旧格式迁移回归，再跑完整业务回归（DAG 调度/计划把关/
 >   停止/预算/断点恢复/聊天管线/引用回复/交付格式/技能 CRUD/MCP 连接·容错·环境变量·去重/
 >   用量/导出/角色模板幂等/频道管理/记忆/密钥脱敏/鉴权与多租户隔离/pptx 模板解析与就地改文图/
 >   真 .pptx 导出/上传来源与定向润色/markitdown 端到端/验收者按类型路由/无源数字软门/
@@ -16,7 +16,8 @@
 >   项目/任务/活动实时更新。
 > - **真实浏览器 UI 烟测（本机可选）**：`npm run ui:smoke` 会启动隔离生产服务和系统 Chrome，
 >   在桌面/移动视口真实渲染任务运行线、端到端验收、任务详情抽屉、复核清单和活动日志，并把截图写到
->   `output/ui-smoke/`。若 Chrome 不在默认路径，可设置 `AITEAM_UI_CHROME=/path/to/chrome`。
+>   `output/ui-smoke/`。可用 `AITEAM_UI_OUTPUT=/tmp/aiteam-ui-smoke` 把截图隔离到临时目录；
+>   若 Chrome 不在默认路径，可设置 `AITEAM_UI_CHROME=/path/to/chrome`。
 > - **智能层（需真实 key 人工执行）**：即本清单的 B2、C1-C4 的质量观察项、D1、G1/G3/G5
 >   的行为观察项——机器只能验证"流程对不对"，"干得好不好"要靠你按 F 段回报。
 
@@ -72,7 +73,7 @@
 - [ ] **B0 自动客户端烟测**：
   ```bash
   npm run client:smoke
-  npm run ui:smoke
+  AITEAM_UI_OUTPUT=/tmp/aiteam-ui-smoke npm run ui:smoke
   ```
   - 预期：依次通过 production server、client shell、session cookie、bootstrap、Helio-style scenario、WebSocket live updates。
   - `ui:smoke` 预期：桌面/移动两种视口都能看到任务运行线，启动端到端验收后能打开任务详情、人工复核清单和活动日志，且无横向溢出。

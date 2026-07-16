@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const outDir = join(root, "output", "ui-smoke");
+const outDir = process.env.AITEAM_UI_OUTPUT || join(root, "output", "ui-smoke");
 
 function ok(name, condition, detail = "") {
   if (!condition) throw new Error(`${name}${detail ? `: ${detail}` : ""}`);
