@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useWorkspace } from "../store";
-import { API_BASE, api, type ScenarioInfo } from "../api";
+import { API_BASE, api, billableTokens, parseTaskUsage, type ScenarioInfo } from "../api";
 import type { Task, TaskEvent } from "../types";
 import { computeWorkline } from "../lib/workline";
 import type { SettingsTab } from "./Modals";
@@ -124,7 +124,7 @@ interface SkillListItem {
 interface LinkCheckResult {
   id: string;
   label: string;
-  status: "passed" | "failed" | "skipped";
+  status: "passed" | "failed" | "waiting" | "skipped";
   detail: string;
   taskId?: string;
 }
@@ -335,13 +335,15 @@ export function WorklineOverview({
     }
   };
   const persistedLinkCheckResults: LinkCheckResult[] = linkCheckTasks.map((task) => {
-    const isProvider = task.title.startsWith("模型任务演练：");
+    const isProvider = task.title.startsWith("真实模型质量基准：") || task.title.startsWith("模型任务演练：");
     const isMcp = task.title.startsWith("MCP 能力演练：");
     const isSkill = task.title.startsWith("技能演练：");
     const taskEvents = ws.taskEvents.filter((event) => event.task_id === task.id);
     const eventTypes = new Set(taskEvents.map((event) => event.type));
     const eventMetas = taskEvents.map(parseEventMeta);
-    const resultMeta = eventMetas.find((meta) => meta.provider_task_test === true);
+    const resultMeta = [...eventMetas].reverse().find((meta) => meta.provider_task_test === true);
+    const benchmarkMeta = eventMetas.find((meta) => typeof meta.benchmark_id === "string");
+    const verdictMeta = [...eventMetas].reverse().find((meta) => meta.result === "pass" || meta.result === "revise" || meta.result === "gap");
     const resultChecks =
       resultMeta && typeof resultMeta.checks === "object" && resultMeta.checks
         ? (resultMeta.checks as Record<string, unknown>)
@@ -353,20 +355,30 @@ export function WorklineOverview({
     const metaWithModel = eventMetas.find((meta) => typeof meta.model === "string");
     const model = typeof metaWithModel?.model === "string" ? metaWithModel.model : "";
     const latency = typeof resultMeta?.latency_ms === "number" ? ` · ${Math.round(resultMeta.latency_ms)}ms` : "";
-    const billable = typeof usageSummary?.billable === "number" ? ` · ${formatTokenCount(usageSummary.billable)} billable` : "";
+    const liveBillable = billableTokens(parseTaskUsage(task.usage_json));
+    const measuredBillable = typeof usageSummary?.billable === "number" ? usageSummary.billable : liveBillable;
+    const billable = measuredBillable > 0 ? ` · ${formatTokenCount(measuredBillable)} billable` : "";
     const estimatedCost = formatEstimatedCost(usageSummary?.estimated_cost, usageSummary?.price_currency);
     const toolObserved = eventTypes.has("tool");
     const delivered = eventTypes.has("delivery") || task.status === "review" || task.status === "done";
     const verified = eventTypes.has("verification");
     const usageTracked = typeof resultChecks?.usage_tracked === "boolean" ? resultChecks.usage_tracked : null;
+    const qualityContract = resultChecks?.quality_contract === true || benchmarkMeta?.rubric_count === 7;
+    const independentReviewer = resultChecks?.independent_reviewer === true || Boolean(task.reviewer_agent_id && task.reviewer_agent_id !== task.assignee_agent_id);
+    const verdictRecorded = resultChecks?.verdict_recorded === true || verdictMeta?.result === "pass";
+    const withinBudget = resultChecks?.within_budget === true || (task.budget_billable > 0 && liveBillable <= task.budget_billable);
+    const sourceTraceClean = resultChecks?.source_trace_clean !== false;
+    const pendingApproval = task.status === "blocked" && ws.approvals.some((approval) => approval.ref_id === task.id && approval.status === "pending");
     const status: LinkCheckResult["status"] =
-      eventTypes.has("failure")
-        ? "failed"
+      pendingApproval
+        ? "waiting"
         : task.status === "review" || task.status === "done"
-          ? "passed"
+          ? verdictRecorded && sourceTraceClean ? "passed" : "failed"
+          : eventTypes.has("failure")
+        ? "failed"
           : "skipped";
     const label = isProvider
-      ? `模型 · ${task.title.replace("模型任务演练：", "")}`
+      ? `模型 · ${task.title.replace(/^真实模型质量基准：AiTeam 产品落地决策简报（|^模型任务演练：/, "").replace(/）$/, "")}`
       : isMcp
         ? `MCP · ${task.title.replace("MCP 能力演练：", "")}`
         : isSkill
@@ -374,7 +386,7 @@ export function WorklineOverview({
           : task.title;
     const detail =
       isProvider && model
-        ? `${model}${latency}${billable}${estimatedCost} · ${delivered ? "交付" : "未交付"} / ${toolObserved ? "工具" : "无工具"} / ${verified ? "验收" : "未验收"} / ${usageTracked === null ? "用量未知" : usageTracked ? "用量" : "无用量"}`
+        ? `${model}${latency}${billable}${estimatedCost} · ${delivered ? "交付" : "未交付"} / ${toolObserved ? "工具" : "无工具"} / ${qualityContract ? "7项契约" : "契约缺失"} / ${independentReviewer ? "独立复核" : "复核冲突"} / ${verdictRecorded ? "pass" : pendingApproval ? "待复核" : verified ? "未通过" : "未验收"} / ${sourceTraceClean ? "来源可追溯" : "来源冲突"} / ${withinBudget ? "预算内" : "已触线"} / ${usageTracked === null ? "用量未知" : usageTracked ? "用量" : "无用量"}`
         : task.status === "review" || task.status === "done"
           ? `${task.status} · 已有可复核交付证据`
         : task.status === "blocked"
@@ -386,6 +398,7 @@ export function WorklineOverview({
   const providerCheckResults = visibleLinkCheckResults.filter((item) => item.id.startsWith("provider:") || item.label.startsWith("模型 · "));
   const providerPassed = providerCheckResults.filter((item) => item.status === "passed").length;
   const providerFailed = providerCheckResults.filter((item) => item.status === "failed").length;
+  const providerWaiting = providerCheckResults.filter((item) => item.status === "waiting").length;
   const providerBest = providerCheckResults.find((item) => item.status === "passed");
   const linkCheckButtonLabel = linkCheckBusy
     ? "自检中…"
@@ -403,7 +416,7 @@ export function WorklineOverview({
       ? "链路自检需要管理员权限"
       : linkCheckOpen
         ? "打开当前配置验收项目的任务证据；不重复创建新项目"
-        : "手动跑一次模型/MCP/Skills 任务演练；真实模型会产生少量 token 消耗";
+        : "手动跑一次模型质量基准与 MCP/Skills 演练；模型基准 24k billable 触线暂停，单次请求可能小幅越界";
   const acceptanceButtonLabel =
     scenarioBusy && activeScenarioId === "acceptance"
       ? "验收中…"
@@ -525,8 +538,8 @@ export function WorklineOverview({
             results.push({
               id: `provider:${provider.id}`,
               label: `模型 · ${provider.name}`,
-              status: out.ok ? "passed" : "failed",
-              detail: `${out.model} · ${Math.round(out.latency_ms)}ms · ${formatTokenCount(out.usage_summary?.billable)} billable${formatEstimatedCost(out.usage_summary?.estimated_cost, out.usage_summary?.price_currency)} · ${out.checks.delivered ? "交付" : "未交付"} / ${out.checks.tool_observed ? "工具" : "无工具"} / ${out.checks.verified ? "验收" : "未验收"} / ${out.checks.usage_tracked ? "用量" : "无用量"}`,
+              status: out.run_status === "passed" ? "passed" : out.run_status === "pending_approval" ? "waiting" : "failed",
+              detail: `${out.models.worker}→${out.models.reviewer} · ${Math.round(out.latency_ms)}ms · ${formatTokenCount(out.usage_summary?.billable)} billable${formatEstimatedCost(out.usage_summary?.estimated_cost, out.usage_summary?.price_currency)} · ${out.checks.delivered ? "交付" : "未交付"} / ${out.checks.quality_contract ? "7项契约" : "契约缺失"} / ${out.checks.independent_reviewer ? "独立复核" : "复核冲突"} / ${out.checks.verdict_recorded ? "pass" : out.checks.pending_approval ? "待复核" : "未通过"} / ${out.checks.source_trace_clean ? "来源可追溯" : "来源冲突"} / ${out.checks.within_budget ? "预算内" : "已触线"}`,
               taskId: out.task.id,
             });
           } catch (e: any) {
@@ -888,8 +901,12 @@ export function WorklineOverview({
                     <div className="min-w-0 flex-1">
                       <div className="text-[12.5px] font-semibold">模型对比摘要</div>
                       <div className="mt-0.5 text-[11.5px] text-ink-3">
-                        {providerCheckResults.length} 个模型通道完成同构演练；{providerPassed} 通过，{providerFailed} 失败。
-                        {providerBest ? ` 当前可优先复核：${providerBest.label.replace("模型 · ", "")}。` : " 暂无通过项，先打开失败任务看错误。"}
+                        {providerCheckResults.length} 个模型通道已启动同构质量基准；{providerPassed} 通过，{providerFailed} 失败{providerWaiting > 0 ? `，${providerWaiting} 个等待审批` : ""}。
+                        {providerBest
+                          ? ` 当前可优先复核：${providerBest.label.replace("模型 · ", "")}。`
+                          : providerWaiting > 0
+                            ? " 先处理预算审批，再等待独立复核完成。"
+                            : " 暂无通过项，先打开失败任务看错误。"}
                       </div>
                     </div>
                     <span className="rounded bg-sel px-2 py-1 font-mono text-[11px] text-ink-3">

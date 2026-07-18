@@ -616,18 +616,25 @@ export function SettingsModal({
   async function runProviderTaskTest(id: string) {
     if (providerTaskBusy[id]) return;
     setProviderTaskBusy((s) => ({ ...s, [id]: true }));
-    setProviderTaskTest((s) => ({ ...s, [id]: { text: "任务演练中…可能产生少量 token 消耗" } }));
+    setProviderTaskTest((s) => ({ ...s, [id]: { text: "质量基准运行中…隔离产出、强模型复核；24k billable 触线即暂停" } }));
     try {
       const r = await ws.runProviderTaskTest(id);
       const checks = [
         r.checks.delivered ? "交付" : "未交付",
         r.checks.tool_observed ? "工具" : "无工具",
-        r.checks.verified ? "验收" : "未验收",
+        r.checks.quality_contract ? "7项契约" : "契约缺失",
+        r.checks.independent_reviewer ? "独立复核" : "复核冲突",
+        r.checks.verdict_recorded ? "通过" : r.checks.pending_approval ? "待复核" : "未通过",
+        r.checks.source_trace_clean ? "来源可追溯" : "来源声明冲突",
+        r.checks.within_budget ? "预算内" : "已触线",
         r.checks.usage_tracked ? "用量" : "无用量",
       ].join(" / ");
       setProviderTaskTest((s) => ({
         ...s,
-        [id]: { text: `${r.ok ? "通过" : "未通过"} · ${r.task.status} · ${checks} · ${r.latency_ms}ms · ${formatTokenCount(r.usage_summary?.billable)} billable${formatEstimatedCost(r.usage_summary?.estimated_cost, r.usage_summary?.price_currency)}`, taskId: r.task.id },
+        [id]: {
+          text: `${r.run_status === "passed" ? "通过" : r.run_status === "pending_approval" ? "已产出初稿，等待预算审批" : "未通过"} · ${r.task.status} · ${checks} · ${r.latency_ms}ms · ${formatTokenCount(r.usage_summary?.billable)} billable${formatEstimatedCost(r.usage_summary?.estimated_cost, r.usage_summary?.price_currency)}`,
+          taskId: r.task.id,
+        },
       }));
     } catch (e: any) {
       setProviderTaskTest((s) => ({ ...s, [id]: { text: `失败：${String(e?.message ?? e).slice(0, 160)}` } }));
@@ -679,7 +686,7 @@ export function SettingsModal({
                   ? ` · ${p.price_currency || "USD"}/百万 输入 ${p.price_input_per_million || 0} 输出 ${p.price_output_per_million || 0}`
                   : ""}
                 {providerTest[p.id] ? ` · ${providerTest[p.id]}` : ""}
-                {providerTaskTest[p.id] ? ` · 任务演练：${providerTaskTest[p.id].text}` : ""}
+                {providerTaskTest[p.id] ? ` · 质量基准：${providerTaskTest[p.id].text}` : ""}
               </span>
               {providerTaskTest[p.id]?.taskId && (
                 <button
@@ -701,9 +708,9 @@ export function SettingsModal({
                 onClick={() => void runProviderTaskTest(p.id)}
                 disabled={Boolean(providerTaskBusy[p.id])}
                 className="rounded px-1.5 text-[12px] text-ink-2 hover:bg-sel hover:text-ink disabled:opacity-40"
-                title="创建一条诊断任务，验证工具调用、文档交付、验收和用量归因；会产生少量 token 消耗"
+                title="运行固定隔离业务题：轻量模型产出、强模型独立复核和自动返工；24k billable 触线暂停，单次请求可能小幅越界"
               >
-                {providerTaskBusy[p.id] ? "演练中…" : "任务演练"}
+                {providerTaskBusy[p.id] ? "基准中…" : "质量基准"}
               </button>
               <button
                 onClick={() => startEdit(p.id)}
@@ -831,8 +838,8 @@ export function SettingsModal({
       <label className="mt-2 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-2">
         <input className="mt-0.5" type="checkbox" checked={runTaskAfterSave} onChange={(e) => setRunTaskAfterSave(e.target.checked)} />
         <span>
-          保存后立即跑任务演练：创建一条诊断任务，验证工具调用、文档交付、验收和用量归因。
-          会产生少量 token 消耗，适合 DeepSeek / SiliconFlow / 百炼首次接入后直接闭环。
+          保存后立即跑质量基准：固定业务题由轻量模型产出、强模型独立复核并自动返工，
+          同时验证工具、来源追溯、交付、验收和用量；24k billable 触线暂停（单次请求可能小幅越界）。
         </span>
       </label>
       {error && <div className="mt-2 text-[12px] text-red-500">{error}</div>}
@@ -841,7 +848,7 @@ export function SettingsModal({
         disabled={!name.trim() || (!editingId && !apiKey.trim()) || busy}
         className="mt-4 w-full rounded-lg bg-accent py-2 text-[13.5px] font-medium text-white disabled:opacity-40"
       >
-        {busy ? "处理中…" : runTaskAfterSave ? "保存并跑任务演练" : editingId ? "保存修改" : "添加供应商"}
+        {busy ? "处理中…" : runTaskAfterSave ? "保存并跑质量基准" : editingId ? "保存修改" : "添加供应商"}
       </button>
 
       <ImageProviderSection />

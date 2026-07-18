@@ -105,11 +105,23 @@ export interface ProviderTestResult {
 
 export interface ProviderTaskTestResult {
   ok: boolean;
+  run_status: "passed" | "pending_approval" | "failed";
+  pending_approval_id: string | null;
   provider: Provider;
   model: string;
+  models: { worker: string; reviewer: string };
+  benchmark: {
+    id: string;
+    version: number;
+    rubric: string[];
+    budget_billable: number;
+    worker_model: string;
+    reviewer_model: string;
+  };
   latency_ms: number;
   task: Task;
   docs: Doc[];
+  verdicts: Verdict[];
   events: TaskEvent[];
   checks: {
     completed: boolean;
@@ -117,6 +129,12 @@ export interface ProviderTaskTestResult {
     tool_observed: boolean;
     verified: boolean;
     usage_tracked: boolean;
+    quality_contract: boolean;
+    independent_reviewer: boolean;
+    verdict_recorded: boolean;
+    within_budget: boolean;
+    source_trace_clean: boolean;
+    pending_approval: boolean;
   };
   usage_summary: {
     input: number;

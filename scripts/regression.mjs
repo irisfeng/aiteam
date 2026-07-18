@@ -131,6 +131,13 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
     worklineSource.includes("eventTypes.has(\"verification\")") &&
     worklineSource.includes("provider_task_test") &&
     worklineSource.includes("usage_tracked") &&
+    worklineSource.includes("quality_contract") &&
+    worklineSource.includes("independent_reviewer") &&
+    worklineSource.includes("verdict_recorded") &&
+    worklineSource.includes("within_budget") &&
+    worklineSource.includes("source_trace_clean") &&
+    worklineSource.includes("pending_approval") &&
+    worklineSource.includes("同构质量基准") &&
     worklineSource.includes("latency_ms") &&
     worklineSource.includes("usage_summary") &&
     worklineSource.includes("billable") &&
@@ -143,14 +150,18 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
   const providerSetupLoop =
     modalsSource.includes("SiliconFlow GLM") &&
     modalsSource.includes("百炼 DashScope") &&
-    modalsSource.includes("保存后立即跑任务演练") &&
+    modalsSource.includes("保存后立即跑质量基准") &&
     modalsSource.includes("runProviderTaskTest(saved.id)") &&
     modalsSource.includes("打开任务") &&
+    modalsSource.includes("7项契约") &&
+    modalsSource.includes("独立复核") &&
+    modalsSource.includes("24k billable 触线") &&
+    modalsSource.includes("来源可追溯") &&
     modalsSource.includes("usage_summary") &&
     modalsSource.includes("billable") &&
     modalsSource.includes("price_input_per_million") &&
     modalsSource.includes("estimated_cost");
-  check("UX4", "模型配置体验：DeepSeek/SiliconFlow/百炼预设可保存后直接跑任务演练并跳转任务详情",
+  check("UX4", "模型配置体验：国内供应商预设可保存后直接跑固定质量基准并跳转任务详情",
     providerSetupLoop,
     `providerSetupLoop=${providerSetupLoop}`);
   const taskReviewEvidencePanel =
@@ -1163,6 +1174,8 @@ server.once("error", (error) => { serverExit = { error: String(error) }; });
 server.once("exit", (code, signal) => { serverExit = { code, signal }; });
 let fakeOpenAiServer = null;
 let fakeOpenAiStreamHits = 0;
+const qualityBenchmarkWorkerRequests = [];
+const qualityBenchmarkVerifierRequests = [];
 const NETWORK_APPROVAL_MARKER = "NETWORK_APPROVAL_E2E";
 const NETWORK_PROBE_TOOL = "mcp__network_probe__search";
 const NETWORK_RECONNECT_MARKER = "NETWORK_RECONNECT_STOP_E2E";
@@ -1250,6 +1263,14 @@ fakeOpenAiServer = createServer((req, res) => {
     const messages = Array.isArray(body.messages) ? body.messages : [];
     const toolMessages = messages.filter((m) => m.role === "tool");
     const tools = Array.isArray(body.tools) ? body.tools.map((t) => t?.function?.name).filter(Boolean) : [];
+    const serializedMessages = JSON.stringify(messages);
+    const isQualityBenchmarkRequest = serializedMessages.includes("真实模型质量基准：AiTeam 产品落地决策简报");
+    if (isQualityBenchmarkRequest && tools.includes("write_document")) {
+      qualityBenchmarkWorkerRequests.push({ tools: [...tools], messages: serializedMessages });
+    }
+    if (isQualityBenchmarkRequest && tools.includes("submit_verdict")) {
+      qualityBenchmarkVerifierRequests.push({ tools: [...tools], messages: serializedMessages });
+    }
     const hasToolResult = toolMessages.length > 0;
     const isNetworkApprovalProbe =
       tools.includes(NETWORK_PROBE_TOOL) &&
@@ -1336,7 +1357,10 @@ fakeOpenAiServer = createServer((req, res) => {
       message = { role: "assistant", content: "Fake provider completed tool result follow-up." };
     }
     const respond = () => {
-      const usage = { prompt_tokens: 7, completion_tokens: 5, total_tokens: 12 };
+      const highUsage = String(body.model || "").includes("high-usage");
+      const usage = highUsage
+        ? { prompt_tokens: 22000, completion_tokens: 9000, total_tokens: 31000 }
+        : { prompt_tokens: 7, completion_tokens: 5, total_tokens: 12 };
       if (body.stream === true) {
         // 真流式路径：模拟国内 OpenAI 兼容通道的 SSE 分片（含 stream_options.include_usage 的末尾 usage 块）
         fakeOpenAiStreamHits++;
@@ -3414,17 +3438,81 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
         return false;
       }
     });
-    check("Q6", "模型供应商任务演练接口：配置页可验证工具调用→交付→验收→用量归因",
+    const benchmark = result.benchmark;
+    const workerProbe = qualityBenchmarkWorkerRequests.at(-1);
+    const verifierProbe = qualityBenchmarkVerifierRequests.at(-1);
+    const rubricItems = result.task?.acceptance_criteria
+      ?.split("\n")
+      .map((item) => item.trim())
+      .filter(Boolean) ?? [];
+    check("Q6", "模型供应商质量基准：轻量产出→独立强模型复核→预算内交付→用量归因",
       result.ok === true &&
+      result.run_status === "passed" &&
       result.task?.status === "review" &&
+      benchmark?.id === "executive-decision-brief-v1" &&
+      benchmark?.version === 2 &&
+      benchmark?.worker_model === "fake-chat-model" &&
+      benchmark?.reviewer_model === "fake-chat-model" &&
+      benchmark?.budget_billable === 24000 &&
+      Array.isArray(benchmark?.rubric) && benchmark.rubric.length === 7 &&
+      rubricItems.length === 7 &&
+      result.task?.reviewer_agent_id &&
+      result.task.reviewer_agent_id !== result.task.assignee_agent_id &&
+      result.task.budget_billable === 24000 &&
       result.docs?.some((d) => d.kind === "report" && d.content.includes("fake provider used write_document")) &&
       eventTypes.has("tool") &&
       eventTypes.has("delivery") &&
       eventTypes.has("verification") &&
       result.checks?.usage_tracked === true &&
+      result.checks?.quality_contract === true &&
+      result.checks?.independent_reviewer === true &&
+      result.checks?.verdict_recorded === true &&
+      result.checks?.within_budget === true &&
+      result.checks?.source_trace_clean === true &&
+      result.checks?.pending_approval === false &&
+      workerProbe?.tools.length === 1 && workerProbe.tools[0] === "write_document" &&
+      !workerProbe.messages.includes("频道任务看板") &&
+      !workerProbe.messages.includes("已启用的技能") &&
+      verifierProbe?.tools.length === 1 && verifierProbe.tools[0] === "submit_verdict" &&
+      !verifierProbe.messages.includes("频道任务看板") &&
+      !verifierProbe.messages.includes("已启用的技能") &&
+      Array.isArray(result.verdicts) && result.verdicts.at(-1)?.result === "pass" &&
       result.usage_summary?.estimated_cost > 0 &&
       Boolean(persistedResultEvent),
-      `ok=${result.ok} status=${result.task?.status} docs=${result.docs?.length ?? 0} events=${[...eventTypes].join(",")} usage=${result.checks?.usage_tracked} billable=${result.usage_summary?.billable} cost=${result.usage_summary?.estimated_cost} persisted=${Boolean(persistedResultEvent)}`);
+      `ok=${result.ok}/${result.run_status} benchmark=${benchmark?.id}@${benchmark?.version} rubric=${rubricItems.length} reviewer=${result.task?.reviewer_agent_id} docs=${result.docs?.length ?? 0} events=${[...eventTypes].join(",")} quality=${result.checks?.quality_contract}/${result.checks?.independent_reviewer}/${result.checks?.verdict_recorded}/${result.checks?.within_budget}/${result.checks?.source_trace_clean} isolated=${workerProbe?.tools?.join(",")}/${verifierProbe?.tools?.join(",")} usage=${result.checks?.usage_tracked} billable=${result.usage_summary?.billable} cost=${result.usage_summary?.estimated_cost} persisted=${Boolean(persistedResultEvent)}`);
+  }
+
+  {
+    const prov = (await J("/providers", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "回归超预算质量基准供应商",
+        api_key: "sk-local",
+        base_url: fakeOpenAiBase,
+        default_model: "fake-high-usage-model",
+        is_strong: true,
+      }),
+    })).body;
+    const result = (await J(`/providers/${prov.id}/task-test`, { method: "POST" })).body;
+    const taskEvents = result.task?.id ? (await J(`/tasks/${result.task.id}/events`)).body : [];
+    const eventTypes = new Set(taskEvents.map((event) => event.type));
+    const pendingBudgetApproval = db.listApprovals().find(
+      (approval) => approval.ref_id === result.task?.id && approval.kind === "budget" && approval.status === "pending",
+    );
+    await J(`/providers/${prov.id}`, { method: "DELETE" });
+    check(
+      "Q6B",
+      "质量基准预算触线：保留已生成交付物并标记等待审批，不把暂停误报成模型失败",
+      result.ok === false &&
+        result.run_status === "pending_approval" &&
+        result.task?.status === "blocked" &&
+        result.checks?.pending_approval === true &&
+        result.checks?.delivered === true &&
+        result.pending_approval_id === pendingBudgetApproval?.id &&
+        eventTypes.has("blocked") &&
+        !eventTypes.has("failure"),
+      `ok=${result.ok}/${result.run_status} task=${result.task?.status} delivered=${result.checks?.delivered} approval=${result.pending_approval_id}/${pendingBudgetApproval?.id} events=${[...eventTypes].join(",")}`,
+    );
   }
 
   {

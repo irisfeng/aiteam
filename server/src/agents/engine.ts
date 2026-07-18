@@ -1089,6 +1089,63 @@ function finishRevokedTaskExecution(task: Task, channel: Channel, agent: Agent):
   return true;
 }
 
+const PROVIDER_QUALITY_BENCHMARK_PREFIX = "真实模型质量基准：AiTeam 产品落地决策简报";
+
+export function isProviderQualityBenchmarkTask(task: Task): boolean {
+  return task.title.startsWith(PROVIDER_QUALITY_BENCHMARK_PREFIX);
+}
+
+function providerQualityBenchmarkTools(): Anthropic.ToolUnion[] {
+  const writeDocument = TOOLS.find((tool) => "name" in tool && tool.name === "write_document");
+  return writeDocument ? [writeDocument] : [];
+}
+
+function buildProviderQualityBenchmarkBrief(task: Task): string {
+  return [
+    "你正在完成 AiTeam 的固定、隔离质量基准。以下内容就是全部可信输入，不需要也不允许读取工作区其他文档、技能、记忆或联网资料。",
+    "",
+    `任务：${task.title}`,
+    `详情：${task.description || "（无）"}`,
+    task.acceptance_criteria ? `验收标准：\n${task.acceptance_criteria}` : "",
+    "",
+    "可作为事实使用的内部证据仅限：",
+    "- 本任务由人类发起并带有结构化简报与验收标准；",
+    "- 执行者已通过 claim 事件认领，过程工具调用会写入 task_events；",
+    "- 任务显式指定独立 reviewer，未通过会由引擎触发返工；",
+    "- 最终关单由人类确认。",
+    "- Helio 只作为交互机制的灵感来源；本基准没有提供任何 Helio 或市场事实，禁止写竞品能力、融资、用户、市场规模等外部主张。",
+    "",
+    "输出约束：",
+    "1. 写成 2200–3800 字的中文创始人决策简报，结论先行、信息密度高，拒绝堆篇幅。",
+    "2. 计划和指标可以作为待验证的决策阈值，但必须明确标为“建议阈值”，不能伪装成已有数据。",
+    "3. “来源与假设”章节必须明确写：本次未使用外部资料，内部事实来自任务简报与运行事件；不得声称调用过 web_search、web_fetch、MCP 或任何未提供工具。",
+    "4. 只调用一次 write_document，kind=report，把完整正文放入文档；不要在工具调用前后输出长篇正文。",
+    "5. 文末逐条自查七项验收标准，不能用“已满足”代替正文证据位置。",
+  ].filter(Boolean).join("\n");
+}
+
+function buildProviderQualityBenchmarkReworkBrief(task: Task, feedback: string): string {
+  const current = listDocuments().find((doc) => doc.task_id === task.id && doc.kind === "report");
+  return [
+    "固定质量基准的上一版未通过独立复核。请依据复核意见重写完整报告，并再次只调用一次 write_document 交付。",
+    task.acceptance_criteria ? `验收标准：\n${task.acceptance_criteria}` : "",
+    `复核意见：\n${feedback}`,
+    current ? `上一版全文（只用于修订，不代表其中事实可信）：\n<previous>\n${current.content.slice(0, 12000)}\n</previous>` : "",
+    "仍须遵守：不得补造外部事实、来源或工具调用；没有外部资料就明确写未使用，并把数字写成建议阈值。",
+  ].filter(Boolean).join("\n\n");
+}
+
+function pauseTaskAfterWorkIfBudgetReached(agent: Agent, taskId: string): boolean {
+  const live = getTask(taskId);
+  if (!live || live.status !== "doing") return live?.status === "blocked";
+  const budget = live.budget_billable > 0 ? live.budget_billable : Number(process.env.AITEAM_TASK_TOKEN_BUDGET ?? 0);
+  if (budget <= 0) return false;
+  const spent = taskSpentBillable(live);
+  if (spent < budget) return false;
+  requestBudgetPauseForTask(agent, live, spent, budget);
+  return true;
+}
+
 async function runTaskWork(agent: Agent, taskId: string) {
   let task = getTask(taskId);
   if (!task) return;
@@ -1134,14 +1191,29 @@ async function runTaskWork(agent: Agent, taskId: string) {
 
   let feedback: string | null = null; // 上一轮验收意见（返工时注入）
   let lastDocIds: string[] = [];
+  const qualityBenchmark = isProviderQualityBenchmarkTask(task);
 
   for (let attempt = 0; attempt <= MAX_REVISIONS; attempt++) {
     const ctx = newCtx(agent, channel, "work", task.id);
-    const prompt = feedback ? buildReworkBrief(task, channel, feedback) : buildWorkBrief(task, channel);
-    await streamRun(ctx, prompt, MAX_WORK_ITERATIONS, 0, { tier: task.model_tier === "light" ? "light" : "standard" });
+    const prompt = qualityBenchmark
+      ? feedback
+        ? buildProviderQualityBenchmarkReworkBrief(task, feedback)
+        : buildProviderQualityBenchmarkBrief(task)
+      : feedback
+        ? buildReworkBrief(task, channel, feedback)
+        : buildWorkBrief(task, channel);
+    await streamRun(ctx, prompt, qualityBenchmark ? 1 : MAX_WORK_ITERATIONS, 0, {
+      tier: task.model_tier === "light" ? "light" : "standard",
+      ...(qualityBenchmark
+        ? { toolsOverride: providerQualityBenchmarkTools(), contextMode: "isolated" as const, maxTokens: 6000 }
+        : {}),
+    });
     lastDocIds = ctx.createdDocIds.length > 0 ? ctx.createdDocIds : lastDocIds;
     const afterRun = getTask(task.id);
     if (ctx.halted === "blocked" || afterRun?.status === "blocked") return;
+    // 迭代末也要检查：单轮直接 write_document 后不会再进入下一次 llmLoop 边界，
+    // 若不在这里补查，“24k 触线暂停”会被最后一轮静默穿透并继续花 reviewer 费用。
+    if (pauseTaskAfterWorkIfBudgetReached(agent, task.id)) return;
 
     if (finishStoppedTask(task, channel, agent)) return;
     if (finishRevokedTaskExecution(task, channel, agent) || ctx.halted === "stopped") return;
@@ -1377,6 +1449,17 @@ async function runVerification(
   // 多交付物全核验（D1）：report+slides+sheet 组合交付时，其余当前版一并注入（此前只核主文档，
   // 副交付物是免检通道）。主文档给大头预算，其余按剩余预算截断注入。
   const extraDocs = taskDocs.filter((d) => d.id !== doc.id);
+  const observedTools = Array.from(new Set(listTaskEvents(task.id)
+    .filter((event) => event.type === "tool")
+    .map((event) => {
+      try {
+        const meta = JSON.parse(event.metadata_json || "{}") as { tool?: unknown };
+        return typeof meta.tool === "string" ? meta.tool : "";
+      } catch {
+        return "";
+      }
+    })
+    .filter(Boolean)));
 
   // 显式 reviewer 优先；未指定时按交付物类型选对口校验者。
   const verifier = resolveTaskReviewer(task, others, doc.kind, worker);
@@ -1416,6 +1499,7 @@ async function runVerification(
       `</deliverable>`,
     ]),
     renderInfo,
+    `本任务真实工具事件：${observedTools.length > 0 ? observedTools.join(", ") : "无"}。这是审计账本；交付物若声称使用了清单外的检索、插件或工具，必须判 revise。`,
     ``,
     `核验时另须执行（不可放水）：`,
     `· 量化主张须有来源：正文中市场规模 / 占比 / 金额 / ROI 等关键数字，若无来源标注且未标"示意值/待核实"，判 revise 并逐条点名（C3）；`,
@@ -1443,12 +1527,16 @@ async function runVerification(
         required: ["result", "reasons"],
       },
     },
-    TOOLS.find((t) => "name" in t && t.name === "read_document")!,
   ];
 
   const ctx = newCtx(verifier, channel, "verify", task.id);
   // 验收是质量闭环的下限：官方通道可用时强制走最强模型
-  await streamRun(ctx, prompt, 3, 0, { toolsOverride: verifierTools, preferStrong: true });
+  await streamRun(ctx, prompt, 1, 0, {
+    toolsOverride: verifierTools,
+    preferStrong: true,
+    contextMode: "isolated",
+    maxTokens: 2000,
+  });
   if (!ctx.verdict) {
     // 不结构化裁决不能默认通过——强约束重试一轮，明确要求只能用 submit_verdict 收尾
     const retryPrompt = [
@@ -1463,7 +1551,12 @@ async function runVerification(
       `</deliverable>`,
       `逐条核验后立即调用 submit_verdict（result: pass 或 revise，reasons 给理由 / 修订意见）。`,
     ].join("\n");
-    await streamRun(ctx, retryPrompt, 3, 0, { toolsOverride: verifierTools, preferStrong: true });
+    await streamRun(ctx, retryPrompt, 1, 0, {
+      toolsOverride: verifierTools,
+      preferStrong: true,
+      contextMode: "isolated",
+      maxTokens: 2000,
+    });
   }
   if (!ctx.verdict) {
     // 两轮仍无结构化裁决：fail-closed，退回返工兜住，绝不放水（质量下限关键修复）
@@ -2532,6 +2625,10 @@ function status(agent: Agent, channelId: string, state: "thinking" | "tool" | "r
 interface StreamRunOpts extends RuntimeOpts {
   extraSystem?: string;
   toolsOverride?: Anthropic.ToolUnion[];
+  /** fixed benchmark / verification runs must not inherit workspace chatter, docs or skill indexes */
+  contextMode?: "full" | "isolated";
+  /** clamp a single response so a small task budget cannot be overshot by a 16k completion */
+  maxTokens?: number;
 }
 
 async function streamRun(
@@ -2561,11 +2658,14 @@ async function streamRun(
 
   try {
     let usage = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 };
-    const rt = resolveRuntime(agent, opts);
+    const resolvedRuntime = resolveRuntime(agent, opts);
+    const rt = opts.maxTokens
+      ? { ...resolvedRuntime, maxTokens: Math.min(resolvedRuntime.maxTokens, Math.max(1, Math.round(opts.maxTokens))) }
+      : resolvedRuntime;
     if (!rt.client) {
       await mockRun(ctx, emit);
     } else {
-      usage = await llmLoop(ctx, rt, userPrompt, maxIterations, emit, opts.extraSystem, opts.toolsOverride);
+      usage = await llmLoop(ctx, rt, userPrompt, maxIterations, emit, opts.extraSystem, opts.toolsOverride, opts.contextMode);
     }
     const usageJson = JSON.stringify(usage);
     updateMessage(row.id, { content, status: "complete", usage_json: usageJson, model: rt.client ? rt.model : "mock" });
@@ -2595,7 +2695,8 @@ async function llmLoop(
   maxIterations: number,
   emit: (delta: string) => void,
   extraSystem?: string,
-  toolsOverride?: Anthropic.ToolUnion[]
+  toolsOverride?: Anthropic.ToolUnion[],
+  contextMode: "full" | "isolated" = "full"
 ): Promise<{ input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_creation_tokens: number }> {
   const client = rt.client;
   if (!client) throw new Error("no client");
@@ -2603,7 +2704,14 @@ async function llmLoop(
 
   // 能力门控：服务端 web 工具按通道可用性；提示缓存仅官方 Anthropic API 启用
   // 用本次工作焦点（任务简报 / 用户消息）做技能相关性筛选——只注入相关专项方法
-  let dynamicCtx = buildDynamicContext(agent, channel, userPrompt);
+  const isolated = contextMode === "isolated" || ctx.kind === "verify";
+  let dynamicCtx = isolated
+    ? [
+        "## 隔离运行",
+        "本次只允许依据用户提示中明确给出的任务、验收标准、交付物与运行证据判断；不要读取或借用工作区闲聊、其他文档、长期记忆或技能索引。",
+        "不得声称调用过未实际提供的工具，不得把模型常识包装成已检索事实；缺少来源时明确写为假设或不使用该主张。",
+      ].join("\n")
+    : buildDynamicContext(agent, channel, userPrompt);
   if (!rt.webTools) dynamicCtx += `\n\n注意：当前模型通道不支持 web_search/web_fetch 联网调研，依据已有上下文与常识工作，不确定的事实要明确说明未经核实。`;
   // 验收去人设：verify 运行用固定校验者指令替换同事人设（选人仍对口路由，判准统一不漂移）
   const personaPrompt = ctx.kind === "verify" ? VERIFIER_SYSTEM_PROMPT : agent.system_prompt;

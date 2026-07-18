@@ -120,6 +120,50 @@ async function waitForProviderTask(taskId: string, timeoutMs = 60000) {
   return { task: getTask(taskId), events: listTaskEvents(taskId), done: false };
 }
 
+const PROVIDER_QUALITY_BENCHMARK = {
+  id: "executive-decision-brief-v1",
+  version: 2,
+  title: "真实模型质量基准：AiTeam 产品落地决策简报",
+  budgetBillable: 24_000,
+  description: [
+    "你是 AiTeam 的产品负责人，请仅依据本任务提供的上下文，为创始人写一份可直接用于决策的产品落地简报。",
+    "背景：AiTeam 借鉴 Helio 的低门槛协作体验，但核心差异是任务简报、AI 认领、过程留痕、独立复核、自动返工与人类关单。",
+    "目标：给出未来 14 天把这一核心工作流推向首批真实用户测试的最小落地方案。不得虚构市场数据、客户反馈或已经完成的事实。",
+  ].join("\n"),
+  rubric: [
+    "1. 开头必须给出不超过 120 字的明确结论与推荐决策。",
+    "2. 必须说明目标用户、核心待办和当前产品边界，不得泛泛罗列 AI 功能。",
+    "3. 必须用一张表完整映射 goal→brief→claim→work→review→revise→human close，并标明每步责任人和可验证证据。",
+    "4. 必须给出按优先级排序的 14 天计划，包含阶段目标、负责人、退出条件和可量化验收指标。",
+    "5. 必须列出至少 3 个关键风险/依赖，每项给出缓解动作和停止条件。",
+    "6. 所有外部事实、数字和能力声明必须给出可访问 URL 或任务内证据；没有来源时必须明确标注为假设或待验证，且不得声称使用过审计日志中不存在的工具。",
+    "7. 文末必须附逐条自查表，按本验收标准标注满足/不满足及正文证据位置。",
+  ],
+} as const;
+
+function providerBenchmarkSourceTrace(events: ReturnType<typeof listTaskEvents>, docs: ReturnType<typeof listDocuments>) {
+  const observedTools = new Set(events
+    .filter((event) => event.type === "tool")
+    .map((event) => {
+      try {
+        const meta = JSON.parse(event.metadata_json || "{}") as { tool?: unknown };
+        return typeof meta.tool === "string" ? meta.tool : "";
+      } catch {
+        return "";
+      }
+    })
+    .filter(Boolean));
+  const combined = docs.map((doc) => doc.content).join("\n");
+  const claimPatterns: Array<[string, RegExp]> = [
+    ["web_search", /(?:来源|通过|使用|调用|检索)[^。\n]{0,40}\bweb_search\b|\bweb_search\b[^。\n]{0,40}(?:来源|检索|调用|获得)/i],
+    ["web_fetch", /(?:来源|通过|使用|调用|抓取)[^。\n]{0,40}\bweb_fetch\b|\bweb_fetch\b[^。\n]{0,40}(?:来源|抓取|调用|获得)/i],
+  ];
+  const unobservedClaims = claimPatterns
+    .filter(([tool, pattern]) => pattern.test(combined) && !observedTools.has(tool))
+    .map(([tool]) => tool);
+  return { clean: unobservedClaims.length === 0, observed_tools: [...observedTools], unobserved_claims: unobservedClaims };
+}
+
 function emitTaskEvent(input: Parameters<typeof createTaskEvent>[0]) {
   const event = createTaskEvent(input);
   broadcast({ type: "task:event", payload: event });
@@ -709,8 +753,9 @@ api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
     const provider = getProvider(req.params.id);
     if (!provider) return res.status(404).json({ error: "provider not found" });
     if (!provider.api_key) return res.status(400).json({ error: "provider api key is missing" });
-    const model = provider.default_model || provider.light_model;
-    if (!model) return res.status(400).json({ error: "provider default model is missing" });
+    const workerModel = provider.light_model || provider.default_model;
+    const reviewerModel = provider.default_model || workerModel;
+    if (!workerModel) return res.status(400).json({ error: "provider default model is missing" });
 
     let channel = req.body?.channel_id ? getChannel(String(req.body.channel_id)) : undefined;
     channel = channel ?? listChannels().find((c) => c.kind === "channel");
@@ -719,22 +764,36 @@ api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
       broadcast({ type: "channel:new", payload: channel });
     }
 
-    const agentName = `模型演练-${provider.name}`.slice(0, 40);
+    const agentName = `质量基准v2-${provider.name}-${workerModel}`.slice(0, 40);
     let agent = listAgents().find((a) => a.provider_id === provider.id && a.name === agentName);
     if (!agent) {
       agent = createAgent({
         name: agentName,
         emoji: "🧪",
-        role: "模型供应商任务演练",
+        role: "真实交付物基准执行",
         system_prompt:
-          "你是 AiTeam 的模型供应商任务演练同事。收到任务后必须使用 write_document 写入一份 report 交付物，内容应包含：模型通道、工具调用、验收自查。不要只在聊天里回答。",
+          "你负责完成 AiTeam 的固定质量基准。必须严格按任务简报与七项验收标准写一份可用于真实决策的 report，并使用 write_document 交付；不得只在聊天里回答，不得编造事实或省略逐条自查表。",
         provider_id: provider.id,
-        model,
+        model: workerModel,
       });
     }
 
-    if (!channel.agent_ids?.includes(agent.id)) {
-      channel = setChannelAgents(channel.id, Array.from(new Set([...(channel.agent_ids ?? []), agent.id]))) ?? channel;
+    const reviewerName = `质量复核v2-${provider.name}-${reviewerModel}`.slice(0, 40);
+    let reviewer = listAgents().find((a) => a.provider_id === provider.id && a.name === reviewerName);
+    if (!reviewer) {
+      reviewer = createAgent({
+        name: reviewerName,
+        emoji: "🔎",
+        role: "真实交付物独立复核",
+        system_prompt:
+          "你是严格、独立的交付质量复核人。逐条核对任务的七项验收标准；任何缺失、空泛、无证据能力声明或伪造数字都必须 submit_verdict=revise，并给出可执行的逐项返工意见。只有全部标准均有正文证据时才允许 pass。",
+        provider_id: provider.id,
+        model: reviewerModel,
+      });
+    }
+
+    if (!channel.agent_ids?.includes(agent.id) || !channel.agent_ids?.includes(reviewer.id)) {
+      channel = setChannelAgents(channel.id, Array.from(new Set([...(channel.agent_ids ?? []), agent.id, reviewer.id]))) ?? channel;
       broadcast({ type: "channel:update", payload: channel });
     }
     const projectId = req.body?.project_id ? getProject(String(req.body.project_id))?.id ?? null : null;
@@ -742,11 +801,13 @@ api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
     const task = createTask({
       channel_id: channel.id,
       project_id: projectId,
-      title: `模型任务演练：${provider.name}`,
-      description: "验证该模型供应商能否在 AiTeam 任务运行线中完成工具调用、工具结果续写、文档交付和验收。",
-      acceptance_criteria: "必须通过 write_document 写入 report 交付物，并进入待评审；活动日志应包含 tool、delivery、verification。",
+      title: `${PROVIDER_QUALITY_BENCHMARK.title}（${provider.name}）`,
+      description: PROVIDER_QUALITY_BENCHMARK.description,
+      acceptance_criteria: PROVIDER_QUALITY_BENCHMARK.rubric.join("\n"),
       assignee_agent_id: agent.id,
-      reviewer_agent_id: null,
+      reviewer_agent_id: reviewer.id,
+      model_tier: provider.light_model ? "light" : "standard",
+      budget_billable: PROVIDER_QUALITY_BENCHMARK.budgetBillable,
       created_by: "user",
     });
     emitTaskEvent({
@@ -755,8 +816,17 @@ api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
       project_id: task.project_id,
       agent_id: agent.id,
       type: "created",
-      summary: "用户启动模型供应商任务演练",
-      metadata: { provider_id: provider.id, model, link_check: Boolean(projectId) },
+      summary: "用户启动真实模型质量基准",
+      metadata: {
+        provider_id: provider.id,
+        model: workerModel,
+        reviewer_model: reviewerModel,
+        benchmark_id: PROVIDER_QUALITY_BENCHMARK.id,
+        benchmark_version: PROVIDER_QUALITY_BENCHMARK.version,
+        rubric_count: PROVIDER_QUALITY_BENCHMARK.rubric.length,
+        budget_billable: PROVIDER_QUALITY_BENCHMARK.budgetBillable,
+        link_check: Boolean(projectId),
+      },
     });
     emitTaskEvent({
       task_id: task.id,
@@ -764,28 +834,28 @@ api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
       project_id: task.project_id,
       agent_id: agent.id,
       type: "claim",
-      summary: `${agent.name} 接手模型供应商任务演练`,
-      metadata: { provider_id: provider.id, model },
+      summary: `${agent.name} 接手真实模型质量基准`,
+      metadata: { provider_id: provider.id, model: workerModel, reviewer_id: reviewer.id, reviewer_model: reviewerModel },
     });
     broadcast({ type: "task:upsert", payload: task });
 
     const startedAt = Date.now();
     onTaskAssigned(task);
-    const { task: finalTask, events, done } = await waitForProviderTask(task.id, 60000);
+    const { task: finalTask, events, done } = await waitForProviderTask(task.id, 180000);
     const docs = listDocuments().filter((d) => d.task_id === task.id);
+    const verdicts = listVerdictsForTask(task.id);
     const eventTypes = new Set(events.map((e) => e.type));
-    const delivered = finalTask?.status === "review" && docs.length > 0;
+    const pendingApproval = finalTask?.blocked_approval_id ? getApproval(finalTask.blocked_approval_id) : undefined;
+    const pendingBudgetApproval = Boolean(
+      finalTask?.status === "blocked" && pendingApproval?.kind === "budget" && pendingApproval.status === "pending",
+    );
+    const delivered = docs.length > 0 && eventTypes.has("delivery");
     const toolObserved = eventTypes.has("tool");
-    const verified = eventTypes.has("verification");
-    const usageRows = usageRecent(40).filter((r) => r.author_id === agent.id && r.model === model && r.created_at >= startedAt);
-    const usageTracked = usageRows.length > 0;
-    const usageSummary = usageRows.reduce((acc, row) => {
-      const usage = readUsage(row.usage_json);
-      acc.input += usage.promptTotal;
-      acc.output += usage.output;
-      acc.billable += usage.billable;
-      return acc;
-    }, { input: 0, output: 0, billable: 0 });
+    const verified = verdicts.length > 0;
+    // 任务累计用量是工作、返工与复核的唯一归因账本；按 agent/model/time 扫消息会把并发基准串账。
+    const taskUsage = readUsage(finalTask?.usage_json ?? task.usage_json);
+    const usageSummary = { input: taskUsage.promptTotal, output: taskUsage.output, billable: taskUsage.billable };
+    const usageTracked = usageSummary.billable > 0;
     const estimatedCost =
       provider.price_input_per_million > 0 || provider.price_output_per_million > 0
         ? (usageSummary.input * provider.price_input_per_million + usageSummary.output * provider.price_output_per_million) / 1_000_000
@@ -796,31 +866,74 @@ api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
       price_currency: provider.price_currency || "USD",
     };
     const latencyMs = Date.now() - startedAt;
+    const qualityContract = task.acceptance_criteria === PROVIDER_QUALITY_BENCHMARK.rubric.join("\n");
+    const independentReviewer = Boolean(task.reviewer_agent_id && task.reviewer_agent_id !== task.assignee_agent_id);
+    const verdictRecorded = verdicts.length > 0 && verdicts.at(-1)?.result === "pass";
+    const withinBudget = usageSummary.billable <= PROVIDER_QUALITY_BENCHMARK.budgetBillable;
+    const sourceTrace = providerBenchmarkSourceTrace(events, docs);
     const checks = {
-      completed: done,
+      completed: done && !pendingBudgetApproval,
       delivered,
       tool_observed: toolObserved,
       verified,
       usage_tracked: usageTracked,
+      quality_contract: qualityContract,
+      independent_reviewer: independentReviewer,
+      verdict_recorded: verdictRecorded,
+      within_budget: withinBudget,
+      source_trace_clean: sourceTrace.clean,
+      pending_approval: pendingBudgetApproval,
     };
-    const ok = delivered && toolObserved && verified && usageTracked;
+    const ok = delivered && toolObserved && verified && usageTracked && qualityContract && independentReviewer && verdictRecorded && withinBudget && sourceTrace.clean;
+    const runStatus = ok ? "passed" : pendingBudgetApproval ? "pending_approval" : "failed";
+    const benchmark = {
+      id: PROVIDER_QUALITY_BENCHMARK.id,
+      version: PROVIDER_QUALITY_BENCHMARK.version,
+      rubric: [...PROVIDER_QUALITY_BENCHMARK.rubric],
+      budget_billable: PROVIDER_QUALITY_BENCHMARK.budgetBillable,
+      worker_model: workerModel,
+      reviewer_model: reviewerModel,
+    };
     const resultEvent = emitTaskEvent({
       task_id: task.id,
       channel_id: task.channel_id,
       project_id: task.project_id,
       agent_id: agent.id,
-      type: ok ? "verification" : "failure",
-      summary: ok ? "模型供应商任务演练通过" : "模型供应商任务演练未通过",
-      metadata: { provider_id: provider.id, model, latency_ms: latencyMs, checks, usage_summary: usageSummaryWithCost, provider_task_test: true },
+      type: ok ? "verification" : pendingBudgetApproval ? "blocked" : "failure",
+      summary: ok
+        ? "真实模型质量基准通过"
+        : pendingBudgetApproval
+          ? "真实模型质量基准已产出初稿，等待用户决定是否追加预算完成独立复核"
+          : "真实模型质量基准未通过",
+      metadata: {
+        provider_id: provider.id,
+        model: workerModel,
+        reviewer_model: reviewerModel,
+        latency_ms: latencyMs,
+        checks,
+        usage_summary: usageSummaryWithCost,
+        provider_task_test: true,
+        run_status: runStatus,
+        source_trace: sourceTrace,
+        quality_benchmark: benchmark,
+        verdict_summary: verdicts.at(-1)
+          ? { result: verdicts.at(-1)?.result, reasons: verdicts.at(-1)?.reasons.slice(0, 1000), attempts: verdicts.length }
+          : null,
+      },
     });
 
     res.json({
       ok,
+      run_status: runStatus,
+      pending_approval_id: pendingBudgetApproval ? pendingApproval?.id ?? null : null,
       provider: sanitizeProvider(provider),
-      model,
+      model: workerModel,
+      models: { worker: workerModel, reviewer: reviewerModel },
+      benchmark,
       latency_ms: latencyMs,
       task: finalTask ?? task,
       docs,
+      verdicts,
       events: [...events, resultEvent],
       checks,
       usage_summary: usageSummaryWithCost,
