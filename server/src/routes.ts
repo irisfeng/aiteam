@@ -82,6 +82,7 @@ import { slidesToPptx } from "./pptx.js";
 import { MCP_REGISTRY, SKILL_PACK_REGISTRY } from "./registry.js";
 import { DEFAULT_IMAGE_BASE_URL, generateImageBytes } from "./agents/images.js";
 import {
+  assessProviderQualityBenchmarkDocument,
   isMock,
   onMessage,
   onBudgetResolved,
@@ -122,7 +123,7 @@ async function waitForProviderTask(taskId: string, timeoutMs = 60000) {
 
 const PROVIDER_QUALITY_BENCHMARK = {
   id: "executive-decision-brief-v1",
-  version: 2,
+  version: 3,
   title: "真实模型质量基准：AiTeam 产品落地决策简报",
   budgetBillable: 24_000,
   description: [
@@ -154,12 +155,23 @@ function providerBenchmarkSourceTrace(events: ReturnType<typeof listTaskEvents>,
     })
     .filter(Boolean));
   const combined = docs.map((doc) => doc.content).join("\n");
-  const claimPatterns: Array<[string, RegExp]> = [
-    ["web_search", /(?:来源|通过|使用|调用|检索)[^。\n]{0,40}\bweb_search\b|\bweb_search\b[^。\n]{0,40}(?:来源|检索|调用|获得)/i],
-    ["web_fetch", /(?:来源|通过|使用|调用|抓取)[^。\n]{0,40}\bweb_fetch\b|\bweb_fetch\b[^。\n]{0,40}(?:来源|抓取|调用|获得)/i],
+  const claimPatterns: Array<[string, RegExp, RegExp]> = [
+    [
+      "web_search",
+      /(?:来源|通过|使用|调用|检索)[^。！？\n]{0,40}\bweb_search\b|\bweb_search\b[^。！？\n]{0,40}(?:来源|检索|调用|获得)/i,
+      /(?:没有|未|不得|禁止|不曾|无需)[^。！？\n]{0,16}(?:使用|调用|检索)?[^。！？\n]{0,8}\bweb_search\b/i,
+    ],
+    [
+      "web_fetch",
+      /(?:来源|通过|使用|调用|抓取)[^。！？\n]{0,40}\bweb_fetch\b|\bweb_fetch\b[^。！？\n]{0,40}(?:来源|抓取|调用|获得)/i,
+      /(?:没有|未|不得|禁止|不曾|无需)[^。！？\n]{0,16}(?:使用|调用|抓取)?[^。！？\n]{0,8}\bweb_fetch\b/i,
+    ],
   ];
+  const sentences = combined.split(/(?<=[。！？\n])/).map((sentence) => sentence.trim()).filter(Boolean);
   const unobservedClaims = claimPatterns
-    .filter(([tool, pattern]) => pattern.test(combined) && !observedTools.has(tool))
+    .filter(([tool, positive, negative]) =>
+      !observedTools.has(tool) && sentences.some((sentence) => positive.test(sentence) && !negative.test(sentence)),
+    )
     .map(([tool]) => tool);
   return { clean: unobservedClaims.length === 0, observed_tools: [...observedTools], unobserved_claims: unobservedClaims };
 }
@@ -764,7 +776,7 @@ api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
       broadcast({ type: "channel:new", payload: channel });
     }
 
-    const agentName = `质量基准v2-${provider.name}-${workerModel}`.slice(0, 40);
+    const agentName = `质量基准v3-${provider.name}-${workerModel}`.slice(0, 40);
     let agent = listAgents().find((a) => a.provider_id === provider.id && a.name === agentName);
     if (!agent) {
       agent = createAgent({
@@ -778,7 +790,7 @@ api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
       });
     }
 
-    const reviewerName = `质量复核v2-${provider.name}-${reviewerModel}`.slice(0, 40);
+    const reviewerName = `质量复核v3-${provider.name}-${reviewerModel}`.slice(0, 40);
     let reviewer = listAgents().find((a) => a.provider_id === provider.id && a.name === reviewerName);
     if (!reviewer) {
       reviewer = createAgent({
@@ -871,6 +883,10 @@ api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
     const verdictRecorded = verdicts.length > 0 && verdicts.at(-1)?.result === "pass";
     const withinBudget = usageSummary.billable <= PROVIDER_QUALITY_BENCHMARK.budgetBillable;
     const sourceTrace = providerBenchmarkSourceTrace(events, docs);
+    const benchmarkReport = docs.find((doc) => doc.kind === "report");
+    const documentContract = benchmarkReport
+      ? assessProviderQualityBenchmarkDocument(benchmarkReport.content)
+      : { pass: false, gaps: ["没有 report 交付物"] };
     const checks = {
       completed: done && !pendingBudgetApproval,
       delivered,
@@ -882,9 +898,10 @@ api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
       verdict_recorded: verdictRecorded,
       within_budget: withinBudget,
       source_trace_clean: sourceTrace.clean,
+      document_contract: documentContract.pass,
       pending_approval: pendingBudgetApproval,
     };
-    const ok = delivered && toolObserved && verified && usageTracked && qualityContract && independentReviewer && verdictRecorded && withinBudget && sourceTrace.clean;
+    const ok = delivered && toolObserved && verified && usageTracked && qualityContract && independentReviewer && verdictRecorded && withinBudget && sourceTrace.clean && documentContract.pass;
     const runStatus = ok ? "passed" : pendingBudgetApproval ? "pending_approval" : "failed";
     const benchmark = {
       id: PROVIDER_QUALITY_BENCHMARK.id,
@@ -915,6 +932,7 @@ api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
         provider_task_test: true,
         run_status: runStatus,
         source_trace: sourceTrace,
+        document_contract: documentContract,
         quality_benchmark: benchmark,
         verdict_summary: verdicts.at(-1)
           ? { result: verdicts.at(-1)?.result, reasons: verdicts.at(-1)?.reasons.slice(0, 1000), attempts: verdicts.length }

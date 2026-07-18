@@ -364,6 +364,7 @@ export function WorklineOverview({
     const verified = eventTypes.has("verification");
     const usageTracked = typeof resultChecks?.usage_tracked === "boolean" ? resultChecks.usage_tracked : null;
     const qualityContract = resultChecks?.quality_contract === true || benchmarkMeta?.rubric_count === 7;
+    const documentContract = resultChecks?.document_contract === true;
     const independentReviewer = resultChecks?.independent_reviewer === true || Boolean(task.reviewer_agent_id && task.reviewer_agent_id !== task.assignee_agent_id);
     const verdictRecorded = resultChecks?.verdict_recorded === true || verdictMeta?.result === "pass";
     const withinBudget = resultChecks?.within_budget === true || (task.budget_billable > 0 && liveBillable <= task.budget_billable);
@@ -386,7 +387,7 @@ export function WorklineOverview({
           : task.title;
     const detail =
       isProvider && model
-        ? `${model}${latency}${billable}${estimatedCost} · ${delivered ? "交付" : "未交付"} / ${toolObserved ? "工具" : "无工具"} / ${qualityContract ? "7项契约" : "契约缺失"} / ${independentReviewer ? "独立复核" : "复核冲突"} / ${verdictRecorded ? "pass" : pendingApproval ? "待复核" : verified ? "未通过" : "未验收"} / ${sourceTraceClean ? "来源可追溯" : "来源冲突"} / ${pendingApproval ? "复核预算待批" : withinBudget ? "预算内" : "已触线"} / ${usageTracked === null ? "用量未知" : usageTracked ? "用量" : "无用量"}`
+        ? `${model}${latency}${billable}${estimatedCost} · ${delivered ? "交付" : "未交付"} / ${toolObserved ? "工具" : "无工具"} / ${qualityContract ? "7项契约" : "契约缺失"} / ${documentContract ? "机器预检" : "结构缺项"} / ${independentReviewer ? "独立复核" : "复核冲突"} / ${verdictRecorded ? "pass" : pendingApproval ? "待复核" : verified ? "未通过" : "未验收"} / ${sourceTraceClean ? "来源可追溯" : "来源冲突"} / ${pendingApproval ? "复核预算待批" : withinBudget ? "预算内" : "已触线"} / ${usageTracked === null ? "用量未知" : usageTracked ? "用量" : "无用量"}`
         : task.status === "review" || task.status === "done"
           ? `${task.status} · 已有可复核交付证据`
         : task.status === "blocked"
@@ -539,7 +540,7 @@ export function WorklineOverview({
               id: `provider:${provider.id}`,
               label: `模型 · ${provider.name}`,
               status: out.run_status === "passed" ? "passed" : out.run_status === "pending_approval" ? "waiting" : "failed",
-              detail: `${out.models.worker}→${out.models.reviewer} · ${Math.round(out.latency_ms)}ms · ${formatTokenCount(out.usage_summary?.billable)} billable${formatEstimatedCost(out.usage_summary?.estimated_cost, out.usage_summary?.price_currency)} · ${out.checks.delivered ? "交付" : "未交付"} / ${out.checks.quality_contract ? "7项契约" : "契约缺失"} / ${out.checks.independent_reviewer ? "独立复核" : "复核冲突"} / ${out.checks.verdict_recorded ? "pass" : out.checks.pending_approval ? "待复核" : "未通过"} / ${out.checks.source_trace_clean ? "来源可追溯" : "来源冲突"} / ${out.checks.pending_approval ? "复核预算待批" : out.checks.within_budget ? "预算内" : "已触线"}`,
+              detail: `${out.models.worker}→${out.models.reviewer} · ${Math.round(out.latency_ms)}ms · ${formatTokenCount(out.usage_summary?.billable)} billable${formatEstimatedCost(out.usage_summary?.estimated_cost, out.usage_summary?.price_currency)} · ${out.checks.delivered ? "交付" : "未交付"} / ${out.checks.quality_contract ? "7项契约" : "契约缺失"} / ${out.checks.document_contract ? "机器预检" : "结构缺项"} / ${out.checks.independent_reviewer ? "独立复核" : "复核冲突"} / ${out.checks.verdict_recorded ? "pass" : out.checks.pending_approval ? "待复核" : "未通过"} / ${out.checks.source_trace_clean ? "来源可追溯" : "来源冲突"} / ${out.checks.pending_approval ? "复核预算待批" : out.checks.within_budget ? "预算内" : "已触线"}`,
               taskId: out.task.id,
             });
           } catch (e: any) {

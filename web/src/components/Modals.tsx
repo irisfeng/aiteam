@@ -623,6 +623,7 @@ export function SettingsModal({
         r.checks.delivered ? "交付" : "未交付",
         r.checks.tool_observed ? "工具" : "无工具",
         r.checks.quality_contract ? "7项契约" : "契约缺失",
+        r.checks.document_contract ? "机器预检" : "结构缺项",
         r.checks.independent_reviewer ? "独立复核" : "复核冲突",
         r.checks.verdict_recorded ? "通过" : r.checks.pending_approval ? "待复核" : "未通过",
         r.checks.source_trace_clean ? "来源可追溯" : "来源声明冲突",

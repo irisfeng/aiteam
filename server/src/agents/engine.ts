@@ -1097,6 +1097,75 @@ export function isProviderQualityBenchmarkTask(task: Task): boolean {
   return task.title.startsWith(PROVIDER_QUALITY_BENCHMARK_PREFIX);
 }
 
+export type ProviderQualityDocumentAssessment = { pass: boolean; gaps: string[] };
+
+/**
+ * 固定质量基准的确定性下限。它不替代独立模型复核，只先拦截“篇幅像报告、证据仍为空”的交付，
+ * 避免为明显缺项的文档消耗强模型额度。规则只覆盖七项 rubric 中可机器核验的结构与声明边界。
+ */
+export function assessProviderQualityBenchmarkDocument(content: string): ProviderQualityDocumentAssessment {
+  const text = content.replace(/\r/g, "").trim();
+  const gaps: string[] = [];
+  const visibleLength = Array.from(text.replace(/[`*_#>|-]/g, "").replace(/\s+/g, "")).length;
+  if (visibleLength < 1_800 || visibleLength > 6_000) {
+    gaps.push(`正文信息量应控制在 1800–6000 个可见字符，当前约 ${visibleLength}`);
+  }
+
+  const conclusion = text.match(/#{1,6}\s*(?:结论|推荐决策|核心决策)[^\n]*\n+([\s\S]*?)(?=\n#{1,6}\s|$)/i)?.[1]
+    ?.replace(/\|[^\n]*/g, "")
+    .replace(/[`*_#>-]/g, "")
+    .replace(/\s+/g, "") ?? "";
+  if (!conclusion) gaps.push("缺少结论/推荐决策章节及明确正文");
+  else if (Array.from(conclusion).length > 140) gaps.push("开头结论超过 120 字目标（含少量 Markdown 容差上限 140 字）");
+
+  for (const label of ["目标用户", "核心待办", "产品边界"]) {
+    if (!text.includes(label)) gaps.push(`缺少“${label}”的明确说明`);
+  }
+
+  const workflowSteps = ["goal", "brief", "claim", "work", "review", "revise", "human close"];
+  const lower = text.toLowerCase();
+  const missingSteps = workflowSteps.filter((step) => !lower.includes(step));
+  if (missingSteps.length > 0) gaps.push(`七步工作流缺少：${missingSteps.join("、")}`);
+  if (!text.includes("|") || !/(?:责任人|负责人)/.test(text) || !/(?:可验证证据|证据)/.test(text)) {
+    gaps.push("七步工作流必须用表格同时标明责任人和可验证证据");
+  }
+
+  if (!/14\s*天/i.test(text)) gaps.push("缺少 14 天落地计划");
+  for (const label of ["优先级", "负责人", "退出条件", "建议阈值"]) {
+    if (!text.includes(label)) gaps.push(`14 天计划缺少“${label}”`);
+  }
+
+  const riskSection = text.match(/#{1,6}\s*[^\n]*风险[^\n]*\n([\s\S]*?)(?=\n#{1,6}\s|$)/)?.[1] ?? "";
+  const riskRows = riskSection.split("\n").filter((line) => {
+    const trimmed = line.trim();
+    return trimmed.startsWith("|") && !/^-?\|?\s*:?-{3}/.test(trimmed) && !/(?:风险).*(?:缓解动作)/.test(trimmed);
+  });
+  if (!riskSection || riskRows.length < 3 || !riskSection.includes("缓解动作") || !riskSection.includes("停止条件")) {
+    gaps.push("关键风险不足 3 项，或缺少逐项缓解动作/停止条件");
+  }
+
+  if (!/(?:来源与假设|来源和假设)/.test(text)) gaps.push("缺少“来源与假设”章节");
+  if (!/未使用外部(?:资料|来源|数据)/.test(text)) gaps.push("未明确声明本基准没有使用外部资料");
+  if (!/(?:任务简报|运行事件)/.test(text)) gaps.push("未说明内部事实来自任务简报或运行事件");
+  const unqualifiedExternalClaim = text.split(/[。！？\n]/).find((sentence) =>
+    /(?:数据显示|调研表明|市场规模|客户反馈(?:显示|表明)|根据[^，。]{0,30}报告)/.test(sentence) &&
+    !/(?:https?:\/\/|假设|待验证|待核实|建议阈值|不得虚构)/.test(sentence),
+  );
+  if (unqualifiedExternalClaim) gaps.push("存在未给 URL、也未标为假设/待验证的外部事实声明");
+
+  const selfCheck = text.match(/#{1,6}\s*[^\n]*自查[^\n]*\n([\s\S]*?)$/)?.[1] ?? "";
+  if (!selfCheck) gaps.push("缺少文末逐条自查表");
+  else {
+    const missingItems = Array.from({ length: 7 }, (_, index) => index + 1).filter((item) =>
+      !new RegExp(`(?:^|\\n)\\s*(?:[-*]\\s*)?\\|?\\s*${item}\\s*(?:[.、）)]|\\|)`, "m").test(selfCheck),
+    );
+    if (missingItems.length > 0) gaps.push(`自查表缺少验收项：${missingItems.join("、")}`);
+    if (!/(?:正文证据位置|证据位置|章节)/.test(selfCheck)) gaps.push("自查表没有给出正文证据位置");
+  }
+
+  return { pass: gaps.length === 0, gaps };
+}
+
 function providerQualityBenchmarkTools(): Anthropic.ToolUnion[] {
   const writeDocument = TOOLS.find((tool) => "name" in tool && tool.name === "write_document");
   return writeDocument ? [writeDocument] : [];
@@ -1130,6 +1199,7 @@ function buildProviderQualityBenchmarkReworkBrief(task: Task, feedback: string):
   const current = listDocuments().find((doc) => doc.task_id === task.id && doc.kind === "report");
   return [
     "固定质量基准的上一版未通过独立复核。请依据复核意见重写完整报告，并再次只调用一次 write_document 交付。",
+    `任务：${task.title}`,
     task.acceptance_criteria ? `验收标准：\n${task.acceptance_criteria}` : "",
     `复核意见：\n${feedback}`,
     current ? `上一版全文（只用于修订，不代表其中事实可信）：\n<previous>\n${current.content.slice(0, 12000)}\n</previous>` : "",
@@ -1246,10 +1316,6 @@ async function runTaskWork(agent: Agent, taskId: string) {
       lastDocIds = ctx.createdDocIds.length > 0 ? ctx.createdDocIds : lastDocIds;
       const afterRun = getTask(task.id);
       if (ctx.halted === "blocked" || afterRun?.status === "blocked") return;
-      // 固定基准在独立复核前预留一次强模型额度；余额不足就先停，不允许“复核完才宣告超支”。
-      const reviewReserve = qualityBenchmark ? PROVIDER_QUALITY_REVIEW_RESERVE_BILLABLE : 0;
-      if (pauseTaskAfterWorkIfBudgetReached(agent, task.id, reviewReserve)) return;
-
       if (finishStoppedTask(task, channel, agent)) return;
       if (finishRevokedTaskExecution(task, channel, agent) || ctx.halted === "stopped") return;
     } else {
@@ -1258,6 +1324,7 @@ async function runTaskWork(agent: Agent, taskId: string) {
 
     const verdict = await runVerification(agent, channel, task.id, lastDocIds, attempt);
     // 验收也是可耗时的模型运行；stop 可能在 await 期间到达，必须在处理 pass/revise 前再检查一次。
+    if (verdict.result === "paused") return;
     if (finishStoppedTask(task, channel, agent)) return;
     if (finishRevokedTaskExecution(task, channel, agent)) return;
     if (verdict.result === "pass") {
@@ -1448,7 +1515,7 @@ async function runVerification(
   taskId: string,
   docIds: string[],
   attempt = 0
-): Promise<{ result: "pass" | "revise"; reasons: string }> {
+): Promise<{ result: "pass" | "revise" | "paused"; reasons: string }> {
   const task = getTask(taskId);
   if (!task) return { result: "pass", reasons: "" };
   if (isMock()) return { result: "pass", reasons: "" }; // 全局 Mock 跳过验收
@@ -1483,6 +1550,35 @@ async function runVerification(
     const reasons = "没有找到交付物文档：必须用 write_document 提交正式交付物。";
     recordVerdict("revise", reasons, "fallback", null, null);
     return { result: "revise", reasons };
+  }
+
+  if (isProviderQualityBenchmarkTask(task)) {
+    const assessment = assessProviderQualityBenchmarkDocument(doc.content);
+    if (!assessment.pass) {
+      // 已经实际触线时先暂停，避免机器预检失败后又直接发起一轮付费返工。
+      if (pauseTaskAfterWorkIfBudgetReached(worker, task.id)) return { result: "paused", reasons: "等待预算审批" };
+      const reasons = `机器契约预检未通过：\n${assessment.gaps.map((gap, index) => `${index + 1}. ${gap}`).join("\n")}`;
+      emitTaskEvent(
+        task,
+        "verification",
+        `机器契约预检要求返工（${assessment.gaps.length} 项差距）`,
+        { result: "revise", stage: "document_contract", gaps: assessment.gaps, doc_id: doc.id },
+        null,
+      );
+      recordVerdict("revise", reasons, "fallback", null, doc.id);
+      return { result: "revise", reasons };
+    }
+    emitTaskEvent(
+      task,
+      "verification",
+      "机器契约预检通过，进入独立强模型复核",
+      { result: "pass", stage: "document_contract", gaps: [], doc_id: doc.id },
+      null,
+    );
+    // 只有机器可核验的下限已满足，才为强模型语义复核预留额度并发起付费调用。
+    if (pauseTaskAfterWorkIfBudgetReached(worker, task.id, PROVIDER_QUALITY_REVIEW_RESERVE_BILLABLE)) {
+      return { result: "paused", reasons: "等待独立复核预算审批" };
+    }
   }
   // 多交付物全核验（D1）：report+slides+sheet 组合交付时，其余当前版一并注入（此前只核主文档，
   // 副交付物是免检通道）。主文档给大头预算，其余按剩余预算截断注入。

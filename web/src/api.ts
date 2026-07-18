@@ -134,6 +134,7 @@ export interface ProviderTaskTestResult {
     verdict_recorded: boolean;
     within_budget: boolean;
     source_trace_clean: boolean;
+    document_contract: boolean;
     pending_approval: boolean;
   };
   usage_summary: {

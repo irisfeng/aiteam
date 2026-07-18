@@ -59,6 +59,78 @@ const { enterOwner, ownerFromUserId } = await import(join(root, "server/dist/own
 const { hashPassword } = await import(join(root, "server/dist/password.js"));
 const engine = await import(join(root, "server/dist/agents/engine.js"));
 
+const benchmarkGoodReport = [
+  "# AiTeam 14 天产品落地决策简报",
+  "",
+  "## 结论与推荐决策",
+  "建议未来 14 天只验证一条闭环：完整简报进入后，AI 同事认领、交付、独立复核、按意见返工，最后由人类关单；未达到证据完整率建议阈值就停止扩功能。",
+  "",
+  "## 目标用户、核心待办与产品边界",
+  "目标用户是需要委派高价值知识工作的 3–10 人小团队负责人。核心待办是把一个模糊目标变成可验收交付物，并能看见责任、过程和失败原因。当前产品边界只验证单工作区、结构化任务简报、AI 认领、文档交付、独立复核、自动返工和人类关单；不承诺外部市场数据、全自动经营或无人监督决策。",
+  "",
+  "## 核心工作流与证据",
+  "| 步骤 | 责任人 | 可验证证据 | 失败处理 |",
+  "|---|---|---|---|",
+  "| goal | 人类发起人 | 目标字段与创建事件 | 缺目标不得开工 |",
+  "| brief | 人类发起人 | 背景、交付物、验收标准 | 字段不全退回补充 |",
+  "| claim | AI 执行者 | claim 事件与负责人 | 防止重复抢占 |",
+  "| work | AI 执行者 | 工具事件与当前版文档 | 阻塞时请求输入 |",
+  "| review | 独立复核者 | 结构化 verdict 与逐条理由 | 关键标准缺失判 revise |",
+  "| revise | AI 执行者 | 新文档版本与 revision 计数 | 达上限转人工 |",
+  "| human close | 人类发起人 | user_close 事件与完成状态 | 待审批时禁止关单 |",
+  "",
+  "## 按优先级排序的 14 天计划",
+  "| 优先级 | 阶段目标 | 负责人 | 退出条件 | 可量化验收指标（建议阈值） |",
+  "|---|---|---|---|---|",
+  "| P0 / 第 1–3 天 | 固定简报与证据链 | 产品负责人、工程师 | 缺字段任务无法开工 | 10/10 个坏简报被拦截 |",
+  "| P0 / 第 4–7 天 | 跑通交付与独立复核 | 工程师、复核人 | verdict 可回放且返工生成新版本 | 5/5 条任务留下完整事件 |",
+  "| P1 / 第 8–11 天 | 邀请首批真实用户 | 产品负责人 | 用户能独立完成一次委派 | 建议阈值：完成率不少于 80% |",
+  "| P1 / 第 12–14 天 | 复盘并做继续/停止决策 | 创始人 | 证据清单齐全 | 建议阈值：3 位用户中至少 2 位愿意复用 |",
+  "",
+  "## 执行细则",
+  ...Array.from({ length: 12 }, (_, index) => `### 执行检查 ${index + 1}\n每次只观察一个可证伪问题：用户是否理解下一步、任务是否有明确责任人、交付物是否能定位到验收证据、复核意见是否可执行。记录输入、实际动作、结构化事件和最终状态；任何数字都只是建议阈值，必须等真实用户测试后再确认。发现失败时先修复闭环中的最早断点，不用新增频道、角色或泛化功能掩盖问题。`),
+  "",
+  "## 关键风险、缓解动作与停止条件",
+  "| 风险 | 缓解动作 | 停止条件 |",
+  "|---|---|---|",
+  "| 输出看似完整但没有证据 | 机器契约预检后再由独立模型复核 | 连续两轮仍缺关键证据就转人工 |",
+  "| 模型成本失控 | 任务预算、复核预留与断点续跑 | 达到预算且未获批准立即停止 |",
+  "| 新用户看不懂工作流 | 首屏只暴露下一步并观察首次任务 | 3 位测试者中 2 位无法独立开工则暂停扩展 |",
+  "",
+  "## 来源与假设",
+  "本次未使用外部资料。内部事实仅来自任务简报与运行事件；没有调用 web_search、web_fetch 或 MCP。所有时间、数量、比例和停止条件均为建议阈值，待真实用户测试验证，不代表已有业绩或客户反馈。",
+  "",
+  "## 交付自查表",
+  "| 标准 | 状态 | 正文证据位置 |",
+  "|---|---|---|",
+  "| 1 | 满足 | 结论与推荐决策 |",
+  "| 2 | 满足 | 目标用户、核心待办与产品边界 |",
+  "| 3 | 满足 | 核心工作流与证据表 |",
+  "| 4 | 满足 | 14 天计划表 |",
+  "| 5 | 满足 | 关键风险表三项 |",
+  "| 6 | 满足 | 来源与假设 |",
+  "| 7 | 满足 | 本交付自查表及以上证据位置 |",
+].join("\n");
+
+{
+  const assess = engine.assessProviderQualityBenchmarkDocument;
+  const good = typeof assess === "function" ? assess(benchmarkGoodReport) : null;
+  const hollow = typeof assess === "function"
+    ? assess("# 决策简报\n\n建议尽快上线。\n\n## 自查表\n1. 满足\n2. 满足\n3. 满足\n4. 满足\n5. 满足\n6. 满足\n7. 满足")
+    : null;
+  const fabricated = typeof assess === "function"
+    ? assess(benchmarkGoodReport.replace("本次未使用外部资料。", "数据显示市场规模已经达到 100 亿元。"))
+    : null;
+  check(
+    "QW4",
+    "固定质量基准机器契约：完整报告放行，空泛自称满足的报告拒绝并列出差距",
+    good?.pass === true && good.gaps.length === 0 &&
+      hollow?.pass === false && hollow.gaps.length >= 5 &&
+      fabricated?.pass === false && fabricated.gaps.some((gap) => gap.includes("URL")),
+    `assessor=${typeof assess} good=${good?.pass}/${good?.gaps.length} hollow=${hollow?.pass}/${hollow?.gaps.length} fabricated=${fabricated?.pass}/${fabricated?.gaps.length}`,
+  );
+}
+
 // 多用户登录架构：建一个测试账号，Phase 1 进入其 owner 上下文播种私有工作区；
 // Phase 2 用同一账号登录 → 同一 owner → 共享同库工作区。
 const TEST_EMAIL = "regress@test.local";
@@ -132,6 +204,7 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
     worklineSource.includes("provider_task_test") &&
     worklineSource.includes("usage_tracked") &&
     worklineSource.includes("quality_contract") &&
+    worklineSource.includes("document_contract") &&
     worklineSource.includes("independent_reviewer") &&
     worklineSource.includes("verdict_recorded") &&
     worklineSource.includes("within_budget") &&
@@ -154,6 +227,7 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
     modalsSource.includes("runProviderTaskTest(saved.id)") &&
     modalsSource.includes("打开任务") &&
     modalsSource.includes("7项契约") &&
+    modalsSource.includes("机器预检") &&
     modalsSource.includes("独立复核") &&
     modalsSource.includes("24k billable 内为强模型复核预留 8k") &&
     modalsSource.includes("复核预算待批") &&
@@ -1344,6 +1418,18 @@ fakeOpenAiServer = createServer((req, res) => {
         role: "assistant",
         content: null,
         tool_calls: [toolCall("submit_verdict", { result: "pass", reasons: "fake verifier pass" })],
+      };
+    } else if (isQualityBenchmarkRequest && tools.includes("write_document") && !hasToolResult) {
+      message = {
+        role: "assistant",
+        content: null,
+        tool_calls: [toolCall("write_document", {
+          title: "AiTeam 14 天产品落地决策简报",
+          kind: "report",
+          content: String(body.model || "").includes("hollow")
+            ? "# 决策简报\n\n建议尽快上线。\n\n## 自查表\n1. 满足\n2. 满足\n3. 满足\n4. 满足\n5. 满足\n6. 满足\n7. 满足"
+            : benchmarkGoodReport,
+        })],
       };
     } else if (tools.includes("write_document") && !hasToolResult) {
       message = {
@@ -2742,6 +2828,53 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
   }
 
   {
+    const model = "fake-hollow-model";
+    const isolatedChannel = (await J("/channels", {
+      method: "POST",
+      body: JSON.stringify({ name: "回归空泛报告隔离频道", agent_ids: [] }),
+    })).body;
+    const workerBefore = qualityBenchmarkWorkerRequests.filter((request) => request.model === model).length;
+    const verifierBefore = qualityBenchmarkVerifierRequests.filter((request) => request.model === model).length;
+    const prov = (await J("/providers", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "回归空泛报告供应商",
+        api_key: "sk-local",
+        base_url: fakeOpenAiBase,
+        default_model: model,
+        is_strong: true,
+      }),
+    })).body;
+    const result = (await J(`/providers/${prov.id}/task-test`, {
+      method: "POST",
+      body: JSON.stringify({ channel_id: isolatedChannel.id }),
+    })).body;
+    const workerAfter = qualityBenchmarkWorkerRequests.filter((request) => request.model === model).length;
+    const verifierAfter = qualityBenchmarkVerifierRequests.filter((request) => request.model === model).length;
+    const contractEvents = (result.events ?? []).filter((event) => {
+      try {
+        const meta = JSON.parse(event.metadata_json || "{}");
+        return meta.stage === "document_contract" && meta.result === "revise" && Array.isArray(meta.gaps);
+      } catch { return false; }
+    });
+    await J(`/providers/${prov.id}`, { method: "DELETE" });
+    await J(`/channels/${isolatedChannel.id}`, { method: "DELETE" });
+    check(
+      "Q6D",
+      "质量基准机器预检：空泛报告自动返工且不调用强模型复核，最终 fail-closed",
+      result.ok === false &&
+        result.run_status === "failed" &&
+        result.checks?.document_contract === false &&
+        workerAfter === workerBefore + 2 &&
+        verifierAfter === verifierBefore &&
+        contractEvents.length === 2 &&
+        result.verdicts?.length === 2 &&
+        result.verdicts.every((verdict) => verdict.result === "revise" && verdict.source === "fallback"),
+      `run=${result.run_status} contract=${result.checks?.document_contract} worker=${workerBefore}->${workerAfter} verifier=${verifierBefore}->${verifierAfter} contractEvents=${contractEvents.length} verdicts=${result.verdicts?.length}`,
+    );
+  }
+
+  {
     const prov = (await J("/providers", {
       method: "POST",
       body: JSON.stringify({ name: "回归OpenAI兼容", api_key: "sk-local", base_url: fakeOpenAiBase, default_model: "fake-chat-model" }),
@@ -3454,7 +3587,7 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
       result.run_status === "passed" &&
       result.task?.status === "review" &&
       benchmark?.id === "executive-decision-brief-v1" &&
-      benchmark?.version === 2 &&
+      benchmark?.version === 3 &&
       benchmark?.worker_model === "fake-chat-model" &&
       benchmark?.reviewer_model === "fake-chat-model" &&
       benchmark?.budget_billable === 24000 &&
@@ -3463,12 +3596,13 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
       result.task?.reviewer_agent_id &&
       result.task.reviewer_agent_id !== result.task.assignee_agent_id &&
       result.task.budget_billable === 24000 &&
-      result.docs?.some((d) => d.kind === "report" && d.content.includes("fake provider used write_document")) &&
+      result.docs?.some((d) => d.kind === "report" && d.content.includes("AiTeam 14 天产品落地决策简报")) &&
       eventTypes.has("tool") &&
       eventTypes.has("delivery") &&
       eventTypes.has("verification") &&
       result.checks?.usage_tracked === true &&
       result.checks?.quality_contract === true &&
+      result.checks?.document_contract === true &&
       result.checks?.independent_reviewer === true &&
       result.checks?.verdict_recorded === true &&
       result.checks?.within_budget === true &&
