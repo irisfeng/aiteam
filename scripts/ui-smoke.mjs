@@ -279,12 +279,21 @@ async function runViewport(debugPort, baseUrl, label, viewport) {
     ok(`${label} focus composer visible`, await page.eval(`document.body.innerText.includes('今天要推进什么？')`));
     ok(`${label} three shortcuts visible`, await page.eval(`['调研并给出决策建议','写一份可交付文档','规划并推进一个项目'].every((text) => document.body.innerText.includes(text))`));
     ok(`${label} advanced controls are progressively disclosed`, await page.eval(`!document.body.innerText.includes('启动前检查') && document.body.innerText.includes('运行与验收工具')`));
+    await page.clickText("写一份可交付文档");
+    const templateNeedsTopic = await page.eval(`
+      (() => {
+        const input = document.querySelector('textarea[aria-label="今天要推进的目标"]');
+        const send = [...document.querySelectorAll('button')].find((button) => (button.innerText || '').trim() === '发送');
+        return Boolean(input?.value.startsWith('写一份可直接评审和交付的文档') && send?.disabled);
+      })()
+    `);
+    ok(`${label} shortcut template cannot be sent without a topic`, templateNeedsTopic);
     const focusTitle = `UI Focus-${label}-${Date.now()}`;
     await page.eval(`
       (() => {
         const input = document.querySelector('textarea[aria-label="今天要推进的目标"]');
         const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
-        setter.call(input, ${JSON.stringify("__FOCUS_TITLE__")});
+        setter.call(input, input.value + ${JSON.stringify("__FOCUS_TITLE__")});
         input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ${JSON.stringify("__FOCUS_TITLE__")} }));
         input.dispatchEvent(new Event('change', { bubbles: true }));
       })()
@@ -292,6 +301,15 @@ async function runViewport(debugPort, baseUrl, label, viewport) {
     await page.clickText("发送");
     await page.waitText(focusTitle);
     await page.waitText("责任链");
+    const quickTaskContract = await page.eval(`
+      fetch('/aiteam/api/tasks')
+        .then((res) => res.json())
+        .then((tasks) => {
+          const task = tasks.find((item) => item.title === ${JSON.stringify(focusTitle)});
+          return Boolean(task && task.acceptance_criteria.includes('正式文档') && task.budget_billable === 16000);
+        })
+    `, true);
+    ok(`${label} shortcut maps to document contract and capped budget`, quickTaskContract);
     await page.screenshot(`scenario-${label}`);
     ok(`${label} task drawer visible`, await page.eval(`document.body.innerText.includes('责任链')`));
     ok(`${label} review checklist visible`, await page.eval(`document.body.innerText.includes('人工复核清单')`));

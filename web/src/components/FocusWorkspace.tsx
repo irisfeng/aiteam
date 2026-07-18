@@ -57,8 +57,24 @@ const ACCEPTANCE_BY_INTENT: Record<FocusIntent, string> = {
   ].join("\n"),
 };
 
+function shortcutForGoal(value: string) {
+  const normalized = value.trim();
+  return FOCUS_SHORTCUTS.find((shortcut) => normalized.startsWith(shortcut.prompt));
+}
+
+function resolveFocusIntent(value: string): FocusIntent {
+  const shortcut = shortcutForGoal(value);
+  if (shortcut) return shortcut.id;
+  if (/项目|推进|计划|里程碑|路线图|排期|任务拆解/.test(value)) return "project";
+  if (/调研|研究|比较|评估|分析|决策|选型/.test(value)) return "decision";
+  if (/写|撰写|文档|报告|方案|PRD|文章|总结|纪要|邮件|幻灯片|PPT/i.test(value)) return "document";
+  return "decision";
+}
+
 function compactTitle(value: string) {
-  const firstLine = value.split("\n").map((line) => line.trim()).find(Boolean) ?? "新任务";
+  const shortcut = shortcutForGoal(value);
+  const titleSource = shortcut ? value.trim().slice(shortcut.prompt.length).trim() : value;
+  const firstLine = titleSource.split("\n").map((line) => line.trim()).find(Boolean) ?? shortcut?.label ?? "新任务";
   return firstLine.replace(/[：:，,。.!！?？]+$/g, "").slice(0, 64) || "新任务";
 }
 
@@ -92,7 +108,6 @@ export function FocusWorkspace({
   onOpenFullBrief: () => void;
 }) {
   const ws = useWorkspace();
-  const [intent, setIntent] = useState<FocusIntent>("decision");
   const [goal, setGoal] = useState("");
   const [agentId, setAgentId] = useState(() => {
     const productAgent = ws.agents.find((agent) => /产品|研究|策略/.test(`${agent.name} ${agent.role}`));
@@ -104,8 +119,8 @@ export function FocusWorkspace({
   const teamChannels = ws.channels.filter((channel) => channel.kind === "channel");
   const defaultChannelId = teamChannels[0]?.id ?? null;
   const selectedAgent = ws.agentById(agentId);
-  const activeShortcut = FOCUS_SHORTCUTS.find((shortcut) => shortcut.id === intent);
-  const goalReady = goal.trim().length >= 4 && goal.trim() !== activeShortcut?.prompt.trim();
+  const exactShortcut = FOCUS_SHORTCUTS.find((shortcut) => goal.trim() === shortcut.prompt.trim());
+  const goalReady = goal.trim().length >= 4 && !exactShortcut;
   const snapshot = computeWorkline({
     tasks: ws.tasks,
     approvals: ws.approvals,
@@ -125,8 +140,7 @@ export function FocusWorkspace({
       .slice(0, 3);
   }, [snapshot.active, pendingApprovalTaskIds]);
 
-  function applyShortcut(nextIntent: FocusIntent, prompt: string) {
-    setIntent(nextIntent);
+  function applyShortcut(prompt: string) {
     setGoal(prompt);
     setError("");
     requestAnimationFrame(() => {
@@ -142,10 +156,11 @@ export function FocusWorkspace({
     setSubmitting(true);
     setError("");
     try {
+      const resolvedIntent = resolveFocusIntent(description);
       const task = await ws.createTask({
         title: compactTitle(description),
         description,
-        acceptance_criteria: ACCEPTANCE_BY_INTENT[intent],
+        acceptance_criteria: ACCEPTANCE_BY_INTENT[resolvedIntent],
         channel_id: defaultChannelId,
         assignee_agent_id: selectedAgent?.id ?? null,
         reviewer_agent_id: null,
@@ -227,7 +242,7 @@ export function FocusWorkspace({
               <button
                 key={shortcut.id}
                 type="button"
-                onClick={() => applyShortcut(shortcut.id, shortcut.prompt)}
+                onClick={() => applyShortcut(shortcut.prompt)}
                 className="group flex w-full items-center gap-4 px-3 py-3.5 text-left text-[13.5px] text-ink-2 hover:bg-sel/60 hover:text-ink"
               >
                 <Icon size={19} strokeWidth={1.7} className="text-ink-3 group-hover:text-accent" />

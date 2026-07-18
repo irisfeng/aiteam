@@ -215,6 +215,8 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
     focusSource.includes("今天要推进什么？") &&
     focusSource.includes("描述目标、期望交付和截止时间…") &&
     focusSource.includes("FOCUS_SHORTCUTS") &&
+    focusSource.includes("resolveFocusIntent") &&
+    focusSource.includes("shortcutForGoal") &&
     focusSource.includes("ws.createTask") &&
     focusSource.includes("budget_billable: 16_000") &&
     focusSource.includes("进行中的任务") &&
