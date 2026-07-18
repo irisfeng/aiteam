@@ -250,6 +250,7 @@ interface Store extends State {
     reviewer_agent_id?: string | null;
     acceptance_criteria?: string;
     source_doc_ids?: string[];
+    budget_billable?: number;
   }) => Promise<Task>;
   updateTask: (id: string, data: Partial<Pick<Task, "title" | "description" | "acceptance_criteria" | "status" | "assignee_agent_id" | "reviewer_agent_id" | "budget_billable">>) => Promise<Task>;
   createProvider: (data: import("./api").ProviderInput) => Promise<Provider>;

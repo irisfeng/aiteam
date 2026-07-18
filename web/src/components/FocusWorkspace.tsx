@@ -149,6 +149,7 @@ export function FocusWorkspace({
         channel_id: defaultChannelId,
         assignee_agent_id: selectedAgent?.id ?? null,
         reviewer_agent_id: null,
+        budget_billable: 16_000,
       });
       setGoal("");
       onOpenTask(task);
