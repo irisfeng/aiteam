@@ -201,6 +201,7 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
   const storeSource = readFileSync(join(root, "web/src/store.tsx"), "utf8");
   const appSource = readFileSync(join(root, "web/src/App.tsx"), "utf8");
   const focusSource = readFileSync(join(root, "web/src/components/FocusWorkspace.tsx"), "utf8");
+  const uiSmokeSource = readFileSync(join(root, "scripts/ui-smoke.mjs"), "utf8");
   const worklineSource = readFileSync(join(root, "web/src/components/WorklineOverview.tsx"), "utf8");
   const tasksBoardSource = readFileSync(join(root, "web/src/components/TasksBoard.tsx"), "utf8");
   const taskDetailSource = readFileSync(join(root, "web/src/components/TaskDetailDrawer.tsx"), "utf8");
@@ -221,6 +222,8 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
     focusSource.includes("复核：") &&
     focusSource.includes("ws.createTask") &&
     focusSource.includes("budget_billable: 16_000") &&
+    uiSmokeSource.includes("focus task reaches review with deliverable and audit trail") &&
+    uiSmokeSource.includes("human closes reviewed focus task with user_close evidence") &&
     focusSource.includes("进行中的任务") &&
     !appSource.includes("WelcomeOverlay");
   check("UX1", "首屏体验：默认落 Focus Composer，一次只突出目标提交、快捷入口和少量当前任务",

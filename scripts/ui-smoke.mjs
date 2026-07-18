@@ -301,26 +301,58 @@ async function runViewport(debugPort, baseUrl, label, viewport) {
     await page.clickText("发送");
     await page.waitText(focusTitle);
     await page.waitText("责任链");
-    const quickTaskContract = await page.eval(`
+    const quickTask = await page.eval(`
       fetch('/aiteam/api/tasks')
         .then((res) => res.json())
-        .then((tasks) => {
-          const task = tasks.find((item) => item.title === ${JSON.stringify(focusTitle)});
-          return Boolean(
-            task &&
-            task.acceptance_criteria.includes('正式文档') &&
-            task.budget_billable === 16000 &&
-            task.reviewer_agent_id &&
-            task.reviewer_agent_id !== task.assignee_agent_id
-          );
-        })
+        .then((tasks) => tasks.find((item) => item.title === ${JSON.stringify(focusTitle)}) || null)
     `, true);
-    ok(`${label} shortcut maps to document contract, independent reviewer and capped budget`, quickTaskContract);
+    ok(
+      `${label} shortcut maps to document contract, independent reviewer and capped budget`,
+      Boolean(
+        quickTask &&
+        quickTask.acceptance_criteria.includes('正式文档') &&
+        quickTask.budget_billable === 16000 &&
+        quickTask.reviewer_agent_id &&
+        quickTask.reviewer_agent_id !== quickTask.assignee_agent_id
+      ),
+    );
     await page.screenshot(`scenario-${label}`);
     ok(`${label} task drawer visible`, await page.eval(`document.body.innerText.includes('责任链')`));
     ok(`${label} review checklist visible`, await page.eval(`document.body.innerText.includes('人工复核清单')`));
     ok(`${label} activity log visible`, await page.eval(`document.body.innerText.includes('活动日志')`));
     await assertNoHorizontalOverflow(page, label);
+
+    const reviewReady = await waitFor(() => page.eval(`
+      Promise.all([
+        fetch('/aiteam/api/tasks').then((res) => res.json()),
+        fetch('/aiteam/api/documents').then((res) => res.json()),
+        fetch('/aiteam/api/tasks/${quickTask.id}/events').then((res) => res.json()),
+      ]).then(([tasks, docs, events]) => {
+        const task = tasks.find((item) => item.id === ${JSON.stringify(quickTask.id)});
+        const eventTypes = new Set(events.map((event) => event.type));
+        return Boolean(
+          task?.status === 'review' &&
+          docs.some((doc) => doc.task_id === task.id) &&
+          ['claim', 'start', 'delivery', 'verification'].every((type) => eventTypes.has(type))
+        );
+      })
+    `, true), 15000);
+    ok(`${label} focus task reaches review with deliverable and audit trail`, Boolean(reviewReady));
+    await page.waitText("确认关闭任务");
+    await page.clickText("确认关闭任务");
+    await page.waitText("已关闭");
+    const humanClosed = await waitFor(() => page.eval(`
+      Promise.all([
+        fetch('/aiteam/api/tasks').then((res) => res.json()),
+        fetch('/aiteam/api/tasks/${quickTask.id}/events').then((res) => res.json()),
+      ]).then(([tasks, events]) => {
+        const task = tasks.find((item) => item.id === ${JSON.stringify(quickTask.id)});
+        return task?.status === 'done' && events.some((event) => event.type === 'user_close');
+      })
+    `, true));
+    ok(`${label} human closes reviewed focus task with user_close evidence`, Boolean(humanClosed));
+    await page.screenshot(`closed-${label}`);
+    await assertNoHorizontalOverflow(page, `${label} closed drawer`);
 
     const cancelTitle = `UI取消语义-${label}-${Date.now()}`;
     const cancelTaskId = await page.eval(`
