@@ -112,7 +112,7 @@ ss -ltnp 'sport = :80'
 已有 `credential.key` 时会拒绝凭证加密/迁移；`ANTHROPIC_API_KEY` 缺失则进 Mock 模式（本场景预期行为，登录后 UI 配国内 provider）。
 
 ### 3.4 内存足迹与双重护栏
-常态单进程 80-200MB、CPU 近空闲。峰值三处：pptxgenjs 拼 PPT、图片生成（`AITEAM_IMAGES_PER_RUN` 默认 3）、MCP 用 `StdioClientTransport`（典型 npx）拉常驻子进程（`server/src/agents/mcp.ts:42`，国内联网拉包慢且占内存，不受应用 `--max-old-space-size` 约束、只受 cgroup 约束）。
+常态单进程 80-200MB、CPU 近空闲。峰值三处：pptxgenjs 拼 PPT、图片生成（`AITEAM_IMAGES_PER_RUN` 默认 2）、MCP 用 `StdioClientTransport`（典型 npx）拉常驻子进程（`server/src/agents/mcp.ts:42`，国内联网拉包慢且占内存，不受应用 `--max-old-space-size` 约束、只受 cgroup 约束）。
 **护栏**：`NODE_OPTIONS=--max-old-space-size=512`（应用堆）+ systemd `MemoryMax`（兜住含子进程整组，超限只 OOM 本服务不殃及另两项目）+ `TasksMax`（限 MCP/npx 派生子进程数）。
 
 ---
@@ -204,7 +204,7 @@ AITEAM_ALLOW_SIGNUP=1
 # ===== 成本/滥用护栏（内部场景兜底，按日用量 2-3 倍设；0=不限）=====
 # 日界用【系统时区】算 setHours(0,0,0,0)，务必先把系统 TZ 设为 Asia/Shanghai（见 §8.3 共用主机告警）
 AITEAM_DAILY_TOKEN_BUDGET=2000000
-# AITEAM_IMAGES_PER_RUN=3
+# AITEAM_IMAGES_PER_RUN=2
 # AITEAM_MCP_CALLS_PER_RUN=5
 # AGENT_CHAIN_DEPTH=2
 # TASK_MAX_REVISIONS=1
@@ -585,7 +585,7 @@ use=$(df --output=pcent "$DATA_DIR" 2>/dev/null | tail -1 | tr -dc '0-9')
 ```
 
 **【可选：assets 按时间清理 cron】**（无自动清理，迟早撑满数据盘殃及另两项目）
-先估容量：单张生成图典型几百 KB~2MB，`IMAGES_PER_RUN` 默认 3，按团队日产任务数 × 3 估月增量。设一个保留窗（如 90 天），定期清旧图：
+先估容量：单张生成图典型几百 KB~2MB，`IMAGES_PER_RUN` 默认 2，按团队日产任务数 × 2 估月增量。设一个保留窗（如 90 天），定期清旧图：
 ```bash
 # /opt/aiteam/ops/clean-assets.sh —— 删 90 天前的生成图（DB 里的历史文档引用会变成坏链，按需调整窗口）
 # crontab: 0 4 * * 0  /opt/aiteam/ops/clean-assets.sh >> /var/log/aiteam-clean.log 2>&1

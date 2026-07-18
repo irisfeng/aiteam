@@ -900,7 +900,8 @@ function ImageProviderSection() {
       </div>
       <div className="mt-1 text-[12px] leading-relaxed text-ink-3">
         接入字节火山方舟的 Seedream 文生图后，AI 同事获得 generate_image 工具，可为报告/PPT 生成配图
-        （按张计费，单次运行上限 3 张）。在方舟控制台开通 Seedream 并创建接入点，把接入点 ID 填到模型一栏。
+        （按张计费，默认单次运行上限 2 张，并强制每次调用只生成 1 张）。Base URL 可填写 API 根地址或完整
+        /images/generations 端点；模型栏填写方舟控制台展示的模型 ID 或接入点 ID。
       </div>
       <label className={labelCls}>Base URL</label>
       <input
@@ -921,7 +922,7 @@ function ImageProviderSection() {
       <input
         value={model}
         onChange={(e) => setModel(e.target.value)}
-        placeholder="例如 doubao-seedream-5-0-260128（以方舟控制台为准）"
+        placeholder="例如 doubao-seedream-5-0-pro-260628（以方舟控制台为准）"
         className={inputCls}
       />
       {error && <div className="mt-2 text-[12px] text-red-500">{error}</div>}

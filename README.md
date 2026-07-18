@@ -123,7 +123,7 @@ npm run pack:verify --workspace desktop  # 脱离源码树验证包内运行时
 | `TASK_MAX_REVISIONS` | `1` | 验收未过的返工次数上限 |
 | `AGENT_CHAIN_DEPTH` | `2` | AI 互相 @ 接力的链深上限（防雪崩） |
 | `AITEAM_MCP_CALLS_PER_RUN` | `5` | 单次运行 MCP 插件调用上限（按次计费） |
-| `AITEAM_IMAGES_PER_RUN` | `3` | 单次运行文生图上限（按张计费） |
+| `AITEAM_IMAGES_PER_RUN` | `2` | 单次运行文生图上限（按张计费；每次调用强制单图） |
 | `AITEAM_MCP_TIMEOUT_MS` | `45000` | MCP 连接/调用超时（防插件挂死阻塞运行） |
 | `AITEAM_MCP_CACHE_TTL_MS` | `600000` | MCP 同参调用结果缓存 TTL |
 | `AITEAM_MAX_MCP_TOOLS` | `40` | 注入工作循环的 MCP 工具数上限 |

@@ -6,7 +6,7 @@
  * 用法：npm run build && node scripts/regression.mjs
  */
 import { spawn, execSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -59,6 +59,64 @@ const { enterOwner, ownerFromUserId } = await import(join(root, "server/dist/own
 const { hashPassword } = await import(join(root, "server/dist/password.js"));
 const engine = await import(join(root, "server/dist/agents/engine.js"));
 const qualityBenchmark = await import(join(root, "server/dist/qualityBenchmark.js"));
+const images = await import(join(root, "server/dist/agents/images.js"));
+
+{
+  let requestPath = "";
+  let requestBody = {};
+  let probeBase = "";
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+  const imageProbe = createServer((req, res) => {
+    if (req.method === "POST") {
+      requestPath = req.url ?? "";
+      let body = "";
+      req.on("data", (chunk) => { body += chunk; });
+      req.on("end", () => {
+        try { requestBody = JSON.parse(body); } catch { requestBody = {}; }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ data: [{ url: `${probeBase}/generated.png`, size: "2048x1152" }] }));
+      });
+      return;
+    }
+    if (req.url === "/generated.png") {
+      res.writeHead(200, { "Content-Type": "image/png", "Content-Length": String(png.length) });
+      res.end(png);
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  await new Promise((resolve, reject) => {
+    imageProbe.once("error", reject);
+    imageProbe.listen(0, "127.0.0.1", resolve);
+  });
+  const address = imageProbe.address();
+  probeBase = `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`;
+  db.setImageProvider({
+    base_url: `${probeBase}/api/v3/images/generations`,
+    api_key: "image-probe-key",
+    model: "doubao-seedream-5-0-pro-260628",
+  });
+  const generated = await images.generateImage({ prompt: "一张克制的产品概念配图" });
+  const assetName = generated.match(/\/aiteam\/assets\/([^\s)]+)/)?.[1] ?? "";
+  await new Promise((resolve) => imageProbe.close(resolve));
+  db.setImageProvider({ api_key: "-" });
+  check(
+    "QW4C",
+    "Seedream 生图：完整端点不重复拼接、强制单图、URL 回传下载为持久资产",
+    images.imageGenerationUrl("https://ark.cn-beijing.volces.com/api/v3") ===
+      "https://ark.cn-beijing.volces.com/api/v3/images/generations" &&
+      images.imageGenerationUrl("https://ark.cn-beijing.volces.com/api/v3/images/generations") ===
+      "https://ark.cn-beijing.volces.com/api/v3/images/generations" &&
+      requestPath === "/api/v3/images/generations" &&
+      requestBody.model === "doubao-seedream-5-0-pro-260628" &&
+      requestBody.sequential_image_generation === "disabled" &&
+      requestBody.stream === false &&
+      requestBody.response_format === "url" &&
+      assetName.endsWith(".png") &&
+      existsSync(join(images.assetsDir, assetName)),
+    `path=${requestPath} single=${requestBody.sequential_image_generation} format=${requestBody.response_format} asset=${assetName}`,
+  );
+}
 
 const benchmarkGoodReport = [
   "# AiTeam 14 天产品落地决策简报",
@@ -2844,13 +2902,21 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
 
   // Q2 图像生成供应商配置：key 只存服务端
   {
-    const saved = (await J("/image-provider", { method: "PUT", body: JSON.stringify({ api_key: "img-secret-y", model: "doubao-seedream-5-0-260128" }) })).body;
+    const imageEndpoint = "https://ark.cn-beijing.volces.com/api/v3/images/generations";
+    const saved = (await J("/image-provider", {
+      method: "PUT",
+      body: JSON.stringify({ api_key: "img-secret-y", base_url: imageEndpoint, model: "doubao-seedream-5-0-pro-260628" }),
+    })).body;
     const got = (await J("/image-provider")).body;
     const dump = JSON.stringify((await J("/bootstrap")).body) + JSON.stringify(got);
     const leak = dump.includes("img-secret-y");
     await J("/image-provider", { method: "PUT", body: JSON.stringify({ api_key: "-" }) }); // 清除
     const offAgain = !(await J("/image-provider")).body.has_key;
-    check("Q2", "图像生成配置：保存/读取/清除，key 永不下发", saved.has_key && got.model.includes("seedream") && !leak && offAgain);
+    check(
+      "Q2",
+      "图像生成配置：保存完整端点与 Seedream 5 Pro、读取/清除时 key 永不下发",
+      saved.has_key && got.base_url === imageEndpoint && got.model === "doubao-seedream-5-0-pro-260628" && !leak && offAgain,
+    );
   }
 
   // Q3 强通道标志 + 成本估算价格字段全链路

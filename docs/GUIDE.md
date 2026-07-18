@@ -47,9 +47,9 @@ npm run dev                       # 本地开发，打开 http://localhost:5173/
 
 ⚙ → 模型供应商 → 底部 **🎨 图像生成（Seedream）**：在
 [火山方舟控制台](https://console.volcengine.com/ark) 开通 Seedream 文生图并创建接入点，
-把 **API Key** 与**接入点 ID**（如 `doubao-seedream-5-0-260128`，以控制台展示为准）填入保存。
+把 **API Key** 与**模型 ID / 接入点 ID**（如 `doubao-seedream-5-0-pro-260628`，以控制台展示为准）填入保存。
 之后所有同事获得 `generate_image` 工具：做报告/PPT 时会自动生成封面、概念示意等点睛配图并嵌入正文。
-按张计费，单次运行上限 3 张（`AITEAM_IMAGES_PER_RUN` 可调）；数据图表不走文生图（sheet 自带图表渲染）。
+按张计费，每次调用强制单图，单次运行默认上限 2 张（`AITEAM_IMAGES_PER_RUN` 可调）；数据图表不走文生图（sheet 自带图表渲染）。
 
 ## 第 2 步：认识你的团队
 
@@ -120,7 +120,7 @@ AI 之间也会互相 `@` 接力讨论（链深限制防雪崩）。悬浮消息
 | `AGENT_CHAIN_DEPTH` | AI 互相接力的链深上限 | 2 |
 | `AITEAM_STRONG_MODEL` / `AITEAM_LIGHT_MODEL` | 官方通道的强/轻模型 | opus-4-8 / haiku-4-5 |
 | `AITEAM_MAX_MCP_TOOLS` | 注入工作循环的 MCP 工具上限 | 40 |
-| `AITEAM_IMAGES_PER_RUN` | 单次运行的图片生成上限（按张计费） | 3 |
+| `AITEAM_IMAGES_PER_RUN` | 单次运行的图片生成上限（按张计费） | 2 |
 
 ## MCP 推荐：第一块插件装什么
 

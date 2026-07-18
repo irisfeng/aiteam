@@ -68,7 +68,7 @@ const TRANSCRIPT_WINDOW = 30;
 /** 每次运行的 MCP 插件调用上限（外部检索按次计费，防烧爆） */
 const MCP_CALLS_PER_RUN = Number(process.env.AITEAM_MCP_CALLS_PER_RUN ?? 5);
 /** 每次运行的图片生成上限（文生图按张计费） */
-const IMAGES_PER_RUN = Number(process.env.AITEAM_IMAGES_PER_RUN ?? 3);
+const IMAGES_PER_RUN = Number(process.env.AITEAM_IMAGES_PER_RUN ?? 2);
 const MAX_WORK_ITERATIONS = 8;
 const MAX_CONCURRENT_WORK = 8;
 
