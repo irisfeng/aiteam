@@ -274,15 +274,23 @@ async function runViewport(debugPort, baseUrl, label, viewport) {
     await page.screenshot(`login-${label}`);
     const needsAuth = await page.eval(`!!document.querySelector('input[placeholder="邮箱"]')`);
     if (needsAuth) await register(page, label);
-    await page.waitText("任务运行线");
+    await page.waitText("今天要推进什么？");
     await page.screenshot(`workline-${label}`);
-    ok(`${label} workline visible`, await page.eval(`document.body.innerText.includes('任务运行线')`));
-    ok(`${label} startup checklist visible`, await page.eval(`document.body.innerText.includes('启动前检查')`));
-    ok(`${label} core acceptance control visible`, await page.eval(`document.body.innerText.includes('端到端验收') || document.body.innerText.includes('打开验收')`));
-    const onboardingOpen = await page.eval(`document.body.innerText.includes('从任务运行线开始')`);
-    if (onboardingOpen) await page.clickText("看任务线");
-    await page.clickAnyText(["端到端验收", "打开验收"]);
-    await page.waitText("闭环验收：AI 同事任务运行线");
+    ok(`${label} focus composer visible`, await page.eval(`document.body.innerText.includes('今天要推进什么？')`));
+    ok(`${label} three shortcuts visible`, await page.eval(`['调研并给出决策建议','写一份可交付文档','规划并推进一个项目'].every((text) => document.body.innerText.includes(text))`));
+    ok(`${label} advanced controls are progressively disclosed`, await page.eval(`!document.body.innerText.includes('启动前检查') && document.body.innerText.includes('运行与验收工具')`));
+    const focusTitle = `UI Focus-${label}-${Date.now()}`;
+    await page.eval(`
+      (() => {
+        const input = document.querySelector('textarea[aria-label="今天要推进的目标"]');
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+        setter.call(input, ${JSON.stringify("__FOCUS_TITLE__")});
+        input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ${JSON.stringify("__FOCUS_TITLE__")} }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      })()
+    `.replaceAll("__FOCUS_TITLE__", focusTitle));
+    await page.clickText("发送");
+    await page.waitText(focusTitle);
     await page.waitText("责任链");
     await page.screenshot(`scenario-${label}`);
     ok(`${label} task drawer visible`, await page.eval(`document.body.innerText.includes('责任链')`));

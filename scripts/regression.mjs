@@ -58,6 +58,7 @@ const { AGENT_TEMPLATES } = await import(join(root, "server/dist/agents/template
 const { enterOwner, ownerFromUserId } = await import(join(root, "server/dist/ownerScope.js"));
 const { hashPassword } = await import(join(root, "server/dist/password.js"));
 const engine = await import(join(root, "server/dist/agents/engine.js"));
+const qualityBenchmark = await import(join(root, "server/dist/qualityBenchmark.js"));
 
 const benchmarkGoodReport = [
   "# AiTeam 14 天产品落地决策简报",
@@ -131,6 +132,52 @@ const benchmarkGoodReport = [
   );
 }
 
+{
+  const actors = { workerAgentId: "worker", reviewerAgentId: "reviewer" };
+  const cleanTrace = qualityBenchmark.providerBenchmarkSourceTrace(
+    [
+      { id: "e1", type: "tool", agent_id: "worker", metadata_json: JSON.stringify({ tool: "write_document" }) },
+      { id: "e2", type: "tool", agent_id: "reviewer", metadata_json: JSON.stringify({ tool: "submit_verdict" }) },
+    ],
+    [{ content: "本次没有调用 web_search、web_fetch、浏览器、插件或 MCP。" }],
+    actors,
+  );
+  const badTrace = qualityBenchmark.providerBenchmarkSourceTrace(
+    [
+      { id: "e3", type: "tool", agent_id: "worker", metadata_json: JSON.stringify({ tool: "web_search" }) },
+      { id: "e4", type: "tool", agent_id: "reviewer", metadata_json: JSON.stringify({ tool: "write_document" }) },
+    ],
+    [{ content: "报告通过 browser 插件和 web_search 检索获得外部资料。" }],
+    actors,
+  );
+  const allPassChecks = {
+    completed: true,
+    delivered: true,
+    tool_observed: true,
+    verified: true,
+    usage_tracked: true,
+    quality_contract: true,
+    independent_reviewer: true,
+    verdict_recorded: true,
+    within_budget: true,
+    source_trace_clean: true,
+    document_contract: true,
+    pending_approval: false,
+  };
+  check(
+    "QW4B",
+    "固定质量基准来源账本：仅接受执行者 write_document 与复核者 submit_verdict，且未完成任务禁止通过",
+    cleanTrace.clean === true &&
+      cleanTrace.authorized_tools.length === 2 &&
+      badTrace.clean === false &&
+      badTrace.unauthorized_tool_events.length === 2 &&
+      ["browser", "plugin", "web_search"].every((tool) => badTrace.unobserved_claims.includes(tool)) &&
+      qualityBenchmark.providerBenchmarkPassed(allPassChecks) === true &&
+      qualityBenchmark.providerBenchmarkPassed({ ...allPassChecks, completed: false }) === false,
+    `clean=${cleanTrace.clean}/${cleanTrace.authorized_tools.length} bad=${badTrace.clean}/${badTrace.unauthorized_tool_events.length}/${badTrace.unobserved_claims.join(",")} completedGate=${qualityBenchmark.providerBenchmarkPassed({ ...allPassChecks, completed: false })}`,
+  );
+}
+
 // 多用户登录架构：建一个测试账号，Phase 1 进入其 owner 上下文播种私有工作区；
 // Phase 2 用同一账号登录 → 同一 owner → 共享同库工作区。
 const TEST_EMAIL = "regress@test.local";
@@ -153,7 +200,7 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
 {
   const storeSource = readFileSync(join(root, "web/src/store.tsx"), "utf8");
   const appSource = readFileSync(join(root, "web/src/App.tsx"), "utf8");
-  const onboardingSource = readFileSync(join(root, "web/src/components/Onboarding.tsx"), "utf8");
+  const focusSource = readFileSync(join(root, "web/src/components/FocusWorkspace.tsx"), "utf8");
   const worklineSource = readFileSync(join(root, "web/src/components/WorklineOverview.tsx"), "utf8");
   const tasksBoardSource = readFileSync(join(root, "web/src/components/TasksBoard.tsx"), "utf8");
   const taskDetailSource = readFileSync(join(root, "web/src/components/TaskDetailDrawer.tsx"), "utf8");
@@ -164,15 +211,16 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
   const defaultWorkline = /view:\s*\{\s*kind:\s*"workline"\s*\}/.test(storeSource);
   const bootstrapKeepsView = /view:\s*keepValidView\(state\.view,\s*d\.channels\)/.test(storeSource);
   const loadDoesNotForceChannel = !/const first = data\.channels\.find[\s\S]*?openChannel\(first\.id\)/.test(storeSource);
-  const onboardingTargetsWorkline =
-    onboardingSource.includes("从任务运行线开始") &&
-    onboardingSource.includes("onOpenWorkline") &&
-    !onboardingSource.includes("onOpenTasks") &&
-    /const openWorkline = \(\) => \{[\s\S]*?kind:\s*"workline"/.test(appSource) &&
-    !onboardingSource.includes("自主闭环");
-  check("UX1", "首屏体验：默认落工作台（任务运行线），首次引导指向任务运行线而非泛欢迎/自主闭环文案",
-    defaultWorkline && bootstrapKeepsView && loadDoesNotForceChannel && onboardingTargetsWorkline,
-    `defaultWorkline=${defaultWorkline} bootstrapKeepsView=${bootstrapKeepsView} loadNoChannel=${loadDoesNotForceChannel} onboarding=${onboardingTargetsWorkline}`);
+  const focusComposerIsPrimary =
+    focusSource.includes("今天要推进什么？") &&
+    focusSource.includes("描述目标、期望交付和截止时间…") &&
+    focusSource.includes("FOCUS_SHORTCUTS") &&
+    focusSource.includes("ws.createTask") &&
+    focusSource.includes("进行中的任务") &&
+    !appSource.includes("WelcomeOverlay");
+  check("UX1", "首屏体验：默认落 Focus Composer，一次只突出目标提交、快捷入口和少量当前任务",
+    defaultWorkline && bootstrapKeepsView && loadDoesNotForceChannel && focusComposerIsPrimary,
+    `defaultWorkline=${defaultWorkline} bootstrapKeepsView=${bootstrapKeepsView} loadNoChannel=${loadDoesNotForceChannel} focusComposer=${focusComposerIsPrimary}`);
   const projectCloseCta =
     worklineSource.includes("closableProject") &&
     worklineSource.includes("确认关闭项目") &&
@@ -3618,6 +3666,48 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
       result.usage_summary?.estimated_cost > 0 &&
       Boolean(persistedResultEvent),
       `ok=${result.ok}/${result.run_status} benchmark=${benchmark?.id}@${benchmark?.version} rubric=${rubricItems.length} reviewer=${result.task?.reviewer_agent_id} docs=${result.docs?.length ?? 0} events=${[...eventTypes].join(",")} quality=${result.checks?.quality_contract}/${result.checks?.independent_reviewer}/${result.checks?.verdict_recorded}/${result.checks?.within_budget}/${result.checks?.source_trace_clean} isolated=${workerProbe?.tools?.join(",")}/${verifierProbe?.tools?.join(",")} usage=${result.checks?.usage_tracked} billable=${result.usage_summary?.billable} cost=${result.usage_summary?.estimated_cost} persisted=${Boolean(persistedResultEvent)}`);
+  }
+
+  {
+    const prov = (await J("/providers", {
+      method: "POST",
+      body: JSON.stringify({
+        name: `回归模型角色复用碰撞-${"超长供应商名称".repeat(8)}`,
+        api_key: "sk-local",
+        base_url: fakeOpenAiBase,
+        default_model: "fake-chat-model-collision-a",
+        is_strong: true,
+      }),
+    })).body;
+    const first = (await J(`/providers/${prov.id}/task-test`, { method: "POST" })).body;
+    await J(`/providers/${prov.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ default_model: "fake-chat-model-collision-b" }),
+    });
+    const second = (await J(`/providers/${prov.id}/task-test`, { method: "POST" })).body;
+    const agentsAfter = (await J("/bootstrap")).body.agents ?? [];
+    const firstWorker = agentsAfter.find((agent) => agent.id === first.task?.assignee_agent_id);
+    const secondWorker = agentsAfter.find((agent) => agent.id === second.task?.assignee_agent_id);
+    const firstReviewer = agentsAfter.find((agent) => agent.id === first.task?.reviewer_agent_id);
+    const secondReviewer = agentsAfter.find((agent) => agent.id === second.task?.reviewer_agent_id);
+    await J(`/providers/${prov.id}`, { method: "DELETE" });
+    check(
+      "Q6A",
+      "模型质量基准：截断名称碰撞时仍按 provider、model 与角色隔离执行者和复核者",
+      first.ok === true &&
+        second.ok === true &&
+        firstWorker?.model === "fake-chat-model-collision-a" &&
+        secondWorker?.model === "fake-chat-model-collision-b" &&
+        firstReviewer?.model === "fake-chat-model-collision-a" &&
+        secondReviewer?.model === "fake-chat-model-collision-b" &&
+        firstWorker?.role === "真实交付物基准执行" &&
+        secondWorker?.role === "真实交付物基准执行" &&
+        firstReviewer?.role === "真实交付物独立复核" &&
+        secondReviewer?.role === "真实交付物独立复核" &&
+        firstWorker.id !== secondWorker.id &&
+        firstReviewer.id !== secondReviewer.id,
+      `ok=${first.ok}/${second.ok} workers=${firstWorker?.model}/${secondWorker?.model}/${firstWorker?.id === secondWorker?.id} reviewers=${firstReviewer?.model}/${secondReviewer?.model}/${firstReviewer?.id === secondReviewer?.id}`,
+    );
   }
 
   {

@@ -3,6 +3,7 @@ import { useWorkspace } from "../store";
 import { API_BASE } from "../api";
 import { AgentAvatar } from "./Avatar";
 import { BrandMark } from "./Brand";
+import { ChevronDown, LogOut, Moon, Settings, Sun } from "lucide-react";
 
 function ThemeToggle() {
   const [dark, setDark] = useState(() => {
@@ -20,15 +21,18 @@ function ThemeToggle() {
       className="rounded px-1 text-ink-3 hover:bg-sel hover:text-ink"
       title={dark ? "切换到浅色模式" : "切换到深色模式"}
     >
-      {dark ? "☀" : "☾"}
+      {dark ? <Sun size={14} strokeWidth={1.8} /> : <Moon size={14} strokeWidth={1.8} />}
     </button>
   );
 }
 
-function SectionTitle({ children, onAdd }: { children: string; onAdd?: () => void }) {
+function SectionTitle({ children, onAdd, open, onToggle }: { children: string; onAdd?: () => void; open: boolean; onToggle: () => void }) {
   return (
-    <div className="mt-5 mb-1 flex items-center justify-between px-3">
-      <span className="text-xs font-medium text-ink-3">{children}</span>
+    <div className="mt-5 mb-1 flex items-center gap-1 px-3">
+      <button type="button" onClick={onToggle} className="flex min-w-0 flex-1 items-center gap-2 text-left text-xs font-medium text-ink-3 hover:text-ink">
+        <span className="flex-1">{children}</span>
+        <ChevronDown size={14} strokeWidth={1.8} className={`transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
       {onAdd && (
         <button
           onClick={onAdd}
@@ -109,8 +113,6 @@ export function MobileNav({ onSettings }: { onSettings: () => void }) {
     { kind: "inbox", label: "收件箱", badge: pending },
     { kind: "tasks", label: "任务" },
     { kind: "docs", label: "文档" },
-    { kind: "team", label: "团队" },
-    { kind: "usage", label: "用量" },
   ] as const;
   return (
     <nav className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-line bg-panel px-2 py-1.5 md:hidden">
@@ -129,14 +131,20 @@ export function MobileNav({ onSettings }: { onSettings: () => void }) {
         </button>
       ))}
       <select
-        value={ws.view.kind === "channel" ? ws.view.id : ""}
-        onChange={(e) => e.target.value && ws.openChannel(e.target.value)}
+        value={ws.view.kind === "channel" ? `channel:${ws.view.id}` : ws.view.kind === "team" || ws.view.kind === "usage" ? `view:${ws.view.kind}` : ""}
+        onChange={(e) => {
+          if (e.target.value.startsWith("channel:")) ws.openChannel(e.target.value.slice(8));
+          if (e.target.value === "view:team") ws.setView({ kind: "team" });
+          if (e.target.value === "view:usage") ws.setView({ kind: "usage" });
+        }}
         className="shrink-0 rounded-full border border-line bg-sel px-2 py-1 text-[12px] text-ink-2 outline-none"
-        title="打开频道或私信"
+        title="打开团队、用量、频道或私信"
       >
-        <option value="">频道…</option>
+        <option value="">更多…</option>
+        <option value="view:team">团队</option>
+        <option value="view:usage">用量</option>
         {ws.channels.map((c) => (
-          <option key={c.id} value={c.id}>
+          <option key={c.id} value={`channel:${c.id}`}>
             {c.kind === "dm" ? "@" : "#"} {c.name}
           </option>
         ))}
@@ -144,7 +152,7 @@ export function MobileNav({ onSettings }: { onSettings: () => void }) {
       <span className="ml-auto flex shrink-0 items-center gap-0.5 pl-1">
         {ws.user.role === "admin" && (
           <button onClick={onSettings} className="rounded px-1.5 text-ink-3 hover:bg-sel hover:text-ink" title="设置">
-            ⚙
+            <Settings size={14} strokeWidth={1.8} />
           </button>
         )}
         <button
@@ -152,7 +160,7 @@ export function MobileNav({ onSettings }: { onSettings: () => void }) {
           className="rounded px-1.5 text-ink-3 hover:bg-sel hover:text-red-500"
           title="退出登录"
         >
-          ⏻
+          <LogOut size={14} strokeWidth={1.8} />
         </button>
       </span>
     </nav>
@@ -177,6 +185,9 @@ export function Sidebar({
   const activeTasks = ws.tasks.filter((t) => t.status !== "done" && t.status !== "cancelled").length;
   const channels = ws.channels.filter((c) => c.kind === "channel");
   const dms = ws.channels.filter((c) => c.kind === "dm");
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [channelsOpen, setChannelsOpen] = useState(false);
+  const [agentsOpen, setAgentsOpen] = useState(false);
 
   return (
     <aside className="hidden h-full w-[250px] shrink-0 flex-col border-r border-line bg-panel md:flex">
@@ -192,26 +203,27 @@ export function Sidebar({
 
       <div className="flex-1 overflow-y-auto px-2 pb-4">
         <Item active={ws.view.kind === "workline"} onClick={() => ws.setView({ kind: "workline" })}>
-          <span className="mr-1.5 font-mono text-[10.5px] text-ink-3">01</span>工作台
+          工作台
         </Item>
         <Item active={ws.view.kind === "inbox"} onClick={() => ws.setView({ kind: "inbox" })} badge={pending}>
-          <span className="mr-1.5 font-mono text-[10.5px] text-ink-3">02</span>收件箱
+          收件箱
         </Item>
         <Item active={ws.view.kind === "tasks"} onClick={() => ws.setView({ kind: "tasks" })} badge={activeTasks}>
-          <span className="mr-1.5 font-mono text-[10.5px] text-ink-3">03</span>任务
+          任务
         </Item>
         <Item active={ws.view.kind === "docs"} onClick={() => ws.setView({ kind: "docs" })}>
-          <span className="mr-1.5 font-mono text-[10.5px] text-ink-3">04</span>文档
+          文档
         </Item>
-        <Item active={ws.view.kind === "team"} onClick={() => ws.setView({ kind: "team" })}>
-          <span className="mr-1.5 font-mono text-[10.5px] text-ink-3">05</span>团队
-        </Item>
-        <Item active={ws.view.kind === "usage"} onClick={() => ws.setView({ kind: "usage" })}>
-          <span className="mr-1.5 font-mono text-[10.5px] text-ink-3">06</span>用量
-        </Item>
+        <SectionTitle open={moreOpen} onToggle={() => setMoreOpen((value) => !value)}>更多</SectionTitle>
+        {moreOpen && (
+          <div className="space-y-0.5">
+            <Item active={ws.view.kind === "team"} onClick={() => ws.setView({ kind: "team" })}>团队</Item>
+            <Item active={ws.view.kind === "usage"} onClick={() => ws.setView({ kind: "usage" })}>用量</Item>
+          </div>
+        )}
 
-        <SectionTitle onAdd={onNewChannel}>频道</SectionTitle>
-        {channels.map((c) => (
+        <SectionTitle onAdd={onNewChannel} open={channelsOpen} onToggle={() => setChannelsOpen((value) => !value)}>频道</SectionTitle>
+        {channelsOpen && channels.map((c) => (
           <div
             key={c.id}
             className={`group flex w-full items-center gap-1 rounded-md px-3 py-1.5 text-[13.5px] ${
@@ -243,8 +255,8 @@ export function Sidebar({
           </div>
         ))}
 
-        <SectionTitle onAdd={onNewAgent}>AI 队友</SectionTitle>
-        {ws.agents.map((a) => (
+        <SectionTitle onAdd={onNewAgent} open={agentsOpen} onToggle={() => setAgentsOpen((value) => !value)}>AI 队友</SectionTitle>
+        {agentsOpen && ws.agents.map((a) => (
           <div key={a.id} className="group flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-[13.5px] text-ink-2 hover:bg-sel">
             <button onClick={() => void ws.openDm(a.id)} className="flex min-w-0 flex-1 items-center gap-2 text-left" title={`${a.role} · 点击私信`}>
               <AgentAvatar agent={a} size={20} />
@@ -260,8 +272,8 @@ export function Sidebar({
           </div>
         ))}
 
-        {dms.length > 0 && <SectionTitle>私信</SectionTitle>}
-        {dms.map((c) => {
+        {agentsOpen && dms.length > 0 && <div className="mt-3 px-3 text-[11.5px] font-medium text-ink-3">私信</div>}
+        {agentsOpen && dms.map((c) => {
           const agent = ws.agentById(c.dm_agent_id);
           return (
             <Item
@@ -287,7 +299,7 @@ export function Sidebar({
         <ThemeToggle />
         {ws.user.role === "admin" && (
           <button onClick={onSettings} className="rounded px-1 text-ink-3 hover:bg-sel hover:text-ink" title="模型供应商设置（仅管理员）">
-            ⚙
+            <Settings size={14} strokeWidth={1.8} />
           </button>
         )}
         <button
@@ -295,7 +307,7 @@ export function Sidebar({
           className="rounded px-1 text-ink-3 hover:bg-sel hover:text-red-500"
           title="退出登录"
         >
-          ⏻
+          <LogOut size={14} strokeWidth={1.8} />
         </button>
       </div>
     </aside>

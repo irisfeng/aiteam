@@ -8,7 +8,7 @@ import { TasksBoard } from "./components/TasksBoard";
 import { WorklineView } from "./components/WorklineView";
 import { InboxView } from "./components/InboxView";
 import { ChannelSettingsModal, NewAgentModal, NewChannelModal, SettingsModal, type SettingsTab } from "./components/Modals";
-import { MockBanner, WelcomeOverlay } from "./components/Onboarding";
+import { MockBanner } from "./components/Onboarding";
 import { LoginView } from "./components/LoginView";
 
 const DocsView = lazy(() => import("./components/DocsView").then((m) => ({ default: m.DocsView })));
@@ -27,10 +27,6 @@ export default function App() {
   const [profileAgent, setProfileAgent] = useState<Agent | null>(null);
   const [deepTaskId, setDeepTaskId] = useState<string | null>(null);
   const [deepApprovalId, setDeepApprovalId] = useState<string | null>(null);
-  const [suppressWelcome, setSuppressWelcome] = useState(() => {
-    const params = new URLSearchParams(window.location.search);
-    return ["channel", "view", "task", "approval"].some((key) => params.has(key));
-  });
 
   useEffect(() => {
     if (!ws.ready) return;
@@ -40,7 +36,6 @@ export default function App() {
     const taskId = params.get("task");
     const approvalId = params.get("approval");
     const hasDeepTarget = Boolean(channelId || view || taskId || approvalId);
-    if (hasDeepTarget) setSuppressWelcome(true);
     if (channelId && ws.channels.some((c) => c.id === channelId)) ws.openChannel(channelId);
     else if (taskId || view === "tasks") ws.setView({ kind: "tasks" });
     else if (approvalId || view === "inbox") ws.setView({ kind: "inbox" });
@@ -63,11 +58,6 @@ export default function App() {
   const openTaskFromModal = (taskId: string) => {
     setDeepTaskId(taskId);
     ws.setView({ kind: "tasks" });
-    setModal(null);
-  };
-
-  const openWorkline = () => {
-    ws.setView({ kind: "workline" });
     setModal(null);
   };
 
@@ -121,12 +111,6 @@ export default function App() {
       {modal === "agent" && <NewAgentModal onClose={() => setModal(null)} />}
       {modal === "settings" && <SettingsModal initialTab={settingsTab} onClose={() => setModal(null)} onOpenTask={openTaskFromModal} />}
       {profileAgent && <AgentProfileModal agent={profileAgent} onClose={() => setProfileAgent(null)} />}
-      <WelcomeOverlay
-        suppress={suppressWelcome}
-        onSettings={() => openSettings("providers")}
-        onNewChannel={() => setModal("channel")}
-        onOpenWorkline={openWorkline}
-      />
     </div>
   );
 }

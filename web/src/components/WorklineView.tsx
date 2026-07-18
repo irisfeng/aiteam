@@ -5,12 +5,14 @@ import { TaskDetailDrawer } from "./TaskDetailDrawer";
 import { WorklineOverview } from "./WorklineOverview";
 import type { SettingsTab } from "./Modals";
 import { TaskBriefComposer } from "./TaskBriefComposer";
+import { FocusWorkspace } from "./FocusWorkspace";
+import { ChevronRight } from "lucide-react";
 
 const DocViewerModal = lazy(() => import("./DocsView").then((m) => ({ default: m.DocViewerModal })));
 
 const ACCEPTANCE_PROJECT_PREFIX = "闭环验收";
 
-/** 工作台：登录默认页。任务运行线总控（需要你处理 / 场景启动 / 启动前检查 / 最新活动），看板在「任务」视图。 */
+/** 工作台：一个目标输入 + 少量当前任务；完整运行线与验收工具按需展开。 */
 export function WorklineView({ onOpenSettings }: { onOpenSettings?: (tab: SettingsTab) => void }) {
   const ws = useWorkspace();
   const [briefOpen, setBriefOpen] = useState(false);
@@ -119,51 +121,48 @@ export function WorklineView({ onOpenSettings }: { onOpenSettings?: (tab: Settin
 
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col">
-      <header className="flex flex-wrap items-center gap-3 border-b border-line px-4 py-3 sm:px-5">
-        <h1 className="text-[15px] font-semibold">工作台</h1>
-        <span className="min-w-0 flex-1 text-[12px] text-ink-3">用任务简报明确输出，再处理执行、审批与复核；看板明细在「任务」</span>
-        <div className="flex w-full flex-wrap items-center gap-2 lg:ml-auto lg:w-auto">
-          <button
-            onClick={() => setBriefOpen(true)}
-            className="rounded-lg bg-accent px-3 py-1.5 text-[13px] font-medium text-white disabled:opacity-40"
-          >
-            新建任务简报
-          </button>
-          <select
-            value={scenarioChannel?.id ?? ""}
-            onChange={(e) => setScenarioChannelId(e.target.value)}
-            className="min-w-28 flex-1 rounded-lg border border-line bg-panel px-2 py-1.5 text-[13px] text-ink-2 outline-none sm:flex-none"
-            title="核心场景与端到端验收的任务将挂到这个频道"
-          >
-            {teamChannels.length === 0 && <option value="">无团队频道</option>}
-            {teamChannels.map((c) => (
-              <option key={c.id} value={c.id}>
-                场景 → #{c.name}
-              </option>
-            ))}
-          </select>
-          <button
-            onClick={() => ws.setView({ kind: "tasks" })}
-            className="rounded-lg border border-line px-3 py-1.5 text-[13px] text-ink-2 hover:bg-sel hover:text-ink"
-            title="打开任务看板"
-          >
-            看板
-          </button>
+      <div className="min-h-0 flex-1 overflow-y-auto bg-[radial-gradient(circle_at_50%_18%,color-mix(in_srgb,var(--t-accent)_8%,transparent),transparent_44%)]">
+        <FocusWorkspace onOpenTask={setOpenTask} onOpenFullBrief={() => setBriefOpen(true)} />
+
+        <div className="mx-auto w-full max-w-[960px] px-4 pb-10 sm:px-8">
+          <details className="group border-t border-line/70">
+            <summary className="flex cursor-pointer list-none items-center gap-3 px-1 py-3.5 text-[12px] font-medium text-ink-3 hover:text-ink [&::-webkit-details-marker]:hidden">
+              <span className="flex-1">运行与验收工具</span>
+              <span className="text-[11.5px] font-normal text-ink-3">配置、自检与完整任务运行线</span>
+              <ChevronRight size={16} strokeWidth={1.8} className="text-ink-3 transition-transform group-open:rotate-90" />
+            </summary>
+            <div className="border-t border-line py-3">
+              <div className="mb-3 flex flex-wrap items-center gap-2">
+                <span className="text-[12px] text-ink-3">验收任务进入频道</span>
+                <select
+                  value={scenarioChannel?.id ?? ""}
+                  onChange={(e) => setScenarioChannelId(e.target.value)}
+                  className="min-w-32 rounded-lg border border-line bg-paper px-2 py-1.5 text-[12.5px] text-ink-2 outline-none"
+                  title="核心场景与端到端验收的任务将挂到这个频道"
+                >
+                  {teamChannels.length === 0 && <option value="">无团队频道</option>}
+                  {teamChannels.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      #{c.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <WorklineOverview
+                onOpenTask={setOpenTask}
+                onStartScenario={(id) => void startCoreScenario(id)}
+                onRunAcceptance={() => void runOrOpenAcceptance()}
+                acceptanceRun={acceptanceRun}
+                onOpenAcceptanceReview={openAcceptanceReview}
+                onCloseAcceptanceProject={() => void closeAcceptanceProject()}
+                activeScenarioId={activeScenarioId}
+                scenarioBusy={scenarioBusy}
+                scenarioError={scenarioError}
+                onOpenSettings={onOpenSettings}
+              />
+            </div>
+          </details>
         </div>
-      </header>
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 sm:px-5">
-        <WorklineOverview
-          onOpenTask={setOpenTask}
-          onStartScenario={(id) => void startCoreScenario(id)}
-          onRunAcceptance={() => void runOrOpenAcceptance()}
-          acceptanceRun={acceptanceRun}
-          onOpenAcceptanceReview={openAcceptanceReview}
-          onCloseAcceptanceProject={() => void closeAcceptanceProject()}
-          activeScenarioId={activeScenarioId}
-          scenarioBusy={scenarioBusy}
-          scenarioError={scenarioError}
-          onOpenSettings={onOpenSettings}
-        />
       </div>
       {openDoc && (
         <Suspense fallback={null}>

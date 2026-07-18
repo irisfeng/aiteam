@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { createHash } from "node:crypto";
 import {
   clearChannelMessages,
   clearMemory,
@@ -81,6 +82,7 @@ import {
 import { slidesToPptx } from "./pptx.js";
 import { MCP_REGISTRY, SKILL_PACK_REGISTRY } from "./registry.js";
 import { DEFAULT_IMAGE_BASE_URL, generateImageBytes } from "./agents/images.js";
+import { providerBenchmarkPassed, providerBenchmarkSourceTrace } from "./qualityBenchmark.js";
 import {
   assessProviderQualityBenchmarkDocument,
   isMock,
@@ -142,38 +144,9 @@ const PROVIDER_QUALITY_BENCHMARK = {
   ],
 } as const;
 
-function providerBenchmarkSourceTrace(events: ReturnType<typeof listTaskEvents>, docs: ReturnType<typeof listDocuments>) {
-  const observedTools = new Set(events
-    .filter((event) => event.type === "tool")
-    .map((event) => {
-      try {
-        const meta = JSON.parse(event.metadata_json || "{}") as { tool?: unknown };
-        return typeof meta.tool === "string" ? meta.tool : "";
-      } catch {
-        return "";
-      }
-    })
-    .filter(Boolean));
-  const combined = docs.map((doc) => doc.content).join("\n");
-  const claimPatterns: Array<[string, RegExp, RegExp]> = [
-    [
-      "web_search",
-      /(?:来源|通过|使用|调用|检索)[^。！？\n]{0,40}\bweb_search\b|\bweb_search\b[^。！？\n]{0,40}(?:来源|检索|调用|获得)/i,
-      /(?:没有|未|不得|禁止|不曾|无需)[^。！？\n]{0,16}(?:使用|调用|检索)?[^。！？\n]{0,8}\bweb_search\b/i,
-    ],
-    [
-      "web_fetch",
-      /(?:来源|通过|使用|调用|抓取)[^。！？\n]{0,40}\bweb_fetch\b|\bweb_fetch\b[^。！？\n]{0,40}(?:来源|抓取|调用|获得)/i,
-      /(?:没有|未|不得|禁止|不曾|无需)[^。！？\n]{0,16}(?:使用|调用|抓取)?[^。！？\n]{0,8}\bweb_fetch\b/i,
-    ],
-  ];
-  const sentences = combined.split(/(?<=[。！？\n])/).map((sentence) => sentence.trim()).filter(Boolean);
-  const unobservedClaims = claimPatterns
-    .filter(([tool, positive, negative]) =>
-      !observedTools.has(tool) && sentences.some((sentence) => positive.test(sentence) && !negative.test(sentence)),
-    )
-    .map(([tool]) => tool);
-  return { clean: unobservedClaims.length === 0, observed_tools: [...observedTools], unobserved_claims: unobservedClaims };
+function providerBenchmarkAgentName(prefix: string, providerId: string, providerName: string, model: string, role: string) {
+  const suffix = createHash("sha256").update(`${providerId}\0${model}\0${role}`).digest("hex").slice(0, 8);
+  return `${`${prefix}-${providerName}`.slice(0, 31)}-${suffix}`;
 }
 
 function emitTaskEvent(input: Parameters<typeof createTaskEvent>[0]) {
@@ -776,13 +749,16 @@ api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
       broadcast({ type: "channel:new", payload: channel });
     }
 
-    const agentName = `质量基准v3-${provider.name}-${workerModel}`.slice(0, 40);
-    let agent = listAgents().find((a) => a.provider_id === provider.id && a.name === agentName);
+    const workerRole = "真实交付物基准执行";
+    const agentName = providerBenchmarkAgentName("质量基准v3", provider.id, provider.name, workerModel, workerRole);
+    let agent = listAgents().find((a) =>
+      a.provider_id === provider.id && a.name === agentName && a.model === workerModel && a.role === workerRole,
+    );
     if (!agent) {
       agent = createAgent({
         name: agentName,
         emoji: "🧪",
-        role: "真实交付物基准执行",
+        role: workerRole,
         system_prompt:
           "你负责完成 AiTeam 的固定质量基准。必须严格按任务简报与七项验收标准写一份可用于真实决策的 report，并使用 write_document 交付；不得只在聊天里回答，不得编造事实或省略逐条自查表。",
         provider_id: provider.id,
@@ -790,13 +766,16 @@ api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
       });
     }
 
-    const reviewerName = `质量复核v3-${provider.name}-${reviewerModel}`.slice(0, 40);
-    let reviewer = listAgents().find((a) => a.provider_id === provider.id && a.name === reviewerName);
+    const reviewerRole = "真实交付物独立复核";
+    const reviewerName = providerBenchmarkAgentName("质量复核v3", provider.id, provider.name, reviewerModel, reviewerRole);
+    let reviewer = listAgents().find((a) =>
+      a.provider_id === provider.id && a.name === reviewerName && a.model === reviewerModel && a.role === reviewerRole,
+    );
     if (!reviewer) {
       reviewer = createAgent({
         name: reviewerName,
         emoji: "🔎",
-        role: "真实交付物独立复核",
+        role: reviewerRole,
         system_prompt:
           "你是严格、独立的交付质量复核人。逐条核对任务的七项验收标准；任何缺失、空泛、无证据能力声明或伪造数字都必须 submit_verdict=revise，并给出可执行的逐项返工意见。只有全部标准均有正文证据时才允许 pass。",
         provider_id: provider.id,
@@ -882,7 +861,10 @@ api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
     const independentReviewer = Boolean(task.reviewer_agent_id && task.reviewer_agent_id !== task.assignee_agent_id);
     const verdictRecorded = verdicts.length > 0 && verdicts.at(-1)?.result === "pass";
     const withinBudget = usageSummary.billable <= PROVIDER_QUALITY_BENCHMARK.budgetBillable;
-    const sourceTrace = providerBenchmarkSourceTrace(events, docs);
+    const sourceTrace = providerBenchmarkSourceTrace(events, docs, {
+      workerAgentId: agent.id,
+      reviewerAgentId: reviewer.id,
+    });
     const benchmarkReport = docs.find((doc) => doc.kind === "report");
     const documentContract = benchmarkReport
       ? assessProviderQualityBenchmarkDocument(benchmarkReport.content)
@@ -901,7 +883,7 @@ api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
       document_contract: documentContract.pass,
       pending_approval: pendingBudgetApproval,
     };
-    const ok = delivered && toolObserved && verified && usageTracked && qualityContract && independentReviewer && verdictRecorded && withinBudget && sourceTrace.clean && documentContract.pass;
+    const ok = providerBenchmarkPassed(checks);
     const runStatus = ok ? "passed" : pendingBudgetApproval ? "pending_approval" : "failed";
     const benchmark = {
       id: PROVIDER_QUALITY_BENCHMARK.id,
