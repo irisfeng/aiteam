@@ -217,6 +217,8 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
     focusSource.includes("FOCUS_SHORTCUTS") &&
     focusSource.includes("resolveFocusIntent") &&
     focusSource.includes("shortcutForGoal") &&
+    focusSource.includes("pickFocusReviewer") &&
+    focusSource.includes("复核：") &&
     focusSource.includes("ws.createTask") &&
     focusSource.includes("budget_billable: 16_000") &&
     focusSource.includes("进行中的任务") &&

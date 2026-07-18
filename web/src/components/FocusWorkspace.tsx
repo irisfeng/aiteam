@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { ChevronRight, FileText, Paperclip, Search, Send, Workflow } from "lucide-react";
 import { useWorkspace } from "../store";
-import type { Task } from "../types";
+import type { Agent, Task } from "../types";
 import { computeWorkline } from "../lib/workline";
 import { AgentAvatar } from "./Avatar";
 
@@ -71,6 +71,27 @@ function resolveFocusIntent(value: string): FocusIntent {
   return "decision";
 }
 
+function pickFocusReviewer(
+  agents: Agent[],
+  channelAgentIds: string[] | undefined,
+  assigneeId: string | undefined,
+  intent: FocusIntent,
+) {
+  if (!assigneeId) return undefined;
+  const members = channelAgentIds?.length ? new Set(channelAgentIds) : null;
+  const candidates = agents.filter((agent) => agent.id !== assigneeId && (!members || members.has(agent.id)));
+  const signal = (agent: Agent) => `${agent.name} ${agent.role}`;
+  const explicitReviewer = candidates.find((agent) => /校对|审核|复核|质检|QA|测试|review/i.test(signal(agent)));
+  if (explicitReviewer) return explicitReviewer;
+
+  const intentReviewer = candidates.find((agent) => {
+    const value = signal(agent);
+    if (intent === "project") return /产品|项目|工程|架构|交付|product|project|engineer/i.test(value);
+    return /SEO|调研|研究|分析|策略|内容|编辑|产品|research|analyst|content/i.test(value);
+  });
+  return intentReviewer ?? candidates[0];
+}
+
 function compactTitle(value: string) {
   const shortcut = shortcutForGoal(value);
   const titleSource = shortcut ? value.trim().slice(shortcut.prompt.length).trim() : value;
@@ -117,8 +138,11 @@ export function FocusWorkspace({
   const [error, setError] = useState("");
 
   const teamChannels = ws.channels.filter((channel) => channel.kind === "channel");
-  const defaultChannelId = teamChannels[0]?.id ?? null;
+  const defaultChannel = teamChannels[0];
+  const defaultChannelId = defaultChannel?.id ?? null;
   const selectedAgent = ws.agentById(agentId);
+  const previewIntent = resolveFocusIntent(goal);
+  const previewReviewer = pickFocusReviewer(ws.agents, defaultChannel?.agent_ids, selectedAgent?.id, previewIntent);
   const exactShortcut = FOCUS_SHORTCUTS.find((shortcut) => goal.trim() === shortcut.prompt.trim());
   const goalReady = goal.trim().length >= 4 && !exactShortcut;
   const snapshot = computeWorkline({
@@ -157,13 +181,14 @@ export function FocusWorkspace({
     setError("");
     try {
       const resolvedIntent = resolveFocusIntent(description);
+      const reviewer = pickFocusReviewer(ws.agents, defaultChannel?.agent_ids, selectedAgent?.id, resolvedIntent);
       const task = await ws.createTask({
         title: compactTitle(description),
         description,
         acceptance_criteria: ACCEPTANCE_BY_INTENT[resolvedIntent],
         channel_id: defaultChannelId,
         assignee_agent_id: selectedAgent?.id ?? null,
-        reviewer_agent_id: null,
+        reviewer_agent_id: reviewer?.id ?? null,
         budget_billable: 16_000,
       });
       setGoal("");
@@ -221,6 +246,12 @@ export function FocusWorkspace({
                 ))}
               </select>
             </label>
+            <span
+              className="max-w-[180px] truncate text-[11.5px] text-ink-3"
+              title={previewReviewer ? `独立复核：${previewReviewer.name}` : "当前团队只有一位 AI 同事，将执行任务内自检"}
+            >
+              {previewReviewer ? `复核：${previewReviewer.name}` : "任务内自检"}
+            </span>
             <button
               type="button"
               onClick={() => void submitGoal()}

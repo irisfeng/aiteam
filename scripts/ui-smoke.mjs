@@ -306,10 +306,16 @@ async function runViewport(debugPort, baseUrl, label, viewport) {
         .then((res) => res.json())
         .then((tasks) => {
           const task = tasks.find((item) => item.title === ${JSON.stringify(focusTitle)});
-          return Boolean(task && task.acceptance_criteria.includes('正式文档') && task.budget_billable === 16000);
+          return Boolean(
+            task &&
+            task.acceptance_criteria.includes('正式文档') &&
+            task.budget_billable === 16000 &&
+            task.reviewer_agent_id &&
+            task.reviewer_agent_id !== task.assignee_agent_id
+          );
         })
     `, true);
-    ok(`${label} shortcut maps to document contract and capped budget`, quickTaskContract);
+    ok(`${label} shortcut maps to document contract, independent reviewer and capped budget`, quickTaskContract);
     await page.screenshot(`scenario-${label}`);
     ok(`${label} task drawer visible`, await page.eval(`document.body.innerText.includes('责任链')`));
     ok(`${label} review checklist visible`, await page.eval(`document.body.innerText.includes('人工复核清单')`));
