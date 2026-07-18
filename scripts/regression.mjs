@@ -155,7 +155,9 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
     modalsSource.includes("打开任务") &&
     modalsSource.includes("7项契约") &&
     modalsSource.includes("独立复核") &&
-    modalsSource.includes("24k billable 触线") &&
+    modalsSource.includes("24k billable 内为强模型复核预留 8k") &&
+    modalsSource.includes("复核预算待批") &&
+    modalsSource.includes("不重复生成") &&
     modalsSource.includes("来源可追溯") &&
     modalsSource.includes("usage_summary") &&
     modalsSource.includes("billable") &&
@@ -1266,10 +1268,10 @@ fakeOpenAiServer = createServer((req, res) => {
     const serializedMessages = JSON.stringify(messages);
     const isQualityBenchmarkRequest = serializedMessages.includes("真实模型质量基准：AiTeam 产品落地决策简报");
     if (isQualityBenchmarkRequest && tools.includes("write_document")) {
-      qualityBenchmarkWorkerRequests.push({ tools: [...tools], messages: serializedMessages });
+      qualityBenchmarkWorkerRequests.push({ model: String(body.model || ""), tools: [...tools], messages: serializedMessages });
     }
     if (isQualityBenchmarkRequest && tools.includes("submit_verdict")) {
-      qualityBenchmarkVerifierRequests.push({ tools: [...tools], messages: serializedMessages });
+      qualityBenchmarkVerifierRequests.push({ model: String(body.model || ""), tools: [...tools], messages: serializedMessages });
     }
     const hasToolResult = toolMessages.length > 0;
     const isNetworkApprovalProbe =
@@ -1357,10 +1359,12 @@ fakeOpenAiServer = createServer((req, res) => {
       message = { role: "assistant", content: "Fake provider completed tool result follow-up." };
     }
     const respond = () => {
-      const highUsage = String(body.model || "").includes("high-usage");
-      const usage = highUsage
+      const modelName = String(body.model || "");
+      const usage = modelName.includes("high-usage")
         ? { prompt_tokens: 22000, completion_tokens: 9000, total_tokens: 31000 }
-        : { prompt_tokens: 7, completion_tokens: 5, total_tokens: 12 };
+        : modelName.includes("near-budget")
+          ? { prompt_tokens: 15000, completion_tokens: 3000, total_tokens: 18000 }
+          : { prompt_tokens: 7, completion_tokens: 5, total_tokens: 12 };
       if (body.stream === true) {
         // 真流式路径：模拟国内 OpenAI 兼容通道的 SSE 分片（含 stream_options.include_usage 的末尾 usage 块）
         fakeOpenAiStreamHits++;
@@ -3512,6 +3516,58 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
         eventTypes.has("blocked") &&
         !eventTypes.has("failure"),
       `ok=${result.ok}/${result.run_status} task=${result.task?.status} delivered=${result.checks?.delivered} approval=${result.pending_approval_id}/${pendingBudgetApproval?.id} events=${[...eventTypes].join(",")}`,
+    );
+  }
+
+  {
+    const model = "fake-near-budget-model";
+    const workerBefore = qualityBenchmarkWorkerRequests.filter((request) => request.model === model).length;
+    const verifierBefore = qualityBenchmarkVerifierRequests.filter((request) => request.model === model).length;
+    const prov = (await J("/providers", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "回归复核预算预留供应商",
+        api_key: "sk-local",
+        base_url: fakeOpenAiBase,
+        default_model: model,
+        is_strong: true,
+      }),
+    })).body;
+    const result = (await J(`/providers/${prov.id}/task-test`, { method: "POST" })).body;
+    const approval = result.pending_approval_id ? db.getApproval(result.pending_approval_id) : null;
+    let approvalPayload = {};
+    try { approvalPayload = JSON.parse(approval?.payload || "{}"); } catch { approvalPayload = {}; }
+    const workerAtPause = qualityBenchmarkWorkerRequests.filter((request) => request.model === model).length;
+    const verifierAtPause = qualityBenchmarkVerifierRequests.filter((request) => request.model === model).length;
+    const resolved = approval
+      ? await J(`/approvals/${approval.id}/resolve`, { method: "POST", body: JSON.stringify({ approve: true }) })
+      : { ok: false };
+    const completed = result.task?.id
+      ? await waitFor(() => db.getTask(result.task.id)?.status === "review", 20000)
+      : false;
+    const finalTask = result.task?.id ? db.getTask(result.task.id) : null;
+    const finalVerdicts = result.task?.id ? db.listVerdictsForTask(result.task.id) : [];
+    const finalEvents = result.task?.id ? db.listTaskEvents(result.task.id) : [];
+    const workerAfter = qualityBenchmarkWorkerRequests.filter((request) => request.model === model).length;
+    const verifierAfter = qualityBenchmarkVerifierRequests.filter((request) => request.model === model).length;
+    await J(`/providers/${prov.id}`, { method: "DELETE" });
+    check(
+      "Q6C",
+      "质量基准为强模型复核预留预算：不足时先暂停，批准后从复核点续跑且不重复生成初稿",
+      result.run_status === "pending_approval" &&
+        result.checks?.delivered === true &&
+        approvalPayload.resume_phase === "verification" &&
+        approvalPayload.review_reserve_billable === 8000 &&
+        workerAtPause === workerBefore + 1 &&
+        verifierAtPause === verifierBefore &&
+        resolved.ok === true &&
+        completed === true &&
+        finalTask?.status === "review" &&
+        workerAfter === workerAtPause &&
+        verifierAfter === verifierBefore + 1 &&
+        finalVerdicts.at(-1)?.result === "pass" &&
+        finalEvents.some((event) => event.type === "approval" && event.summary.includes("从独立复核继续")),
+      `initial=${result.run_status} phase=${approvalPayload.resume_phase}/${approvalPayload.review_reserve_billable} worker=${workerBefore}->${workerAtPause}->${workerAfter} verifier=${verifierBefore}->${verifierAtPause}->${verifierAfter} resolved=${resolved.ok} completed=${completed}/${finalTask?.status} verdict=${finalVerdicts.at(-1)?.result}`,
     );
   }
 

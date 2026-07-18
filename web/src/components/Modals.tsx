@@ -626,7 +626,7 @@ export function SettingsModal({
         r.checks.independent_reviewer ? "独立复核" : "复核冲突",
         r.checks.verdict_recorded ? "通过" : r.checks.pending_approval ? "待复核" : "未通过",
         r.checks.source_trace_clean ? "来源可追溯" : "来源声明冲突",
-        r.checks.within_budget ? "预算内" : "已触线",
+        r.checks.pending_approval ? "复核预算待批" : r.checks.within_budget ? "预算内" : "已触线",
         r.checks.usage_tracked ? "用量" : "无用量",
       ].join(" / ");
       setProviderTaskTest((s) => ({
@@ -839,7 +839,8 @@ export function SettingsModal({
         <input className="mt-0.5" type="checkbox" checked={runTaskAfterSave} onChange={(e) => setRunTaskAfterSave(e.target.checked)} />
         <span>
           保存后立即跑质量基准：固定业务题由轻量模型产出、强模型独立复核并自动返工，
-          同时验证工具、来源追溯、交付、验收和用量；24k billable 触线暂停（单次请求可能小幅越界）。
+          同时验证工具、来源追溯、交付、验收和用量；24k billable 内为强模型复核预留 8k，
+          余额不足会保留初稿并暂停，批准后直接从复核继续，不重复生成。
         </span>
       </label>
       {error && <div className="mt-2 text-[12px] text-red-500">{error}</div>}

@@ -386,7 +386,7 @@ export function WorklineOverview({
           : task.title;
     const detail =
       isProvider && model
-        ? `${model}${latency}${billable}${estimatedCost} · ${delivered ? "交付" : "未交付"} / ${toolObserved ? "工具" : "无工具"} / ${qualityContract ? "7项契约" : "契约缺失"} / ${independentReviewer ? "独立复核" : "复核冲突"} / ${verdictRecorded ? "pass" : pendingApproval ? "待复核" : verified ? "未通过" : "未验收"} / ${sourceTraceClean ? "来源可追溯" : "来源冲突"} / ${withinBudget ? "预算内" : "已触线"} / ${usageTracked === null ? "用量未知" : usageTracked ? "用量" : "无用量"}`
+        ? `${model}${latency}${billable}${estimatedCost} · ${delivered ? "交付" : "未交付"} / ${toolObserved ? "工具" : "无工具"} / ${qualityContract ? "7项契约" : "契约缺失"} / ${independentReviewer ? "独立复核" : "复核冲突"} / ${verdictRecorded ? "pass" : pendingApproval ? "待复核" : verified ? "未通过" : "未验收"} / ${sourceTraceClean ? "来源可追溯" : "来源冲突"} / ${pendingApproval ? "复核预算待批" : withinBudget ? "预算内" : "已触线"} / ${usageTracked === null ? "用量未知" : usageTracked ? "用量" : "无用量"}`
         : task.status === "review" || task.status === "done"
           ? `${task.status} · 已有可复核交付证据`
         : task.status === "blocked"
@@ -416,7 +416,7 @@ export function WorklineOverview({
       ? "链路自检需要管理员权限"
       : linkCheckOpen
         ? "打开当前配置验收项目的任务证据；不重复创建新项目"
-        : "手动跑一次模型质量基准与 MCP/Skills 演练；模型基准 24k billable 触线暂停，单次请求可能小幅越界";
+        : "手动跑一次模型质量基准与 MCP/Skills 演练；24k 内预留 8k 强模型复核额度，余额不足会保留初稿并暂停";
   const acceptanceButtonLabel =
     scenarioBusy && activeScenarioId === "acceptance"
       ? "验收中…"
@@ -539,7 +539,7 @@ export function WorklineOverview({
               id: `provider:${provider.id}`,
               label: `模型 · ${provider.name}`,
               status: out.run_status === "passed" ? "passed" : out.run_status === "pending_approval" ? "waiting" : "failed",
-              detail: `${out.models.worker}→${out.models.reviewer} · ${Math.round(out.latency_ms)}ms · ${formatTokenCount(out.usage_summary?.billable)} billable${formatEstimatedCost(out.usage_summary?.estimated_cost, out.usage_summary?.price_currency)} · ${out.checks.delivered ? "交付" : "未交付"} / ${out.checks.quality_contract ? "7项契约" : "契约缺失"} / ${out.checks.independent_reviewer ? "独立复核" : "复核冲突"} / ${out.checks.verdict_recorded ? "pass" : out.checks.pending_approval ? "待复核" : "未通过"} / ${out.checks.source_trace_clean ? "来源可追溯" : "来源冲突"} / ${out.checks.within_budget ? "预算内" : "已触线"}`,
+              detail: `${out.models.worker}→${out.models.reviewer} · ${Math.round(out.latency_ms)}ms · ${formatTokenCount(out.usage_summary?.billable)} billable${formatEstimatedCost(out.usage_summary?.estimated_cost, out.usage_summary?.price_currency)} · ${out.checks.delivered ? "交付" : "未交付"} / ${out.checks.quality_contract ? "7项契约" : "契约缺失"} / ${out.checks.independent_reviewer ? "独立复核" : "复核冲突"} / ${out.checks.verdict_recorded ? "pass" : out.checks.pending_approval ? "待复核" : "未通过"} / ${out.checks.source_trace_clean ? "来源可追溯" : "来源冲突"} / ${out.checks.pending_approval ? "复核预算待批" : out.checks.within_budget ? "预算内" : "已触线"}`,
               taskId: out.task.id,
             });
           } catch (e: any) {
