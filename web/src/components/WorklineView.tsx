@@ -4,6 +4,7 @@ import type { Doc, Task } from "../types";
 import { TaskDetailDrawer } from "./TaskDetailDrawer";
 import { WorklineOverview } from "./WorklineOverview";
 import type { SettingsTab } from "./Modals";
+import { TaskBriefComposer } from "./TaskBriefComposer";
 
 const DocViewerModal = lazy(() => import("./DocsView").then((m) => ({ default: m.DocViewerModal })));
 
@@ -12,8 +13,7 @@ const ACCEPTANCE_PROJECT_PREFIX = "闭环验收";
 /** 工作台：登录默认页。任务运行线总控（需要你处理 / 场景启动 / 启动前检查 / 最新活动），看板在「任务」视图。 */
 export function WorklineView({ onOpenSettings }: { onOpenSettings?: (tab: SettingsTab) => void }) {
   const ws = useWorkspace();
-  const [title, setTitle] = useState("");
-  const [assignee, setAssignee] = useState("");
+  const [briefOpen, setBriefOpen] = useState(false);
   const [openDoc, setOpenDoc] = useState<Doc | null>(null);
   const [openTask, setOpenTask] = useState<Task | null>(null);
   const [scenarioBusy, setScenarioBusy] = useState(false);
@@ -21,13 +21,6 @@ export function WorklineView({ onOpenSettings }: { onOpenSettings?: (tab: Settin
   const [scenarioError, setScenarioError] = useState("");
   const [acceptanceProjectId, setAcceptanceProjectId] = useState<string | null>(null);
   const [scenarioChannelId, setScenarioChannelId] = useState("");
-
-  async function addTask() {
-    const t = title.trim();
-    if (!t) return;
-    await ws.createTask({ title: t, assignee_agent_id: assignee || null });
-    setTitle("");
-  }
 
   const teamChannels = ws.channels.filter((c) => c.kind === "channel");
   const scenarioChannel = teamChannels.find((c) => c.id === scenarioChannelId) ?? teamChannels[0] ?? ws.channels[0];
@@ -128,33 +121,13 @@ export function WorklineView({ onOpenSettings }: { onOpenSettings?: (tab: Settin
     <div className="flex h-full min-w-0 flex-1 flex-col">
       <header className="flex flex-wrap items-center gap-3 border-b border-line px-4 py-3 sm:px-5">
         <h1 className="text-[15px] font-semibold">工作台</h1>
-        <span className="min-w-0 flex-1 text-[12px] text-ink-3">派任务、处理审批与复核、启动核心场景；看板明细在「任务」</span>
+        <span className="min-w-0 flex-1 text-[12px] text-ink-3">用任务简报明确输出，再处理执行、审批与复核；看板明细在「任务」</span>
         <div className="flex w-full flex-wrap items-center gap-2 lg:ml-auto lg:w-auto">
-          <input
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && void addTask()}
-            placeholder="快速新建任务…"
-            className="min-w-0 flex-1 rounded-lg border border-line bg-panel px-3 py-1.5 text-[13px] outline-none focus:border-accent/50 sm:flex-none sm:w-52"
-          />
-          <select
-            value={assignee}
-            onChange={(e) => setAssignee(e.target.value)}
-            className="min-w-28 flex-1 rounded-lg border border-line bg-panel px-2 py-1.5 text-[13px] text-ink-2 outline-none sm:flex-none"
-          >
-            <option value="">不指派</option>
-            {ws.agents.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.emoji} {a.name}
-              </option>
-            ))}
-          </select>
           <button
-            onClick={() => void addTask()}
-            disabled={!title.trim()}
+            onClick={() => setBriefOpen(true)}
             className="rounded-lg bg-accent px-3 py-1.5 text-[13px] font-medium text-white disabled:opacity-40"
           >
-            新建
+            新建任务简报
           </button>
           <select
             value={scenarioChannel?.id ?? ""}
@@ -205,6 +178,7 @@ export function WorklineView({ onOpenSettings }: { onOpenSettings?: (tab: Settin
           onOpenTask={setOpenTask}
         />
       )}
+      <TaskBriefComposer open={briefOpen} onClose={() => setBriefOpen(false)} onCreated={setOpenTask} />
     </div>
   );
 }

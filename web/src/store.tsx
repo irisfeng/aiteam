@@ -248,8 +248,10 @@ interface Store extends State {
     channel_id?: string | null;
     assignee_agent_id?: string | null;
     reviewer_agent_id?: string | null;
+    acceptance_criteria?: string;
+    source_doc_ids?: string[];
   }) => Promise<Task>;
-  updateTask: (id: string, data: Partial<Pick<Task, "title" | "description" | "status" | "assignee_agent_id" | "reviewer_agent_id" | "budget_billable">>) => Promise<Task>;
+  updateTask: (id: string, data: Partial<Pick<Task, "title" | "description" | "acceptance_criteria" | "status" | "assignee_agent_id" | "reviewer_agent_id" | "budget_billable">>) => Promise<Task>;
   createProvider: (data: import("./api").ProviderInput) => Promise<Provider>;
   updateProvider: (id: string, data: import("./api").ProviderInput) => Promise<Provider>;
   deleteProvider: (id: string) => Promise<void>;

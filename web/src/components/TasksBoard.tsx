@@ -3,6 +3,7 @@ import { useWorkspace } from "../store";
 import type { Doc, Task } from "../types";
 import { API_BASE } from "../api";
 import { TaskDetailDrawer } from "./TaskDetailDrawer";
+import { TaskBriefComposer } from "./TaskBriefComposer";
 
 const DocViewerModal = lazy(() => import("./DocsView").then((m) => ({ default: m.DocViewerModal })));
 
@@ -55,6 +56,7 @@ function TaskCard({ task, onOpenDoc, onOpenTask }: { task: Task; onOpenDoc: (doc
     (a) => a.status === "pending" && (a.ref_id === task.id || a.id === task.blocked_approval_id),
   );
   const terminal = task.status === "done" || task.status === "cancelled";
+  const briefReady = Boolean(task.description.trim() && task.acceptance_criteria.trim());
   let depCount = 0;
   try {
     depCount = (JSON.parse(task.depends_on) as string[]).length;
@@ -110,9 +112,9 @@ function TaskCard({ task, onOpenDoc, onOpenTask }: { task: Task; onOpenDoc: (doc
           <select
             value={task.assignee_agent_id ?? ""}
             onChange={(e) => void ws.updateTask(task.id, { assignee_agent_id: e.target.value || null })}
-            disabled={terminal}
+            disabled={terminal || !briefReady}
             className="min-w-0 rounded-full border border-line bg-sel px-1.5 py-0.5 text-[11.5px] text-ink-2 outline-none disabled:opacity-50"
-            title="指派给 AI 同事后会自动开工"
+            title={briefReady ? "指派给 AI 同事后会自动开工" : "先打开详情，补齐目标背景和验收标准"}
           >
             <option value="">未分配</option>
             {ws.agents.map((a) => (
@@ -137,6 +139,15 @@ function TaskCard({ task, onOpenDoc, onOpenTask }: { task: Task; onOpenDoc: (doc
           </select>
         </div>
         <div className="flex min-h-6 items-center gap-1.5">
+          {!briefReady && !terminal && (
+            <button
+              onClick={() => onOpenTask(task)}
+              className="rounded bg-amber-50 px-1.5 py-0.5 text-[11px] font-medium text-amber-700 hover:bg-amber-100 dark:bg-amber-950/20 dark:text-amber-300"
+              title="缺少目标背景或验收标准，暂不能指派开工"
+            >
+              简报待完善
+            </button>
+          )}
           {creator && (
             <span className="truncate text-[11px] text-ink-3" title={`由 ${creator.name} 创建`}>
               {creator.emoji} 创建
@@ -407,8 +418,7 @@ export function TasksBoard({
   onDeepTaskConsumed?: () => void;
 }) {
   const ws = useWorkspace();
-  const [title, setTitle] = useState("");
-  const [assignee, setAssignee] = useState("");
+  const [briefOpen, setBriefOpen] = useState(false);
   const [openDoc, setOpenDoc] = useState<Doc | null>(null);
   const [openTask, setOpenTask] = useState<Task | null>(null);
 
@@ -420,44 +430,17 @@ export function TasksBoard({
     onDeepTaskConsumed?.();
   }, [deepTaskId, onDeepTaskConsumed, ws.tasks]);
 
-  async function addTask() {
-    const t = title.trim();
-    if (!t) return;
-    await ws.createTask({ title: t, assignee_agent_id: assignee || null });
-    setTitle("");
-  }
-
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col">
       <header className="flex flex-wrap items-center gap-3 border-b border-line px-4 py-3 sm:px-5">
         <h1 className="text-[15px] font-semibold">任务</h1>
-        <span className="min-w-0 flex-1 text-[12px] text-ink-3">指派给 AI 同事即自动开工：调研 → 交付文档 → 转待评审</span>
+        <span className="min-w-0 flex-1 text-[12px] text-ink-3">任务简报 → AI 执行 → 独立复核 → 人工关闭</span>
         <div className="flex w-full flex-wrap items-center gap-2 lg:ml-auto lg:w-auto">
-          <input
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && void addTask()}
-            placeholder="快速新建任务…"
-            className="min-w-0 flex-1 rounded-lg border border-line bg-panel px-3 py-1.5 text-[13px] outline-none focus:border-accent/50 sm:flex-none sm:w-52"
-          />
-          <select
-            value={assignee}
-            onChange={(e) => setAssignee(e.target.value)}
-            className="min-w-28 flex-1 rounded-lg border border-line bg-panel px-2 py-1.5 text-[13px] text-ink-2 outline-none sm:flex-none"
-          >
-            <option value="">不指派</option>
-            {ws.agents.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.emoji} {a.name}
-              </option>
-            ))}
-          </select>
           <button
-            onClick={() => void addTask()}
-            disabled={!title.trim()}
+            onClick={() => setBriefOpen(true)}
             className="rounded-lg bg-accent px-3 py-1.5 text-[13px] font-medium text-white disabled:opacity-40"
           >
-            新建
+            新建任务简报
           </button>
         </div>
       </header>
@@ -518,6 +501,7 @@ export function TasksBoard({
           onOpenTask={setOpenTask}
         />
       )}
+      <TaskBriefComposer open={briefOpen} onClose={() => setBriefOpen(false)} onCreated={setOpenTask} />
     </div>
   );
 }

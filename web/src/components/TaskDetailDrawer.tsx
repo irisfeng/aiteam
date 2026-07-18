@@ -166,6 +166,10 @@ export function TaskDetailDrawer({
   const [expandedVerdicts, setExpandedVerdicts] = useState<Record<string, boolean>>({});
   const [budgetInput, setBudgetInput] = useState("");
   const [savingBudget, setSavingBudget] = useState(false);
+  const [editingBrief, setEditingBrief] = useState(false);
+  const [briefDescription, setBriefDescription] = useState("");
+  const [briefAcceptance, setBriefAcceptance] = useState("");
+  const [savingBrief, setSavingBrief] = useState(false);
   const [actionError, setActionError] = useState("");
 
   useEffect(() => {
@@ -181,8 +185,11 @@ export function TaskDetailDrawer({
 
   useEffect(() => {
     setBudgetInput(task.budget_billable > 0 ? String(task.budget_billable) : "");
+    setBriefDescription(task.description);
+    setBriefAcceptance(task.acceptance_criteria);
+    setEditingBrief(false);
     setActionError("");
-  }, [task.id, task.budget_billable]);
+  }, [task.id, task.budget_billable, task.description, task.acceptance_criteria]);
   const assignee = ws.agentById(task.assignee_agent_id);
   const reviewer = ws.agentById(task.reviewer_agent_id);
   const creator = task.created_by === "user" ? null : ws.agentById(task.created_by);
@@ -281,6 +288,27 @@ export function TaskDetailDrawer({
     }
   }
 
+  async function saveBrief() {
+    if (savingBrief || terminal) return;
+    if (!briefDescription.trim() || !briefAcceptance.trim()) {
+      setActionError("任务简报必须同时包含目标背景和验收标准，才能交给负责人开工。");
+      return;
+    }
+    setActionError("");
+    setSavingBrief(true);
+    try {
+      await ws.updateTask(task.id, {
+        description: briefDescription.trim(),
+        acceptance_criteria: briefAcceptance.trim(),
+      });
+      setEditingBrief(false);
+    } catch (error) {
+      captureActionError(error);
+    } finally {
+      setSavingBrief(false);
+    }
+  }
+
   async function updateRole(kind: "assignee" | "reviewer", agentId: string) {
     if (savingRole) return;
     setActionError("");
@@ -349,7 +377,6 @@ export function TaskDetailDrawer({
               ×
             </button>
           </div>
-          {task.description && <p className="mt-2 whitespace-pre-wrap text-[12.5px] leading-relaxed text-ink-2">{task.description}</p>}
           <div className={`mt-3 rounded-lg border px-3 py-2 ${hintToneClass}`}>
             <div className="flex items-start gap-2">
               <div className="min-w-0 flex-1">
@@ -381,6 +408,69 @@ export function TaskDetailDrawer({
         </header>
 
         <div className="flex-1 space-y-4 overflow-y-auto px-4 py-3">
+          <section>
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <h3 className="text-[12px] font-semibold text-ink-2">任务简报</h3>
+              {!terminal && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingBrief((value) => !value);
+                    setActionError("");
+                  }}
+                  className="rounded-md border border-line px-2 py-1 text-[11px] font-medium text-ink-2 hover:bg-sel"
+                >
+                  {editingBrief ? "取消编辑" : task.description && task.acceptance_criteria ? "编辑简报" : "完善简报"}
+                </button>
+              )}
+            </div>
+            {editingBrief ? (
+              <div className="space-y-2 rounded-lg border border-line bg-panel p-3">
+                <label className="block">
+                  <span className="text-[11px] font-medium text-ink-3">目标、背景与边界</span>
+                  <textarea
+                    value={briefDescription}
+                    onChange={(event) => setBriefDescription(event.target.value)}
+                    rows={4}
+                    className="mt-1 w-full resize-y rounded-md border border-line bg-paper px-2.5 py-2 text-[12px] leading-relaxed outline-none focus:border-accent/50"
+                    placeholder="为什么做、给谁用、范围到哪里、有哪些限制？"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-[11px] font-medium text-ink-3">预期交付物与验收标准</span>
+                  <textarea
+                    value={briefAcceptance}
+                    onChange={(event) => setBriefAcceptance(event.target.value)}
+                    rows={5}
+                    className="mt-1 w-full resize-y rounded-md border border-line bg-paper px-2.5 py-2 text-[12px] leading-relaxed outline-none focus:border-accent/50"
+                    placeholder={"交付物：一份可直接使用的报告（report）\n1. 关键结论有证据\n2. 风险与下一步明确"}
+                  />
+                </label>
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => void saveBrief()}
+                    disabled={savingBrief || !briefDescription.trim() || !briefAcceptance.trim()}
+                    className="rounded-md bg-accent px-3 py-1.5 text-[11.5px] font-semibold text-white hover:opacity-90 disabled:opacity-40"
+                  >
+                    {savingBrief ? "保存中…" : "保存简报"}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-2 rounded-lg border border-line bg-panel p-3 text-[12px] leading-relaxed">
+                <div>
+                  <div className="mb-1 text-[10.5px] font-medium text-ink-3">目标、背景与边界</div>
+                  <div className={task.description ? "whitespace-pre-wrap text-ink-2" : "text-amber-600"}>{task.description || "未填写，当前不能指派开工"}</div>
+                </div>
+                <div className="border-t border-line pt-2">
+                  <div className="mb-1 text-[10.5px] font-medium text-ink-3">预期交付物与验收标准</div>
+                  <div className={task.acceptance_criteria ? "whitespace-pre-wrap text-ink-2" : "text-amber-600"}>{task.acceptance_criteria || "未填写，当前不能指派开工"}</div>
+                </div>
+              </div>
+            )}
+          </section>
+
           <section>
             <h3 className="mb-2 text-[12px] font-semibold text-ink-2">责任链</h3>
             <div className="grid grid-cols-2 gap-2 text-[12px]">
@@ -423,13 +513,6 @@ export function TaskDetailDrawer({
             </div>
             {savingRole && <div className="mt-1.5 text-[11px] text-ink-3">正在更新{savingRole === "assignee" ? "负责人" : "复核人"}…</div>}
           </section>
-
-          {task.acceptance_criteria && (
-            <section>
-              <h3 className="mb-2 text-[12px] font-semibold text-ink-2">验收标准</h3>
-              <div className="whitespace-pre-wrap rounded-md bg-sel px-3 py-2 text-[12px] leading-relaxed text-ink-2">{task.acceptance_criteria}</div>
-            </section>
-          )}
 
           {(task.acceptance_criteria || task.status === "review" || docs.length > 0) && (
             <section>

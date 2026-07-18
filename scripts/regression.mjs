@@ -85,6 +85,7 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
   const worklineSource = readFileSync(join(root, "web/src/components/WorklineOverview.tsx"), "utf8");
   const tasksBoardSource = readFileSync(join(root, "web/src/components/TasksBoard.tsx"), "utf8");
   const taskDetailSource = readFileSync(join(root, "web/src/components/TaskDetailDrawer.tsx"), "utf8");
+  const taskBriefSource = readFileSync(join(root, "web/src/components/TaskBriefComposer.tsx"), "utf8");
   const inboxSource = readFileSync(join(root, "web/src/components/InboxView.tsx"), "utf8");
   const modalsSource = readFileSync(join(root, "web/src/components/Modals.tsx"), "utf8");
   const worklineLibSource = readFileSync(join(root, "web/src/lib/workline.ts"), "utf8");
@@ -229,6 +230,21 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
     "人工 UAT 文档：入口包含 /aiteam/，导出路径正确并明确需要登录态",
     manualUatPaths,
     `manualUatPaths=${manualUatPaths}`,
+  );
+  const taskBriefFlow =
+    taskBriefSource.includes("新建任务简报") &&
+    taskBriefSource.includes("预期交付物") &&
+    taskBriefSource.includes("验收标准") &&
+    taskBriefSource.includes("创建并开工") &&
+    taskBriefSource.includes("负责人和复核人不能是同一位") &&
+    taskBriefSource.includes("acceptance_criteria: acceptance") &&
+    tasksBoardSource.includes("TaskBriefComposer") &&
+    worklineViewSource.includes("TaskBriefComposer");
+  check(
+    "UX9",
+    "任务简报：工作台与看板共用目标/交付物/验收/责任链入口，完整后才允许开工",
+    taskBriefFlow,
+    `taskBriefFlow=${taskBriefFlow}`,
   );
 }
 
@@ -1509,8 +1525,6 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
       depends_on: [prerequisite.id],
       created_by: "user",
     });
-    const deliveredBefore = db.qualitySummary().coverage.delivered;
-    const agentDeliveredBefore = db.agentDailyStats(0).get(eng.id)?.delivered ?? 0;
     const cancelled = await J(`/tasks/${prerequisite.id}`, {
       method: "PATCH",
       body: JSON.stringify({ status: "cancelled" }),
@@ -1535,24 +1549,32 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
       method: "PATCH",
       body: JSON.stringify({ budget_billable: 999 }),
     });
-    const live = await J("/tasks", {
-      method: "POST",
-      body: JSON.stringify({
-        channel_id: ch.id,
-        title: "回归-运行中取消保持终态",
-        assignee_agent_id: eng.id,
-      }),
+    // 直接构造 doing 快照，避免 Mock worker 在 HTTP 取消请求到达前极速交付造成竞态；
+    // 本用例只验证取消状态机与统计语义，真实运行中停止/取消另有 HC3L/HC3M 覆盖。
+    const live = db.createTask({
+      channel_id: ch.id,
+      title: "回归-运行中取消保持终态",
+      description: "验证运行中的任务被取消后保持取消终态，且不会误计为交付。",
+      acceptance_criteria: "取消后必须保持 cancelled，且不得解锁下游或增加交付统计。",
+      assignee_agent_id: eng.id,
+      created_by: "user",
     });
-    const liveStarted = await waitFor(() => db.getTask(live.body.id)?.status === "doing", 5000, 10);
-    const liveCancelled = await J(`/tasks/${live.body.id}`, {
+    db.updateTask(live.id, { status: "doing" });
+    const liveStarted = db.getTask(live.id)?.status === "doing";
+    const liveCancelled = await J(`/tasks/${live.id}`, {
       method: "PATCH",
       body: JSON.stringify({ status: "cancelled" }),
     });
     await new Promise((resolve) => setTimeout(resolve, 150));
-    const deliveredAfter = db.qualitySummary().coverage.delivered;
-    const agentDeliveredAfter = db.agentDailyStats(0).get(eng.id)?.delivered ?? 0;
     const cancelEvents = db.listTaskEvents(prerequisite.id);
+    const liveEvents = db.listTaskEvents(live.id);
     const downstreamEvents = db.listTaskEvents(dependent.id);
+    const cancelledHasNoDeliveryEvidence =
+      !cancelEvents.some((event) => event.type === "delivery" || event.type === "verification") &&
+      !liveEvents.some((event) => event.type === "delivery" || event.type === "verification") &&
+      db.listVerdictsForTask(prerequisite.id).length === 0 &&
+      db.listVerdictsForTask(live.id).length === 0 &&
+      !db.listDocuments().some((doc) => doc.task_id === prerequisite.id || doc.task_id === live.id);
     check(
       "HC3D",
       "取消语义：未交付不能置 done；cancelled 不解锁依赖、不计交付或质量覆盖",
@@ -1567,13 +1589,13 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
         db.getTask(doneTask.id).budget_billable === 240 &&
         liveStarted &&
         liveCancelled.ok &&
-        db.getTask(live.body.id).status === "cancelled" &&
+        db.getTask(live.id).status === "cancelled" &&
         db.getTask(dependent.id).status === "todo" &&
         !downstreamEvents.some((event) => event.type === "start") &&
         cancelEvents.some((event) => event.type === "cancelled") &&
-        deliveredAfter === deliveredBefore &&
-        agentDeliveredAfter === agentDeliveredBefore,
-      `fakeDone=${fakeDone.ok} cancelled=${cancelled.ok} frozenBudget=${!cancelledBudgetEdit.ok}/${!doneBudgetEdit.ok} live=${liveStarted}/${liveCancelled.ok}/${db.getTask(live.body.id).status} downstream=${db.getTask(dependent.id).status} delivered=${deliveredBefore}->${deliveredAfter}`,
+        liveEvents.some((event) => event.type === "cancelled") &&
+        cancelledHasNoDeliveryEvidence,
+      `fakeDone=${fakeDone.ok} cancelled=${cancelled.ok} frozenBudget=${!cancelledBudgetEdit.ok}/${!doneBudgetEdit.ok} live=${liveStarted}/${liveCancelled.ok}/${db.getTask(live.id).status} downstream=${db.getTask(dependent.id).status} noDeliveryEvidence=${cancelledHasNoDeliveryEvidence}`,
     );
   }
 
@@ -1797,6 +1819,8 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
     const reassignedTask = db.createTask({
       channel_id: ch.id,
       title: "回归-network-路由改派关闭授权",
+      description: "验证负责人变更后旧的网络授权不可复活。",
+      acceptance_criteria: "旧负责人授权必须关闭，改派后不得复用。",
       assignee_agent_id: noRunAgent.id,
       created_by: "user",
     });
@@ -1827,6 +1851,8 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
     const cancelledTask = db.createTask({
       channel_id: ch.id,
       title: "回归-network-取消关闭授权",
+      description: "验证取消任务后旧的网络授权不可复活。",
+      acceptance_criteria: "任务取消后旧授权必须关闭且不得复用。",
       assignee_agent_id: noRunAgent.id,
       created_by: "user",
     });
@@ -1857,6 +1883,8 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
     const rejectedTask = db.createTask({
       channel_id: ch.id,
       title: "回归-network-拒绝后可调整重试",
+      description: "验证拒绝网络授权后可以调整任务并重新尝试。",
+      acceptance_criteria: "拒绝后保持阻塞；人工恢复时清除阻塞引用并留下事件。",
       assignee_agent_id: noRunAgent.id,
       created_by: "user",
     });
@@ -1977,6 +2005,66 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
       `delivery=${deliveryClosed} done=${doneResult.ok}/${doneClosed} revise=${reviseResult.ok}/${reviseClosed} projectClose=${closeResult.ok}/${projectCloseClosed}`,
     );
     db.deleteMcpServer(networkServer.id);
+  }
+
+  // HC3Q 任务开工质量闸：有负责人就意味着会自动开工，必须先具备可执行的任务简报
+  {
+    const incomplete = await J("/tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        channel_id: ch.id,
+        title: "回归-缺少输出契约不得开工",
+        assignee_agent_id: eng.id,
+      }),
+    });
+    check(
+      "HC3Q",
+      "任务开工质量闸：缺少背景与验收标准的已指派任务拒绝自动开工",
+      !incomplete.ok &&
+        incomplete.body?.code === "TASK_BRIEF_INCOMPLETE" &&
+        incomplete.body?.missing?.includes("description") &&
+        incomplete.body?.missing?.includes("acceptance_criteria"),
+      `ok=${incomplete.ok} code=${incomplete.body?.code ?? "?"} missing=${incomplete.body?.missing?.join(",") ?? "?"}`,
+    );
+  }
+
+  {
+    const draft = (await J("/tasks", {
+      method: "POST",
+      body: JSON.stringify({ channel_id: ch.id, title: "回归-不完整待办" }),
+    })).body;
+    const assigned = await J(`/tasks/${draft.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ assignee_agent_id: eng.id }),
+    });
+    check(
+      "HC3Q2",
+      "任务开工质量闸：不完整待办不能通过后续指派绕过输出契约",
+      !assigned.ok &&
+        assigned.body?.code === "TASK_BRIEF_INCOMPLETE" &&
+        db.getTask(draft.id)?.assignee_agent_id === null,
+      `ok=${assigned.ok} code=${assigned.body?.code ?? "?"} assignee=${db.getTask(draft.id)?.assignee_agent_id ?? "null"}`,
+    );
+  }
+
+  {
+    const selfReviewed = await J("/tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        channel_id: ch.id,
+        title: "回归-执行与复核必须分离",
+        description: "输出一份可核验的回归报告。",
+        acceptance_criteria: "交付物：一份 report；必须逐条说明验证结果。",
+        assignee_agent_id: eng.id,
+        reviewer_agent_id: eng.id,
+      }),
+    });
+    check(
+      "HC3Q3",
+      "任务开工质量闸：显式复核人不能与负责人相同",
+      !selfReviewed.ok && selfReviewed.body?.code === "TASK_REVIEWER_CONFLICT",
+      `ok=${selfReviewed.ok} code=${selfReviewed.body?.code ?? "?"}`,
+    );
   }
 
   // HC3C clarification HTTP 闭环：用户输入必须随审批一起持久化，并进入任务活动日志

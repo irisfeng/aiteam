@@ -851,9 +851,32 @@ api.get("/tasks/:id/verdicts", (req, res) => {
 });
 api.get("/quality", (_req, res) => res.json(qualitySummary()));
 
+function missingTaskBriefFields(input: { description: unknown; acceptance_criteria: unknown }): string[] {
+  const missing: string[] = [];
+  if (!String(input.description ?? "").trim()) missing.push("description");
+  if (!String(input.acceptance_criteria ?? "").trim()) missing.push("acceptance_criteria");
+  return missing;
+}
+
 api.post("/tasks", (req, res) => {
   const { title, description, channel_id, assignee_agent_id, reviewer_agent_id, acceptance_criteria, source_doc_ids, budget_billable } = req.body ?? {};
   if (!title) return res.status(400).json({ error: "title required" });
+  const missing = assignee_agent_id
+    ? missingTaskBriefFields({ description, acceptance_criteria })
+    : [];
+  if (missing.length > 0) {
+    return res.status(400).json({
+      error: "task brief incomplete: assigned tasks require context and acceptance criteria before execution",
+      code: "TASK_BRIEF_INCOMPLETE",
+      missing,
+    });
+  }
+  if (assignee_agent_id && reviewer_agent_id && assignee_agent_id === reviewer_agent_id) {
+    return res.status(400).json({
+      error: "task reviewer must be independent from the assignee",
+      code: "TASK_REVIEWER_CONFLICT",
+    });
+  }
   const task = createTask({
     title: String(title),
     description: String(description ?? ""),
@@ -1164,9 +1187,32 @@ api.post("/scenarios/:id/start", (req, res) => {
 });
 
 api.patch("/tasks/:id", (req, res) => {
-  const { title, description, status, assignee_agent_id, reviewer_agent_id } = req.body ?? {};
+  const { title, description, status, assignee_agent_id, reviewer_agent_id, acceptance_criteria } = req.body ?? {};
   const prev = getTask(req.params.id);
   if (!prev) return res.status(404).json({ error: "task not found" });
+  const nextAssignee = assignee_agent_id !== undefined ? assignee_agent_id : prev.assignee_agent_id;
+  const briefTouched = assignee_agent_id !== undefined || description !== undefined || acceptance_criteria !== undefined;
+  const missing = nextAssignee && briefTouched
+    ? missingTaskBriefFields({
+        description: description !== undefined ? description : prev.description,
+        acceptance_criteria: acceptance_criteria !== undefined ? acceptance_criteria : prev.acceptance_criteria,
+      })
+    : [];
+  if (missing.length > 0) {
+    return res.status(400).json({
+      error: "task brief incomplete: assigned tasks require context and acceptance criteria before execution",
+      code: "TASK_BRIEF_INCOMPLETE",
+      missing,
+    });
+  }
+  const nextReviewer = reviewer_agent_id !== undefined ? reviewer_agent_id : prev.reviewer_agent_id;
+  const responsibilityTouched = assignee_agent_id !== undefined || reviewer_agent_id !== undefined;
+  if (responsibilityTouched && nextAssignee && nextReviewer && nextAssignee === nextReviewer) {
+    return res.status(400).json({
+      error: "task reviewer must be independent from the assignee",
+      code: "TASK_REVIEWER_CONFLICT",
+    });
+  }
   if (status !== undefined) {
     const nextStatus = String(status);
     const allowed: Record<string, string[]> = {
@@ -1209,6 +1255,7 @@ api.patch("/tasks/:id", (req, res) => {
   const task = updateTask(req.params.id, {
     ...(title !== undefined ? { title } : {}),
     ...(description !== undefined ? { description } : {}),
+    ...(acceptance_criteria !== undefined ? { acceptance_criteria } : {}),
     ...(status !== undefined ? { status } : {}),
     ...(status === "todo" && prev.status === "blocked" ? { blocked_approval_id: null } : {}),
     ...(assignee_agent_id !== undefined ? { assignee_agent_id } : {}),

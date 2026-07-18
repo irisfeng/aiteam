@@ -255,6 +255,8 @@ export const api = {
     channel_id?: string | null;
     assignee_agent_id?: string | null;
     reviewer_agent_id?: string | null;
+    acceptance_criteria?: string;
+    source_doc_ids?: string[];
     budget_billable?: number;
   }) =>
     req<Task>("/tasks", { method: "POST", body: JSON.stringify(data) }),
@@ -264,7 +266,7 @@ export const api = {
   taskEvents: (id: string) => req<TaskEvent[]>(`/tasks/${id}/events`),
   taskVerdicts: (id: string) => req<Verdict[]>(`/tasks/${id}/verdicts`),
   quality: () => req<QualitySummary>("/quality"),
-  updateTask: (id: string, data: Partial<Pick<Task, "title" | "description" | "status" | "assignee_agent_id" | "reviewer_agent_id" | "budget_billable">>) =>
+  updateTask: (id: string, data: Partial<Pick<Task, "title" | "description" | "acceptance_criteria" | "status" | "assignee_agent_id" | "reviewer_agent_id" | "budget_billable">>) =>
     req<Task>(`/tasks/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
   requestRevision: (id: string, reason: string) =>
     req<Task>(`/tasks/${id}/revise`, { method: "POST", body: JSON.stringify({ reason }) }),
