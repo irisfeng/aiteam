@@ -133,7 +133,7 @@ const PROVIDER_QUALITY_BENCHMARK_BUDGET = Math.max(
 
 const PROVIDER_QUALITY_BENCHMARK = {
   id: "executive-decision-brief-v1",
-  version: 6,
+  version: 7,
   title: "真实模型质量基准：AiTeam 产品落地决策简报",
   budgetBillable: PROVIDER_QUALITY_BENCHMARK_BUDGET,
   description: [
@@ -142,7 +142,7 @@ const PROVIDER_QUALITY_BENCHMARK = {
     "目标：给出未来 14 天把这一核心工作流推向首批真实用户测试的最小落地方案。不得虚构市场数据、客户反馈或已经完成的事实。",
   ].join("\n"),
   rubric: [
-    "1. 开头必须给出不超过 120 字的明确结论与推荐决策。",
+    "1. 全文必须为 2200–3800 个非空白字符（含 Markdown 标记），开头必须给出 70–100 个非空白字符的明确结论与推荐决策。",
     "2. 必须说明目标用户、核心待办和当前产品边界；产品边界须与任务内给出的已实现能力一致，不得把已有能力写成尚未开发。",
     "3. 必须用一张表完整映射 goal→brief→claim→work→review→revise→human close，并标明每步责任人和可验证证据。",
     "4. 必须给出按优先级排序的 14 天计划，包含阶段目标、负责人、退出条件和可量化验收指标。",
@@ -152,7 +152,7 @@ const PROVIDER_QUALITY_BENCHMARK = {
   ],
 } as const;
 
-const PROVIDER_QUALITY_CONFIRMATION_VERSION = 1;
+const PROVIDER_QUALITY_CONFIRMATION_VERSION = 2;
 const PROVIDER_HUMAN_AUDIT_KEYS = [
   "decision_useful",
   "evidence_traceable",
@@ -170,6 +170,12 @@ function providerQualityBenchmarkPlan(provider: Provider) {
   );
   return {
     confirmation_version: PROVIDER_QUALITY_CONFIRMATION_VERSION,
+    benchmark: {
+      id: PROVIDER_QUALITY_BENCHMARK.id,
+      version: PROVIDER_QUALITY_BENCHMARK.version,
+      title: "AiTeam 产品落地决策简报",
+      output_contract: "全文 2200–3800 个非空白字符；开头结论 70–100 个非空白字符",
+    },
     provider: { id: provider.id, name: provider.name },
     models: { worker: workerModel, reviewer: reviewerModel },
     budget_billable: PROVIDER_QUALITY_BENCHMARK.budgetBillable,
@@ -851,11 +857,13 @@ api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
     const confirmedBudget = Number(req.body?.confirmed_budget_billable);
     if (
       req.body?.confirmation_version !== benchmarkPlan.confirmation_version ||
+      req.body?.confirmed_benchmark_id !== benchmarkPlan.benchmark.id ||
+      req.body?.confirmed_benchmark_version !== benchmarkPlan.benchmark.version ||
       !Number.isFinite(confirmedBudget) ||
       confirmedBudget !== benchmarkPlan.budget_billable
     ) {
       return res.status(428).json({
-        error: "请先确认本次真实模型质量基准的计费 token 上限",
+        error: "请先确认本次真实模型质量基准版本与计费 token 上限",
         code: "PROVIDER_BENCHMARK_BUDGET_CONFIRMATION_REQUIRED",
         plan: benchmarkPlan,
       });

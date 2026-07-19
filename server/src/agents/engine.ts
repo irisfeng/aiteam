@@ -1187,9 +1187,9 @@ function markdownSection(text: string, titlePattern: RegExp): string {
 export function assessProviderQualityBenchmarkDocument(content: string): ProviderQualityDocumentAssessment {
   const text = content.replace(/\r/g, "").trim();
   const gaps: string[] = [];
-  const visibleLength = Array.from(text.replace(/[`*_#>|-]/g, "").replace(/\s+/g, "")).length;
-  if (visibleLength < 1_800 || visibleLength > 6_000) {
-    gaps.push(`正文信息量应控制在 1800–6000 个可见字符，当前约 ${visibleLength}`);
+  const nonWhitespaceLength = Array.from(text.replace(/\s+/g, "")).length;
+  if (nonWhitespaceLength < 2_200 || nonWhitespaceLength > 3_800) {
+    gaps.push(`全文必须控制在 2200–3800 个非空白字符（含 Markdown 标记），当前 ${nonWhitespaceLength}`);
   }
 
   const conclusion = markdownSection(text, /^(?:结论|推荐决策|核心决策)/i)
@@ -1197,7 +1197,9 @@ export function assessProviderQualityBenchmarkDocument(content: string): Provide
     .replace(/[`*_#>-]/g, "")
     .replace(/\s+/g, "") ?? "";
   if (!conclusion) gaps.push("缺少结论/推荐决策章节及明确正文");
-  else if (Array.from(conclusion).length > 120) gaps.push("开头结论超过 120 字上限");
+  else if (Array.from(conclusion).length < 70 || Array.from(conclusion).length > 100) {
+    gaps.push(`开头结论必须为 70–100 个非空白字符，当前 ${Array.from(conclusion).length}`);
+  }
 
   for (const label of ["目标用户", "核心待办", "产品边界"]) {
     if (!text.includes(label)) gaps.push(`缺少“${label}”的明确说明`);
@@ -1357,7 +1359,7 @@ export function buildProviderQualityBenchmarkBrief(task: Task): string {
     "- Helio 只作为交互机制的灵感来源；本基准没有提供任何 Helio 或市场事实，禁止写竞品能力、融资、用户、市场规模等外部主张。",
     "",
     "输出约束：",
-    "1. 写成 2200–3800 字的中文创始人决策简报，结论先行、信息密度高，拒绝堆篇幅；开头“结论与推荐决策”章节只能放一个 70–100 个汉字的纯文本段落，不加引用、注释、第二段或“共 X 字”自报计数。",
+    "1. 写成 2200–3800 个非空白字符（含 Markdown 标记）的中文创始人决策简报，结论先行、信息密度高，拒绝堆篇幅；开头“结论与推荐决策”章节只能放一个 70–100 个非空白字符的纯文本段落，不加引用、注释、第二段或“共 X 字”自报计数。",
     "2. 计划和指标可以作为待验证的决策阈值，但必须明确标为“建议阈值”，不能伪装成已有数据。",
     "3. 产品边界必须以上述已实现能力为起点，禁止把已有桌面/Web UI、SQLite、登录权限或任务闭环写成尚未开发。",
     "4. 只可复述上方提供的能力，不得自行编造数据库字段名、事件类型、状态值、生产部署状态或用户反馈；例如不要写 tasks.goal、brief_generated、final_close、status=closed 等未提供细节。",

@@ -337,6 +337,8 @@ async function runViewport(debugPort, baseUrl, label, viewport) {
     ok(`${label} paid benchmark shows provider, models, token cap, reserve and cost before running`, Boolean(budgetWarningReady) && await page.eval(`
       window.__aiteamBudgetWarning.includes('ui-budget-worker') &&
       window.__aiteamBudgetWarning.includes('ui-budget-reviewer') &&
+      window.__aiteamBudgetWarning.includes('AiTeam 产品落地决策简报 · v7') &&
+      window.__aiteamBudgetWarning.includes('2200–3800') &&
       window.__aiteamBudgetWarning.includes('20k billable tokens') &&
       window.__aiteamBudgetWarning.includes('预留复核：6k') &&
       window.__aiteamBudgetWarning.includes('CNY 0.04') &&

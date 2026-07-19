@@ -223,6 +223,21 @@ const benchmarkGoodReport = [
         "建议未来 14 天只验证一条闭环：完整简报进入后，AI 同事认领、交付、独立复核、按意见返工，最后由人类关单；未达到证据完整率建议阈值就停止扩功能。还应同步扩展频道、自动化、图像生成、外部连接、多人协作和更多模型，以便一次覆盖所有潜在需求并尽快形成完整平台。",
       ))
     : null;
+  const shortConclusion = typeof assess === "function"
+    ? assess(benchmarkGoodReport.replace(
+        "建议未来 14 天只验证一条闭环：完整简报进入后，AI 同事认领、交付、独立复核、按意见返工，最后由人类关单；未达到证据完整率建议阈值就停止扩功能。",
+        "建议未来十四天只验证任务交付闭环，未通过就停止扩展。",
+      ))
+    : null;
+  const underLength = typeof assess === "function"
+    ? assess(benchmarkGoodReport.replace(
+        /## 执行细则[\s\S]*?## 关键风险、缓解动作与停止条件/,
+        "## 执行细则\n逐步记录输入、动作、失败原因和退出条件。\n\n## 关键风险、缓解动作与停止条件",
+      ))
+    : null;
+  const overLength = typeof assess === "function"
+    ? assess(`${benchmarkGoodReport}\n\n## 附加执行记录\n${Array.from({ length: 140 }, (_, index) => `记录 ${index + 1}：核对输入、责任人、事件、交付证据与退出条件。`).join("\n")}`)
+    : null;
   const repetitiveFiller = typeof assess === "function"
     ? assess(benchmarkGoodReport.replace(
         /## 执行细则[\s\S]*?## 关键风险、缓解动作与停止条件/,
@@ -282,17 +297,21 @@ const benchmarkGoodReport = [
       inventedImplementation?.pass === false && inventedImplementation.gaps.some((gap) => gap.includes("精确字段")) &&
       paraphrasedSourceBoundary?.pass === false && paraphrasedSourceBoundary.gaps.some((gap) => gap.includes("独立一行")) &&
       misplacedSourceBoundary?.pass === false && misplacedSourceBoundary.gaps.some((gap) => gap.includes("独立一行")) &&
-      overlongConclusion?.pass === false && overlongConclusion.gaps.some((gap) => gap.includes("120 字")) &&
+      overlongConclusion?.pass === false && overlongConclusion.gaps.some((gap) => gap.includes("70–100")) &&
+      shortConclusion?.pass === false && shortConclusion.gaps.some((gap) => gap.includes("70–100")) &&
+      underLength?.pass === false && underLength.gaps.some((gap) => gap.includes("2200–3800")) &&
+      overLength?.pass === false && overLength.gaps.some((gap) => gap.includes("2200–3800")) &&
       repetitiveFiller?.pass === false && repetitiveFiller.gaps.some((gap) => gap.includes("重复 3 次")) &&
       thinPlan?.pass === false && thinPlan.gaps.some((gap) => gap.includes("至少需要 3 个")) &&
       proseOnlyWorkflowStep?.pass === false && proseOnlyWorkflowStep.gaps.some((gap) => gap.includes("revise")) &&
       legitimateLabelTables?.pass === true && legitimateLabelTables.gaps.length === 0 &&
       benchmarkPrompt.includes("当前产品已经有 Electron 桌面客户端") &&
       benchmarkPrompt.includes("| human close | ... | ... | ... |") &&
+      benchmarkPrompt.includes("2200–3800 个非空白字符（含 Markdown 标记）") &&
       benchmarkPrompt.includes("14 天计划至少拆成三个阶段") &&
       benchmarkPrompt.includes("本次未使用外部资料。") &&
       benchmarkPrompt.includes("| 7 | 满足/不满足 | ... |"),
-    `assessor=${typeof assess} prompt=${benchmarkPrompt.length} good=${good?.pass}/${good?.gaps.length} numbered=${numberedNested?.pass}/${numberedNested?.gaps.length} chinese=${chineseNumbered?.pass}/${chineseNumbered?.gaps.length} hollow=${hollow?.pass}/${hollow?.gaps.length} fabricated=${fabricated?.pass}/${fabricated?.gaps.length} invented=${inventedImplementation?.pass}/${inventedImplementation?.gaps.length} source=${paraphrasedSourceBoundary?.pass}/${paraphrasedSourceBoundary?.gaps.length}/${misplacedSourceBoundary?.pass}/${misplacedSourceBoundary?.gaps.length} conclusion=${overlongConclusion?.pass}/${overlongConclusion?.gaps.length} repetitive=${repetitiveFiller?.pass}/${repetitiveFiller?.gaps.length} plan=${thinPlan?.pass}/${thinPlan?.gaps.length} workflow=${proseOnlyWorkflowStep?.pass}/${proseOnlyWorkflowStep?.gaps.length} labels=${legitimateLabelTables?.pass}/${legitimateLabelTables?.gaps.length}`,
+    `assessor=${typeof assess} prompt=${benchmarkPrompt.length} good=${good?.pass}/${good?.gaps.length} numbered=${numberedNested?.pass}/${numberedNested?.gaps.length} chinese=${chineseNumbered?.pass}/${chineseNumbered?.gaps.length} hollow=${hollow?.pass}/${hollow?.gaps.length} fabricated=${fabricated?.pass}/${fabricated?.gaps.length} invented=${inventedImplementation?.pass}/${inventedImplementation?.gaps.length} source=${paraphrasedSourceBoundary?.pass}/${paraphrasedSourceBoundary?.gaps.length}/${misplacedSourceBoundary?.pass}/${misplacedSourceBoundary?.gaps.length} conclusion=${shortConclusion?.pass}/${overlongConclusion?.pass} length=${underLength?.pass}/${overLength?.pass} repetitive=${repetitiveFiller?.pass}/${repetitiveFiller?.gaps.length} plan=${thinPlan?.pass}/${thinPlan?.gaps.length} workflow=${proseOnlyWorkflowStep?.pass}/${proseOnlyWorkflowStep?.gaps.length} labels=${legitimateLabelTables?.pass}/${legitimateLabelTables?.gaps.length}`,
   );
 }
 
@@ -511,6 +530,7 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
   const paidBenchmarkConsent =
     routesSource.includes("/providers/:id/task-test/plan") &&
     routesSource.includes("PROVIDER_BENCHMARK_BUDGET_CONFIRMATION_REQUIRED") &&
+    routesSource.includes("confirmed_benchmark_version") &&
     routesSource.includes("confirmed_budget_billable") &&
     modalsSource.includes("已取消 · 未调用模型、未创建任务") &&
     worklineSource.includes("用户取消预算确认 · 未调用模型、未创建基准任务") &&
@@ -1641,6 +1661,8 @@ const runProviderBenchmark = async (providerId, scope = {}) => {
     body: JSON.stringify({
       ...scope,
       confirmation_version: plan.confirmation_version,
+      confirmed_benchmark_id: plan.benchmark.id,
+      confirmed_benchmark_version: plan.benchmark.version,
       confirmed_budget_billable: plan.budget_billable,
     }),
   });
@@ -3884,6 +3906,15 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
     const preflight = await J(`/providers/${prov.id}/task-test/plan`);
     const taskCountBeforeRejectedRun = (await J("/tasks")).body.length;
     const rejectedWithoutBudgetConfirmation = await J(`/providers/${prov.id}/task-test`, { method: "POST" });
+    const rejectedWithStaleBenchmarkConfirmation = await J(`/providers/${prov.id}/task-test`, {
+      method: "POST",
+      body: JSON.stringify({
+        confirmation_version: preflight.body.confirmation_version,
+        confirmed_benchmark_id: preflight.body.benchmark?.id,
+        confirmed_benchmark_version: 6,
+        confirmed_budget_billable: preflight.body.budget_billable,
+      }),
+    });
     const taskCountAfterRejectedRun = (await J("/tasks")).body.length;
     const result = (await runProviderBenchmark(prov.id)).body;
     const taskEvents = result.task?.id ? (await J(`/tasks/${result.task.id}/events`)).body : [];
@@ -3911,7 +3942,10 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
       "Q6G",
       "真实模型质量基准预算授权：先返回动态模型/预算/金额计划，未精确确认则零调用、零建任务",
       preflight.ok === true &&
-        preflight.body.confirmation_version === 1 &&
+        preflight.body.confirmation_version === 2 &&
+        preflight.body.benchmark?.id === "executive-decision-brief-v1" &&
+        preflight.body.benchmark?.version === 7 &&
+        preflight.body.benchmark?.output_contract?.includes("2200–3800") &&
         preflight.body.models?.worker === "fake-chat-model" &&
         preflight.body.models?.reviewer === "fake-chat-model" &&
         preflight.body.budget_billable === 20_000 &&
@@ -3919,8 +3953,10 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
         preflight.body.estimated_cost_ceiling === 0.04 &&
         rejectedWithoutBudgetConfirmation.status === 428 &&
         rejectedWithoutBudgetConfirmation.body.code === "PROVIDER_BENCHMARK_BUDGET_CONFIRMATION_REQUIRED" &&
+        rejectedWithStaleBenchmarkConfirmation.status === 428 &&
+        rejectedWithStaleBenchmarkConfirmation.body.code === "PROVIDER_BENCHMARK_BUDGET_CONFIRMATION_REQUIRED" &&
         taskCountAfterRejectedRun === taskCountBeforeRejectedRun,
-      `plan=${preflight.status}/${preflight.body.budget_billable}/${preflight.body.review_reserve_billable}/${preflight.body.estimated_cost_ceiling} rejected=${rejectedWithoutBudgetConfirmation.status}/${rejectedWithoutBudgetConfirmation.body.code} tasks=${taskCountBeforeRejectedRun}->${taskCountAfterRejectedRun}`,
+      `plan=${preflight.status}/v${preflight.body.benchmark?.version}/${preflight.body.budget_billable}/${preflight.body.review_reserve_billable}/${preflight.body.estimated_cost_ceiling} rejected=${rejectedWithoutBudgetConfirmation.status}/${rejectedWithStaleBenchmarkConfirmation.status} tasks=${taskCountBeforeRejectedRun}->${taskCountAfterRejectedRun}`,
     );
     const rubricItems = result.task?.acceptance_criteria
       ?.split("\n")
@@ -3931,7 +3967,7 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
       result.run_status === "passed" &&
       result.task?.status === "review" &&
       benchmark?.id === "executive-decision-brief-v1" &&
-      benchmark?.version === 6 &&
+      benchmark?.version === 7 &&
       benchmark?.worker_model === "fake-chat-model" &&
       benchmark?.reviewer_model === "fake-chat-model" &&
       benchmark?.budget_billable === 20000 &&

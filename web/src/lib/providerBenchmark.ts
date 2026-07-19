@@ -19,6 +19,8 @@ export function providerBenchmarkRunInput(
   return {
     ...scope,
     confirmation_version: plan.confirmation_version,
+    confirmed_benchmark_id: plan.benchmark.id,
+    confirmed_benchmark_version: plan.benchmark.version,
     confirmed_budget_billable: plan.budget_billable,
   };
 }
@@ -27,6 +29,8 @@ export function providerBenchmarkConfirmation(plan: ProviderBenchmarkPlan) {
   return [
     `确认用「${plan.provider.name}」运行一次真实模型质量基准？`,
     "",
+    `质量题：${plan.benchmark.title} · v${plan.benchmark.version}`,
+    `输出要求：${plan.benchmark.output_contract}`,
     `生成：${plan.models.worker}`,
     `独立复核：${plan.models.reviewer}`,
     `本次计费上限：${formatTokens(plan.budget_billable)} billable tokens`,
@@ -55,6 +59,7 @@ export function providerBenchmarkBatchConfirmation(plans: ProviderBenchmarkPlan[
   return [
     `配置链路验收将调用 ${plans.length} 个真实模型供应商，是否继续？`,
     "",
+    `质量题：${plans[0]?.benchmark.title ?? "固定质量基准"} · v${plans[0]?.benchmark.version ?? "-"}`,
     ...plans.map((plan) =>
       `• ${plan.provider.name}：${plan.models.worker} → ${plan.models.reviewer}，上限 ${formatTokens(plan.budget_billable)}`,
     ),

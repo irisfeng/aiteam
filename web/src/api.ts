@@ -148,6 +148,7 @@ export interface ProviderTaskTestResult {
 
 export interface ProviderBenchmarkPlan {
   confirmation_version: number;
+  benchmark: { id: string; version: number; title: string; output_contract: string };
   provider: { id: string; name: string };
   models: { worker: string; reviewer: string };
   budget_billable: number;
@@ -162,6 +163,8 @@ export interface ProviderBenchmarkRunInput {
   channel_id?: string | null;
   project_id?: string | null;
   confirmation_version: number;
+  confirmed_benchmark_id: string;
+  confirmed_benchmark_version: number;
   confirmed_budget_billable: number;
 }
 
