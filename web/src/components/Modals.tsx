@@ -900,7 +900,7 @@ function ImageProviderSection() {
       </div>
       <div className="mt-1 text-[12px] leading-relaxed text-ink-3">
         接入字节火山方舟的 Seedream 文生图后，AI 同事获得 generate_image 工具，可为报告/PPT 生成配图
-        （按张计费，默认单次运行上限 2 张，并强制每次调用只生成 1 张）。Base URL 可填写 API 根地址或完整
+        （按张计费，默认单次运行上限 2 张，工具每次只采用 1 张；Seedream 5.0 Pro 使用默认单图模式）。Base URL 可填写 API 根地址或完整
         /images/generations 端点；模型栏填写方舟控制台展示的模型 ID 或接入点 ID。
       </div>
       <label className={labelCls}>Base URL</label>

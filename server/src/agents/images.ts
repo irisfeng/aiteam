@@ -21,15 +21,18 @@ export function imageGenerationUrl(baseUrl: string): string {
 }
 
 export function imageRequestPayload(model: string, prompt: string, size: string) {
-  return {
+  const payload: Record<string, unknown> = {
     model,
     prompt,
     size,
-    sequential_image_generation: "disabled",
     stream: false,
     response_format: "url",
     watermark: false,
   };
+  // Seedream 5.0 Pro 的单图端点不接受 sequential_image_generation；官方示例省略该字段即为单图。
+  // 旧版支持组图的模型仍显式关闭组图，避免一次调用意外按多张计费。
+  if (!/^doubao-seedream-5-0-pro-/i.test(model)) payload.sequential_image_generation = "disabled";
+  return payload;
 }
 
 function imageSize(value: unknown): string {

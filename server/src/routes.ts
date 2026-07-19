@@ -123,11 +123,16 @@ async function waitForProviderTask(taskId: string, timeoutMs = 60000) {
   return { task: getTask(taskId), events: listTaskEvents(taskId), done: false };
 }
 
+const PROVIDER_QUALITY_BENCHMARK_BUDGET = Math.max(
+  4_000,
+  Math.round(Number(process.env.AITEAM_PROVIDER_BENCHMARK_BUDGET) || 20_000),
+);
+
 const PROVIDER_QUALITY_BENCHMARK = {
   id: "executive-decision-brief-v1",
-  version: 3,
+  version: 4,
   title: "真实模型质量基准：AiTeam 产品落地决策简报",
-  budgetBillable: 24_000,
+  budgetBillable: PROVIDER_QUALITY_BENCHMARK_BUDGET,
   description: [
     "你是 AiTeam 的产品负责人，请仅依据本任务提供的上下文，为创始人写一份可直接用于决策的产品落地简报。",
     "背景：AiTeam 借鉴 Helio 的低门槛协作体验，但核心差异是任务简报、AI 认领、过程留痕、独立复核、自动返工与人类关单。",
@@ -135,7 +140,7 @@ const PROVIDER_QUALITY_BENCHMARK = {
   ].join("\n"),
   rubric: [
     "1. 开头必须给出不超过 120 字的明确结论与推荐决策。",
-    "2. 必须说明目标用户、核心待办和当前产品边界，不得泛泛罗列 AI 功能。",
+    "2. 必须说明目标用户、核心待办和当前产品边界；产品边界须与任务内给出的已实现能力一致，不得把已有能力写成尚未开发。",
     "3. 必须用一张表完整映射 goal→brief→claim→work→review→revise→human close，并标明每步责任人和可验证证据。",
     "4. 必须给出按优先级排序的 14 天计划，包含阶段目标、负责人、退出条件和可量化验收指标。",
     "5. 必须列出至少 3 个关键风险/依赖，每项给出缓解动作和停止条件。",

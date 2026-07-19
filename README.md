@@ -121,9 +121,12 @@ npm run pack:verify --workspace desktop  # 脱离源码树验证包内运行时
 | `AITEAM_DAILY_TOKEN_BUDGET` | `0`（不限） | 每用户每日 token 预算硬切断（按加权计费 token） |
 | `AITEAM_TASK_TOKEN_BUDGET` | `0`（不限） | 单任务默认预算（加权计费 token）；任务累计触线自动暂停待批，批准即追加续跑（任务级 `budget_billable` 可覆盖） |
 | `TASK_MAX_REVISIONS` | `1` | 验收未过的返工次数上限 |
+| `AITEAM_PROVIDER_BENCHMARK_BUDGET` | `20000` | 固定模型质量基准的计费 token 上限 |
+| `AITEAM_PROVIDER_BENCHMARK_REVIEW_RESERVE` | `6000` | 为独立强模型复核预留的计费 token；不足时先暂停待批 |
+| `AITEAM_PROVIDER_BENCHMARK_MAX_REVISIONS` | `1` | 固定质量基准的自动返工次数；成本敏感验收可临时设 `0` |
 | `AGENT_CHAIN_DEPTH` | `2` | AI 互相 @ 接力的链深上限（防雪崩） |
 | `AITEAM_MCP_CALLS_PER_RUN` | `5` | 单次运行 MCP 插件调用上限（按次计费） |
-| `AITEAM_IMAGES_PER_RUN` | `2` | 单次运行文生图上限（按张计费；每次调用强制单图） |
+| `AITEAM_IMAGES_PER_RUN` | `2` | 单次运行文生图上限（按张计费；工具每次只采用 1 张，Seedream 5.0 Pro 使用默认单图模式） |
 | `AITEAM_MCP_TIMEOUT_MS` | `45000` | MCP 连接/调用超时（防插件挂死阻塞运行） |
 | `AITEAM_MCP_CACHE_TTL_MS` | `600000` | MCP 同参调用结果缓存 TTL |
 | `AITEAM_MAX_MCP_TOOLS` | `40` | 注入工作循环的 MCP 工具数上限 |

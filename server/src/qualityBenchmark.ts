@@ -45,7 +45,7 @@ const TOOL_CLAIMS: Array<[string, RegExp, RegExp]> = [
   ],
   [
     "mcp",
-    /(?:通过|使用|调用|借助)[^。！？\n]{0,32}\bMCP\b|\bMCP\b[^。！？\n]{0,32}(?:检索|查询|访问|获得|工具)/i,
+    /(?:通过|使用|调用|借助)[^。！？\n]{0,32}\bMCP\b|\bMCP\b[^。！？\n]{0,32}(?:检索|查询|访问|获得)/i,
     /(?:没有|未|不得|禁止|不曾|无需)[^。！？\n]{0,16}(?:使用|调用)?[^。！？\n]{0,8}\bMCP\b/i,
   ],
   [
@@ -66,7 +66,9 @@ const TOOL_ALIASES: Record<string, string[]> = {
 
 function explicitlyNegated(sentence: string, tool: string, specificPattern: RegExp) {
   if (specificPattern.test(sentence)) return true;
-  const negativeClause = sentence.split(/但是|然而|不过|但|却|仍然?/)[0]?.toLowerCase() ?? "";
+  // “包括但不限于”不是转折。若按单字“但”切开，会把后面的工具名截掉，
+  // 进而把“未使用任何外部资料，包括但不限于 web_search”误判成虚构调用。
+  const negativeClause = sentence.split(/但是|然而|不过|但(?!不限于)|却|仍然?/)[0]?.toLowerCase() ?? "";
   if (!/(?:没有|未|不得|禁止|不曾|无需)/.test(negativeClause)) return false;
   return (TOOL_ALIASES[tool] ?? [tool]).some((alias) => negativeClause.includes(alias));
 }

@@ -1091,13 +1091,50 @@ function finishRevokedTaskExecution(task: Task, channel: Channel, agent: Agent):
 }
 
 const PROVIDER_QUALITY_BENCHMARK_PREFIX = "真实模型质量基准：AiTeam 产品落地决策简报";
-const PROVIDER_QUALITY_REVIEW_RESERVE_BILLABLE = 8_000;
+const PROVIDER_QUALITY_REVIEW_RESERVE_BILLABLE = Math.max(
+  1_000,
+  Math.round(Number(process.env.AITEAM_PROVIDER_BENCHMARK_REVIEW_RESERVE) || 6_000),
+);
+const configuredProviderQualityMaxRevisions = process.env.AITEAM_PROVIDER_BENCHMARK_MAX_REVISIONS;
+const parsedProviderQualityMaxRevisions = Number(configuredProviderQualityMaxRevisions);
+const PROVIDER_QUALITY_MAX_REVISIONS = Math.max(
+  0,
+  Math.round(configuredProviderQualityMaxRevisions === undefined
+    ? MAX_REVISIONS
+    : Number.isFinite(parsedProviderQualityMaxRevisions)
+      ? parsedProviderQualityMaxRevisions
+      : MAX_REVISIONS),
+);
 
 export function isProviderQualityBenchmarkTask(task: Task): boolean {
   return task.title.startsWith(PROVIDER_QUALITY_BENCHMARK_PREFIX);
 }
 
 export type ProviderQualityDocumentAssessment = { pass: boolean; gaps: string[] };
+
+function markdownSection(text: string, titlePattern: RegExp): string {
+  const lines = text.split("\n");
+  for (let index = 0; index < lines.length; index++) {
+    const heading = lines[index].match(/^(#{1,6})\s+(.+?)\s*$/);
+    if (!heading) continue;
+    const title = heading[2].replace(
+      /^(?:(?:第\s*)?[一二三四五六七八九十百]+(?:\s*章)?[、.．):：]?|\d+(?:\.\d+)*[.、)]?)\s*/,
+      "",
+    );
+    if (!titlePattern.test(title)) continue;
+    const level = heading[1].length;
+    let end = lines.length;
+    for (let cursor = index + 1; cursor < lines.length; cursor++) {
+      const next = lines[cursor].match(/^(#{1,6})\s+/);
+      if (next && next[1].length <= level) {
+        end = cursor;
+        break;
+      }
+    }
+    return lines.slice(index + 1, end).join("\n").trim();
+  }
+  return "";
+}
 
 /**
  * 固定质量基准的确定性下限。它不替代独立模型复核，只先拦截“篇幅像报告、证据仍为空”的交付，
@@ -1111,7 +1148,7 @@ export function assessProviderQualityBenchmarkDocument(content: string): Provide
     gaps.push(`正文信息量应控制在 1800–6000 个可见字符，当前约 ${visibleLength}`);
   }
 
-  const conclusion = text.match(/#{1,6}\s*(?:结论|推荐决策|核心决策)[^\n]*\n+([\s\S]*?)(?=\n#{1,6}\s|$)/i)?.[1]
+  const conclusion = markdownSection(text, /^(?:结论|推荐决策|核心决策)/i)
     ?.replace(/\|[^\n]*/g, "")
     .replace(/[`*_#>-]/g, "")
     .replace(/\s+/g, "") ?? "";
@@ -1135,17 +1172,19 @@ export function assessProviderQualityBenchmarkDocument(content: string): Provide
     if (!text.includes(label)) gaps.push(`14 天计划缺少“${label}”`);
   }
 
-  const riskSection = text.match(/#{1,6}\s*[^\n]*风险[^\n]*\n([\s\S]*?)(?=\n#{1,6}\s|$)/)?.[1] ?? "";
+  const riskSection = markdownSection(text, /风险/);
   const riskRows = riskSection.split("\n").filter((line) => {
     const trimmed = line.trim();
     return trimmed.startsWith("|") && !/^-?\|?\s*:?-{3}/.test(trimmed) && !/(?:风险).*(?:缓解动作)/.test(trimmed);
   });
-  if (!riskSection || riskRows.length < 3 || !riskSection.includes("缓解动作") || !riskSection.includes("停止条件")) {
+  const nestedRisks = [...riskSection.matchAll(/^#{2,6}\s*(?:风险|依赖)\s*\d+/gmi)].length;
+  const riskCount = nestedRisks > 0 ? nestedRisks : riskRows.length;
+  if (!riskSection || riskCount < 3 || !riskSection.includes("缓解动作") || !riskSection.includes("停止条件")) {
     gaps.push("关键风险不足 3 项，或缺少逐项缓解动作/停止条件");
   }
 
   if (!/(?:来源与假设|来源和假设)/.test(text)) gaps.push("缺少“来源与假设”章节");
-  if (!/未使用外部(?:资料|来源|数据)/.test(text)) gaps.push("未明确声明本基准没有使用外部资料");
+  if (!/未使用(?:任何)?外部(?:资料|来源|数据)/.test(text)) gaps.push("未明确声明本基准没有使用外部资料");
   if (!/(?:任务简报|运行事件)/.test(text)) gaps.push("未说明内部事实来自任务简报或运行事件");
   const unqualifiedExternalClaim = text.split(/[。！？\n]/).find((sentence) =>
     /(?:数据显示|调研表明|市场规模|客户反馈(?:显示|表明)|根据[^，。]{0,30}报告)/.test(sentence) &&
@@ -1153,11 +1192,11 @@ export function assessProviderQualityBenchmarkDocument(content: string): Provide
   );
   if (unqualifiedExternalClaim) gaps.push("存在未给 URL、也未标为假设/待验证的外部事实声明");
 
-  const selfCheck = text.match(/#{1,6}\s*[^\n]*自查[^\n]*\n([\s\S]*?)$/)?.[1] ?? "";
+  const selfCheck = markdownSection(text, /自查/);
   if (!selfCheck) gaps.push("缺少文末逐条自查表");
   else {
     const missingItems = Array.from({ length: 7 }, (_, index) => index + 1).filter((item) =>
-      !new RegExp(`(?:^|\\n)\\s*(?:[-*]\\s*)?\\|?\\s*${item}\\s*(?:[.、）)]|\\|)`, "m").test(selfCheck),
+      !new RegExp(`(?:^|\\n)\\s*(?:[-*]\\s*)?\\|?\\s*(?:\\*{1,2}|_{1,2})?\\s*${item}\\s*(?:[.、）)]|\\|)`, "m").test(selfCheck),
     );
     if (missingItems.length > 0) gaps.push(`自查表缺少验收项：${missingItems.join("、")}`);
     if (!/(?:正文证据位置|证据位置|章节)/.test(selfCheck)) gaps.push("自查表没有给出正文证据位置");
@@ -1183,15 +1222,22 @@ function buildProviderQualityBenchmarkBrief(task: Task): string {
     "- 本任务由人类发起并带有结构化简报与验收标准；",
     "- 执行者已通过 claim 事件认领，过程工具调用会写入 task_events；",
     "- 任务显式指定独立 reviewer，未通过会由引擎触发返工；",
-    "- 最终关单由人类确认。",
+    "- 最终关单由人类确认；",
+    "- 当前产品已经有 Electron 桌面客户端和 `/aiteam/` 响应式 Web 工作区，不是 CLI 原型；",
+    "- 工作区已经包含目标输入、任务看板、收件箱、文档、团队和用量界面；",
+    "- 当前已经使用 SQLite 持久化任务、文档、task_events、审批、用户与供应商配置；",
+    "- 当前已经有 standalone 登录、admin/member 角色门控、任务负责人、独立复核人、返工、审批和人工关单；",
+    "- 当前已经支持模型供应商、Skills、MCP 和可选 Seedream 生图；网络 MCP 受单次审批约束。",
     "- Helio 只作为交互机制的灵感来源；本基准没有提供任何 Helio 或市场事实，禁止写竞品能力、融资、用户、市场规模等外部主张。",
     "",
     "输出约束：",
-    "1. 写成 2200–3800 字的中文创始人决策简报，结论先行、信息密度高，拒绝堆篇幅。",
+    "1. 写成 2200–3800 字的中文创始人决策简报，结论先行、信息密度高，拒绝堆篇幅；开头“结论与推荐决策”章节只能放一个 70–100 个汉字的纯文本段落，不加引用、注释、第二段或“共 X 字”自报计数。",
     "2. 计划和指标可以作为待验证的决策阈值，但必须明确标为“建议阈值”，不能伪装成已有数据。",
-    "3. “来源与假设”章节必须明确写：本次未使用外部资料，内部事实来自任务简报与运行事件；不得声称调用过 web_search、web_fetch、MCP 或任何未提供工具。",
-    "4. 只调用一次 write_document，kind=report，把完整正文放入文档；不要在工具调用前后输出长篇正文。",
-    "5. 文末逐条自查七项验收标准，不能用“已满足”代替正文证据位置。",
+    "3. 产品边界必须以上述已实现能力为起点，禁止把已有桌面/Web UI、SQLite、登录权限或任务闭环写成尚未开发。",
+    "4. 只可复述上方提供的能力，不得自行编造数据库字段名、事件类型、状态值、生产部署状态或用户反馈；例如不要写 tasks.goal、brief_generated、final_close、status=closed 等未提供细节。",
+    "5. “来源与假设”章节必须逐字包含独立句子“本次未使用外部资料。”，并说明内部事实来自任务简报与运行事件；不得声称调用过 web_search、web_fetch、MCP 或任何未提供工具。",
+    "6. 只调用一次 write_document，kind=report，把完整正文放入文档；不要在工具调用前后输出长篇正文。",
+    "7. 文末逐条自查七项验收标准，不能用“已满足”代替正文证据位置，也不要声称未实际计算的字数。",
   ].filter(Boolean).join("\n");
 }
 
@@ -1295,9 +1341,10 @@ async function runTaskWork(agent: Agent, taskId: string) {
     ? listDocuments().filter((doc) => doc.task_id === task.id).map((doc) => doc.id)
     : [];
   const qualityBenchmark = isProviderQualityBenchmarkTask(task);
+  const revisionLimit = qualityBenchmark ? PROVIDER_QUALITY_MAX_REVISIONS : MAX_REVISIONS;
   let skipWorkOnce = resumeAtVerification;
 
-  for (let attempt = 0; attempt <= MAX_REVISIONS; attempt++) {
+  for (let attempt = 0; attempt <= revisionLimit; attempt++) {
     if (!skipWorkOnce) {
       const ctx = newCtx(agent, channel, "work", task.id);
       const prompt = qualityBenchmark
@@ -1335,12 +1382,12 @@ async function runTaskWork(agent: Agent, taskId: string) {
     const fresh = getTask(task.id);
     const revisions = (fresh?.revision_count ?? 0) + 1;
     updateTask(task.id, { revision_count: revisions });
-    if (attempt >= MAX_REVISIONS) {
+    if (attempt >= revisionLimit) {
       // D1 返工差距结构化：达上限不再只说"请人工把关"——把最后一轮未解决的差距原样带给人，
       // 人工复核不用回频道翻验收长文（差距全文在事件 metadata，audit 只给首行摘要）。
       const gapBrief = feedback.replace(/\s+/g, " ").slice(0, 120);
-      emitTaskEvent(task, "verification", `已达返工上限（${MAX_REVISIONS} 次），转待评审。未解决差距见 metadata`, { result: "gap", reasons: feedback.slice(0, 2000), revision_count: revisions }, agent.id);
-      audit(channel.id, `⚠️ 任务「${task.title}」已达返工上限（${MAX_REVISIONS} 次），转入待评审请人工把关。未解决差距：${gapBrief}…`);
+      emitTaskEvent(task, "verification", `已达返工上限（${revisionLimit} 次），转待评审。未解决差距见 metadata`, { result: "gap", reasons: feedback.slice(0, 2000), revision_count: revisions }, agent.id);
+      audit(channel.id, `⚠️ 任务「${task.title}」已达返工上限（${revisionLimit} 次），转入待评审请人工把关。未解决差距：${gapBrief}…`);
       break;
     }
     audit(channel.id, `↩️ 验收未通过，任务「${task.title}」退回 ${agent.name} 修订（第 ${revisions} 次）`);

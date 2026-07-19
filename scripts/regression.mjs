@@ -102,19 +102,20 @@ const images = await import(join(root, "server/dist/agents/images.js"));
   db.setImageProvider({ api_key: "-" });
   check(
     "QW4C",
-    "Seedream 生图：完整端点不重复拼接、强制单图、URL 回传下载为持久资产",
+    "Seedream 生图：完整端点不重复拼接、5.0 Pro 使用默认单图、URL 回传下载为持久资产",
     images.imageGenerationUrl("https://ark.cn-beijing.volces.com/api/v3") ===
       "https://ark.cn-beijing.volces.com/api/v3/images/generations" &&
       images.imageGenerationUrl("https://ark.cn-beijing.volces.com/api/v3/images/generations") ===
       "https://ark.cn-beijing.volces.com/api/v3/images/generations" &&
       requestPath === "/api/v3/images/generations" &&
       requestBody.model === "doubao-seedream-5-0-pro-260628" &&
-      requestBody.sequential_image_generation === "disabled" &&
+      requestBody.sequential_image_generation === undefined &&
+      images.imageRequestPayload("doubao-seedream-4-5", "probe", "2K").sequential_image_generation === "disabled" &&
       requestBody.stream === false &&
       requestBody.response_format === "url" &&
       assetName.endsWith(".png") &&
       existsSync(join(images.assetsDir, assetName)),
-    `path=${requestPath} single=${requestBody.sequential_image_generation} format=${requestBody.response_format} asset=${assetName}`,
+    `path=${requestPath} seedream5Sequential=${String(requestBody.sequential_image_generation)} legacySingle=${images.imageRequestPayload("doubao-seedream-4-5", "probe", "2K").sequential_image_generation} format=${requestBody.response_format} asset=${assetName}`,
   );
 }
 
@@ -180,13 +181,41 @@ const benchmarkGoodReport = [
   const fabricated = typeof assess === "function"
     ? assess(benchmarkGoodReport.replace("本次未使用外部资料。", "数据显示市场规模已经达到 100 亿元。"))
     : null;
+  const numberedNested = typeof assess === "function"
+    ? assess(
+        benchmarkGoodReport
+          .replace("## 结论与推荐决策", "## 1. 结论与推荐决策")
+          .replace("## 关键风险、缓解动作与停止条件", "## 5. 关键风险、缓解动作与停止条件")
+          .replace(
+            "| 风险 | 缓解动作 | 停止条件 |\n|---|---|---|\n| 输出看似完整但没有证据 | 机器契约预检后再由独立模型复核 | 连续两轮仍缺关键证据就转人工 |\n| 模型成本失控 | 任务预算、复核预留与断点续跑 | 达到预算且未获批准立即停止 |\n| 新用户看不懂工作流 | 首屏只暴露下一步并观察首次任务 | 3 位测试者中 2 位无法独立开工则暂停扩展 |",
+            "### 风险 1：输出看似完整但没有证据\n| 要素 | 内容 |\n|---|---|\n| 缓解动作 | 机器契约预检后再由独立模型复核 |\n| 停止条件 | 连续两轮仍缺关键证据就转人工 |\n\n### 风险 2：模型成本失控\n| 要素 | 内容 |\n|---|---|\n| 缓解动作 | 任务预算、复核预留与断点续跑 |\n| 停止条件 | 达到预算且未获批准立即停止 |\n\n### 风险 3：新用户看不懂工作流\n| 要素 | 内容 |\n|---|---|\n| 缓解动作 | 首屏只暴露下一步并观察首次任务 |\n| 停止条件 | 3 位测试者中 2 位无法独立开工则暂停扩展 |",
+          )
+          .replace("本次未使用外部资料。", "本次未使用任何外部资料。"),
+      )
+    : null;
+  const chineseNumbered = typeof assess === "function"
+    ? assess(
+        benchmarkGoodReport
+          .replace("## 结论与推荐决策", "## 一、结论与推荐决策")
+          .replace("## 交付自查表", "## 七、逐条自查表")
+          .replaceAll("| 1 | 满足 |", "| **1. 标准一** | 满足 |")
+          .replaceAll("| 2 | 满足 |", "| **2. 标准二** | 满足 |")
+          .replaceAll("| 3 | 满足 |", "| **3. 标准三** | 满足 |")
+          .replaceAll("| 4 | 满足 |", "| **4. 标准四** | 满足 |")
+          .replaceAll("| 5 | 满足 |", "| **5. 标准五** | 满足 |")
+          .replaceAll("| 6 | 满足 |", "| **6. 标准六** | 满足 |")
+          .replaceAll("| 7 | 满足 |", "| **7. 标准七** | 满足 |"),
+      )
+    : null;
   check(
     "QW4",
     "固定质量基准机器契约：完整报告放行，空泛自称满足的报告拒绝并列出差距",
     good?.pass === true && good.gaps.length === 0 &&
+      numberedNested?.pass === true && numberedNested.gaps.length === 0 &&
+      chineseNumbered?.pass === true && chineseNumbered.gaps.length === 0 &&
       hollow?.pass === false && hollow.gaps.length >= 5 &&
       fabricated?.pass === false && fabricated.gaps.some((gap) => gap.includes("URL")),
-    `assessor=${typeof assess} good=${good?.pass}/${good?.gaps.length} hollow=${hollow?.pass}/${hollow?.gaps.length} fabricated=${fabricated?.pass}/${fabricated?.gaps.length}`,
+    `assessor=${typeof assess} good=${good?.pass}/${good?.gaps.length} numbered=${numberedNested?.pass}/${numberedNested?.gaps.length} chinese=${chineseNumbered?.pass}/${chineseNumbered?.gaps.length} hollow=${hollow?.pass}/${hollow?.gaps.length} fabricated=${fabricated?.pass}/${fabricated?.gaps.length}`,
   );
 }
 
@@ -197,7 +226,7 @@ const benchmarkGoodReport = [
       { id: "e1", type: "tool", agent_id: "worker", metadata_json: JSON.stringify({ tool: "write_document" }) },
       { id: "e2", type: "tool", agent_id: "reviewer", metadata_json: JSON.stringify({ tool: "submit_verdict" }) },
     ],
-    [{ content: "本次没有调用 web_search、web_fetch、浏览器、插件或 MCP。" }],
+    [{ content: "本次未使用任何外部资料，包括但不限于 web_search、web_fetch、浏览器、插件或 MCP。当前产品支持 MCP 工具，但本次没有调用。" }],
     actors,
   );
   const badTrace = qualityBenchmark.providerBenchmarkSourceTrace(
@@ -3709,15 +3738,15 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
       result.run_status === "passed" &&
       result.task?.status === "review" &&
       benchmark?.id === "executive-decision-brief-v1" &&
-      benchmark?.version === 3 &&
+      benchmark?.version === 4 &&
       benchmark?.worker_model === "fake-chat-model" &&
       benchmark?.reviewer_model === "fake-chat-model" &&
-      benchmark?.budget_billable === 24000 &&
+      benchmark?.budget_billable === 20000 &&
       Array.isArray(benchmark?.rubric) && benchmark.rubric.length === 7 &&
       rubricItems.length === 7 &&
       result.task?.reviewer_agent_id &&
       result.task.reviewer_agent_id !== result.task.assignee_agent_id &&
-      result.task.budget_billable === 24000 &&
+      result.task.budget_billable === 20000 &&
       result.docs?.some((d) => d.kind === "report" && d.content.includes("AiTeam 14 天产品落地决策简报")) &&
       eventTypes.has("tool") &&
       eventTypes.has("delivery") &&
@@ -3855,7 +3884,7 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
       result.run_status === "pending_approval" &&
         result.checks?.delivered === true &&
         approvalPayload.resume_phase === "verification" &&
-        approvalPayload.review_reserve_billable === 8000 &&
+        approvalPayload.review_reserve_billable === 6000 &&
         workerAtPause === workerBefore + 1 &&
         verifierAtPause === verifierBefore &&
         resolved.ok === true &&

@@ -285,10 +285,13 @@ npm start
 | `AITEAM_DAILY_TOKEN_BUDGET` | `0`（不限） | 每日 token 预算，`>0` 启用 |
 | `AITEAM_TASK_TOKEN_BUDGET` | `0`（不限） | 单任务默认预算（加权计费 token）；触线任务自动暂停并开审批，批准后追加预算续跑 |
 | `TASK_MAX_REVISIONS` | `1` | 验收返工上限 |
+| `AITEAM_PROVIDER_BENCHMARK_BUDGET` | `20000` | 固定模型质量基准的计费 token 上限 |
+| `AITEAM_PROVIDER_BENCHMARK_REVIEW_RESERVE` | `6000` | 独立强模型复核的预留计费 token |
+| `AITEAM_PROVIDER_BENCHMARK_MAX_REVISIONS` | `1` | 固定质量基准自动返工上限；设 `0` 可做单次成本封顶验收 |
 | `AGENT_CHAIN_DEPTH` | `2` | AI 互相 @ 接力的链深上限（防雪崩） |
 | `AITEAM_MCP_CALLS_PER_RUN` | `5` | 单次运行 MCP 调用上限 |
 | `AITEAM_MAX_MCP_TOOLS` | `40` | 注入的 MCP 工具数上限 |
-| `AITEAM_IMAGES_PER_RUN` | `2` | 单次运行配图张数上限（每次调用强制单图） |
+| `AITEAM_IMAGES_PER_RUN` | `2` | 单次运行配图张数上限（工具每次只采用 1 张；Seedream 5.0 Pro 默认单图） |
 | `AITEAM_UPLOAD_MAX_BYTES` | `20971520`（20MB） | 上传单文件大小上限 |
 | `AITEAM_SEARCH_DEDUP` | `1`（开） | 跨插件检索去重；`0`=关 |
 | `AITEAM_MCP_STDIO_ALLOW` | 空 | stdio MCP 启动命令白名单扩展（逗号分隔）；默认仅允许 `npx/uvx/uv/node/python/python3/markitdown-mcp` |

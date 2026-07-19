@@ -49,7 +49,7 @@ npm run dev                       # 本地开发，打开 http://localhost:5173/
 [火山方舟控制台](https://console.volcengine.com/ark) 开通 Seedream 文生图并创建接入点，
 把 **API Key** 与**模型 ID / 接入点 ID**（如 `doubao-seedream-5-0-pro-260628`，以控制台展示为准）填入保存。
 之后所有同事获得 `generate_image` 工具：做报告/PPT 时会自动生成封面、概念示意等点睛配图并嵌入正文。
-按张计费，每次调用强制单图，单次运行默认上限 2 张（`AITEAM_IMAGES_PER_RUN` 可调）；数据图表不走文生图（sheet 自带图表渲染）。
+按张计费，工具每次只采用 1 张（Seedream 5.0 Pro 使用默认单图模式），单次运行默认上限 2 张（`AITEAM_IMAGES_PER_RUN` 可调）；数据图表不走文生图（sheet 自带图表渲染）。
 
 ## 第 2 步：认识你的团队
 
