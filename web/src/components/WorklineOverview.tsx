@@ -5,6 +5,10 @@ import type { Task, TaskEvent } from "../types";
 import { computeWorkline } from "../lib/workline";
 import type { SettingsTab } from "./Modals";
 import { INTEGRATIONS_UPDATED_EVENT } from "./IntegrationsTabs";
+import {
+  providerBenchmarkBatchConfirmation,
+  providerBenchmarkRunInput,
+} from "../lib/providerBenchmark";
 
 const EVENT_LABEL: Record<TaskEvent["type"], string> = {
   created: "创建",
@@ -417,7 +421,7 @@ export function WorklineOverview({
       ? "链路自检需要管理员权限"
       : linkCheckOpen
         ? "打开当前配置验收项目的任务证据；不重复创建新项目"
-        : "手动跑一次模型质量基准与 MCP/Skills 演练；24k 内预留 8k 强模型复核额度，余额不足会保留初稿并暂停";
+        : "先显示并确认每个模型通道的实际预算，再运行质量基准与 MCP/Skills 演练；取消不会调用模型";
   const acceptanceButtonLabel =
     scenarioBusy && activeScenarioId === "acceptance"
       ? "验收中…"
@@ -523,7 +527,34 @@ export function WorklineOverview({
     const mcp = latest.mcpServers.filter((s) => s.enabled)[0];
     const skill = latest.skills.filter((s) => s.enabled)[0];
     try {
-      const runnable = Boolean(providersToTest.length > 0 || mcp || skill);
+      const approvedProviderPlans = new Map<string, Awaited<ReturnType<typeof api.providerTaskTestPlan>>>();
+      const availablePlans = (await Promise.all(providersToTest.map(async (provider) => {
+        try {
+          return await api.providerTaskTestPlan(provider.id);
+        } catch (error) {
+          results.push({
+            id: `provider:${provider.id}`,
+            label: `模型 · ${provider.name}`,
+            status: "failed",
+            detail: `预算预检失败：${error instanceof Error ? error.message : String(error)}`.slice(0, 160),
+          });
+          return null;
+        }
+      }))).filter((plan): plan is NonNullable<typeof plan> => Boolean(plan));
+      const approvedProviderRun = availablePlans.length > 0 && window.confirm(providerBenchmarkBatchConfirmation(availablePlans));
+      if (approvedProviderRun) {
+        for (const plan of availablePlans) approvedProviderPlans.set(plan.provider.id, plan);
+      } else if (availablePlans.length > 0) {
+        for (const plan of availablePlans) {
+          results.push({
+            id: `provider:${plan.provider.id}`,
+            label: `模型 · ${plan.provider.name}`,
+            status: "skipped",
+            detail: "用户取消预算确认 · 未调用模型、未创建基准任务",
+          });
+        }
+      }
+      const runnable = Boolean(approvedProviderPlans.size > 0 || mcp || skill);
       const project = linkCheckOpen ? linkCheckProject ?? null : runnable ? (await api.startLinkCheck(channelArg)).project : null;
       if (project) {
         setLinkCheckProjectId(project.id);
@@ -532,10 +563,12 @@ export function WorklineOverview({
       const runArg = project ? { ...channelArg, project_id: project.id } : channelArg;
       if (providersToTest.length === 0) {
         results.push({ id: "provider", label: "模型", status: "skipped", detail: "未找到已保存 key 的模型供应商" });
-      } else {
+      } else if (approvedProviderPlans.size > 0) {
         for (const provider of providersToTest) {
+          const plan = approvedProviderPlans.get(provider.id);
+          if (!plan) continue;
           try {
-            const out = await ws.runProviderTaskTest(provider.id, runArg);
+            const out = await ws.runProviderTaskTest(provider.id, providerBenchmarkRunInput(plan, runArg));
             results.push({
               id: `provider:${provider.id}`,
               label: `模型 · ${provider.name}`,

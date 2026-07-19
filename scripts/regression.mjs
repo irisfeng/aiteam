@@ -454,7 +454,9 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
   const multiProviderLinkCheck =
     worklineSource.includes("providersToTest") &&
     worklineSource.includes("for (const provider of providersToTest)") &&
-    worklineSource.includes("ws.runProviderTaskTest(provider.id, runArg)") &&
+    worklineSource.includes("api.providerTaskTestPlan(provider.id)") &&
+    worklineSource.includes("providerBenchmarkBatchConfirmation(availablePlans)") &&
+    worklineSource.includes("providerBenchmarkRunInput(plan, runArg)") &&
     worklineSource.includes("所有已配置模型") &&
     worklineSource.includes("模型对比摘要") &&
     worklineSource.includes("providerPassed") &&
@@ -487,11 +489,15 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
     modalsSource.includes("百炼 DashScope") &&
     modalsSource.includes("保存后立即跑质量基准") &&
     modalsSource.includes("runProviderTaskTest(saved.id)") &&
-    modalsSource.includes("打开任务") &&
+    modalsSource.includes("api.providerTaskTestPlan(id)") &&
+    modalsSource.includes("providerBenchmarkConfirmation(plan)") &&
+    modalsSource.includes("providerBenchmarkRunInput(plan)") &&
+    modalsSource.includes("查看结果") &&
+    modalsSource.includes("运行质量基准") &&
     modalsSource.includes("7项契约") &&
     modalsSource.includes("机器预检") &&
     modalsSource.includes("独立复核") &&
-    modalsSource.includes("24k billable 内为强模型复核预留 8k") &&
+    modalsSource.includes("实际 token 上限、复核预留和可估算金额") &&
     modalsSource.includes("复核预算待批") &&
     modalsSource.includes("不重复生成") &&
     modalsSource.includes("来源可追溯") &&
@@ -502,6 +508,19 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
   check("UX4", "模型配置体验：国内供应商预设可保存后直接跑固定质量基准并跳转任务详情",
     providerSetupLoop,
     `providerSetupLoop=${providerSetupLoop}`);
+  const paidBenchmarkConsent =
+    routesSource.includes("/providers/:id/task-test/plan") &&
+    routesSource.includes("PROVIDER_BENCHMARK_BUDGET_CONFIRMATION_REQUIRED") &&
+    routesSource.includes("confirmed_budget_billable") &&
+    modalsSource.includes("已取消 · 未调用模型、未创建任务") &&
+    worklineSource.includes("用户取消预算确认 · 未调用模型、未创建基准任务") &&
+    worklineSource.includes("取消不会调用模型");
+  check(
+    "UX4B",
+    "真实模型费用确认：单模型与批量链路验收都先展示动态预算，取消零调用，API 不能绕过",
+    paidBenchmarkConsent,
+    `paidBenchmarkConsent=${paidBenchmarkConsent}`,
+  );
   const taskReviewEvidencePanel =
     taskDetailSource.includes("人工复核清单") &&
     taskDetailSource.includes("splitAcceptanceCriteria") &&
@@ -1606,6 +1625,20 @@ const J = async (path, init = {}) => {
   const sc = res.headers.get("set-cookie");
   if (sc) { const m = sc.match(/aiteam_session=[^;]+/); if (m) sessionCookie = m[0]; }
   return { ok: res.ok, status: res.status, body: await res.json().catch(() => ({})) };
+};
+
+const runProviderBenchmark = async (providerId, scope = {}) => {
+  const planResponse = await J(`/providers/${providerId}/task-test/plan`);
+  if (!planResponse.ok) return planResponse;
+  const plan = planResponse.body;
+  return J(`/providers/${providerId}/task-test`, {
+    method: "POST",
+    body: JSON.stringify({
+      ...scope,
+      confirmation_version: plan.confirmation_version,
+      confirmed_budget_billable: plan.budget_billable,
+    }),
+  });
 };
 
 fakeOpenAiServer = createServer((req, res) => {
@@ -3135,10 +3168,7 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
         is_strong: true,
       }),
     })).body;
-    const result = (await J(`/providers/${prov.id}/task-test`, {
-      method: "POST",
-      body: JSON.stringify({ channel_id: isolatedChannel.id }),
-    })).body;
+    const result = (await runProviderBenchmark(prov.id, { channel_id: isolatedChannel.id })).body;
     const workerAfter = qualityBenchmarkWorkerRequests.filter((request) => request.model === model).length;
     const verifierAfter = qualityBenchmarkVerifierRequests.filter((request) => request.model === model).length;
     const contractEvents = (result.events ?? []).filter((event) => {
@@ -3846,7 +3876,11 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
         price_currency: "USD",
       }),
     })).body;
-    const result = (await J(`/providers/${prov.id}/task-test`, { method: "POST" })).body;
+    const preflight = await J(`/providers/${prov.id}/task-test/plan`);
+    const taskCountBeforeRejectedRun = (await J("/tasks")).body.length;
+    const rejectedWithoutBudgetConfirmation = await J(`/providers/${prov.id}/task-test`, { method: "POST" });
+    const taskCountAfterRejectedRun = (await J("/tasks")).body.length;
+    const result = (await runProviderBenchmark(prov.id)).body;
     const taskEvents = result.task?.id ? (await J(`/tasks/${result.task.id}/events`)).body : [];
     await J(`/providers/${prov.id}`, { method: "DELETE" });
     const eventTypes = new Set((result.events ?? []).map((e) => e.type));
@@ -3868,6 +3902,21 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
     const benchmark = result.benchmark;
     const workerProbe = qualityBenchmarkWorkerRequests.at(-1);
     const verifierProbe = qualityBenchmarkVerifierRequests.at(-1);
+    check(
+      "Q6G",
+      "真实模型质量基准预算授权：先返回动态模型/预算/金额计划，未精确确认则零调用、零建任务",
+      preflight.ok === true &&
+        preflight.body.confirmation_version === 1 &&
+        preflight.body.models?.worker === "fake-chat-model" &&
+        preflight.body.models?.reviewer === "fake-chat-model" &&
+        preflight.body.budget_billable === 20_000 &&
+        preflight.body.review_reserve_billable === 6_000 &&
+        preflight.body.estimated_cost_ceiling === 0.04 &&
+        rejectedWithoutBudgetConfirmation.status === 428 &&
+        rejectedWithoutBudgetConfirmation.body.code === "PROVIDER_BENCHMARK_BUDGET_CONFIRMATION_REQUIRED" &&
+        taskCountAfterRejectedRun === taskCountBeforeRejectedRun,
+      `plan=${preflight.status}/${preflight.body.budget_billable}/${preflight.body.review_reserve_billable}/${preflight.body.estimated_cost_ceiling} rejected=${rejectedWithoutBudgetConfirmation.status}/${rejectedWithoutBudgetConfirmation.body.code} tasks=${taskCountBeforeRejectedRun}->${taskCountAfterRejectedRun}`,
+    );
     const rubricItems = result.task?.acceptance_criteria
       ?.split("\n")
       .map((item) => item.trim())
@@ -4001,12 +4050,12 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
         is_strong: true,
       }),
     })).body;
-    const first = (await J(`/providers/${prov.id}/task-test`, { method: "POST" })).body;
+    const first = (await runProviderBenchmark(prov.id)).body;
     await J(`/providers/${prov.id}`, {
       method: "PATCH",
       body: JSON.stringify({ default_model: "fake-chat-model-collision-b" }),
     });
-    const second = (await J(`/providers/${prov.id}/task-test`, { method: "POST" })).body;
+    const second = (await runProviderBenchmark(prov.id)).body;
     const agentsAfter = (await J("/bootstrap")).body.agents ?? [];
     const firstWorker = agentsAfter.find((agent) => agent.id === first.task?.assignee_agent_id);
     const secondWorker = agentsAfter.find((agent) => agent.id === second.task?.assignee_agent_id);
@@ -4043,7 +4092,7 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
         is_strong: true,
       }),
     })).body;
-    const result = (await J(`/providers/${prov.id}/task-test`, { method: "POST" })).body;
+    const result = (await runProviderBenchmark(prov.id)).body;
     const taskEvents = result.task?.id ? (await J(`/tasks/${result.task.id}/events`)).body : [];
     const eventTypes = new Set(taskEvents.map((event) => event.type));
     const pendingBudgetApproval = db.listApprovals().find(
@@ -4079,7 +4128,7 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
         is_strong: true,
       }),
     })).body;
-    const result = (await J(`/providers/${prov.id}/task-test`, { method: "POST" })).body;
+    const result = (await runProviderBenchmark(prov.id)).body;
     const approval = result.pending_approval_id ? db.getApproval(result.pending_approval_id) : null;
     let approvalPayload = {};
     try { approvalPayload = JSON.parse(approval?.payload || "{}"); } catch { approvalPayload = {}; }
@@ -4124,10 +4173,7 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
       method: "POST",
       body: JSON.stringify({ name: "回归链路验收供应商", api_key: "sk-local", base_url: fakeOpenAiBase, default_model: "fake-chat-model", is_strong: true }),
     })).body;
-    const providerResult = (await J(`/providers/${prov.id}/task-test`, {
-      method: "POST",
-      body: JSON.stringify({ channel_id: ch.id, project_id: project.id }),
-    })).body;
+    const providerResult = (await runProviderBenchmark(prov.id, { channel_id: ch.id, project_id: project.id })).body;
     const skills = (await J("/skills")).body;
     const skill = skills.find((s) => s.name === "交付自查清单") ?? skills[0];
     const skillResult = (await J(`/skills/${skill.id}/task-test`, {

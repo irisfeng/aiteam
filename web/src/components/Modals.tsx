@@ -4,12 +4,15 @@ import { api, type AgentTemplateInfo, type ImageProviderInfo } from "../api";
 import type { Channel } from "../types";
 import { McpTab, SkillsTab } from "./IntegrationsTabs";
 import { AgentAvatar } from "./Avatar";
+import { providerBenchmarkConfirmation, providerBenchmarkRunInput } from "../lib/providerBenchmark";
 
-function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+function Modal({ title, onClose, children, wide = false }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onMouseDown={onClose}>
       <div
-        className="modal-card max-h-[90vh] w-[440px] overflow-y-auto rounded-xl border border-line bg-panel p-5 shadow-xl"
+        className={`modal-card max-h-[90vh] overflow-y-auto rounded-xl border border-line bg-panel p-5 shadow-xl ${
+          wide ? "w-[min(680px,calc(100vw-24px))]" : "w-[min(440px,calc(100vw-24px))]"
+        }`}
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="mb-4 flex items-center justify-between">
@@ -616,9 +619,15 @@ export function SettingsModal({
   async function runProviderTaskTest(id: string) {
     if (providerTaskBusy[id]) return;
     setProviderTaskBusy((s) => ({ ...s, [id]: true }));
-    setProviderTaskTest((s) => ({ ...s, [id]: { text: "质量基准运行中…隔离产出、强模型复核；24k billable 触线即暂停" } }));
+    setProviderTaskTest((s) => ({ ...s, [id]: { text: "正在读取本次预算，不会先调用模型…" } }));
     try {
-      const r = await ws.runProviderTaskTest(id);
+      const plan = await api.providerTaskTestPlan(id);
+      if (!window.confirm(providerBenchmarkConfirmation(plan))) {
+        setProviderTaskTest((s) => ({ ...s, [id]: { text: "已取消 · 未调用模型、未创建任务" } }));
+        return;
+      }
+      setProviderTaskTest((s) => ({ ...s, [id]: { text: `质量基准运行中…上限 ${formatTokenCount(plan.budget_billable)} billable，触线即暂停` } }));
+      const r = await ws.runProviderTaskTest(id, providerBenchmarkRunInput(plan));
       const checks = [
         r.checks.delivered ? "交付" : "未交付",
         r.checks.tool_observed ? "工具" : "无工具",
@@ -654,7 +663,7 @@ export function SettingsModal({
   );
 
   return (
-    <Modal title="设置" onClose={onClose}>
+    <Modal title="设置" onClose={onClose} wide>
       <div className="mb-3 flex gap-1 border-b border-line pb-2">
         {tabBtn("providers", "模型供应商")}
         {tabBtn("mcp", "MCP 插件")}
@@ -665,11 +674,9 @@ export function SettingsModal({
       {tab === "providers" && (
         <div>
       <div className="text-[12.5px] leading-relaxed text-ink-2">
-        默认推荐 Anthropic 官方（环境变量 <code className="rounded bg-panel px-1">ANTHROPIC_API_KEY</code>）。
-        也可接入 Anthropic-compatible 端点（如 DeepSeek Anthropic）或 OpenAI-compatible 端点（如 SiliconFlow、百炼 DashScope、LiteLLM、vLLM）。
-        系统会按 Base URL 自动识别协议。
-        <span className="font-medium">默认模型</span>承担分析/创作，<span className="font-medium">轻量模型</span>承担
-        重复性/格式化任务（拆解时由 Lead 逐任务智能选择，大幅降本）。
+        连接模型后，AI 同事会从演示模式切换为真实工作；API Key 只保存在服务端。
+        <span className="font-medium"> 主模型</span>负责分析、创作和复核，
+        <span className="font-medium">轻量模型</span>负责重复任务以降低成本。DeepSeek、SiliconFlow、百炼及其他兼容端点均可接入。
       </div>
 
       {ws.providers.length > 0 && (
@@ -677,59 +684,73 @@ export function SettingsModal({
           {ws.providers.map((p) => (
             <div
               key={p.id}
-              className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-[13px] ${editingId === p.id ? "border-accent/60 bg-accent-soft/40" : "border-line"}`}
+              className={`rounded-lg border px-3 py-2.5 text-[13px] ${editingId === p.id ? "border-accent/60 bg-accent-soft/40" : "border-line"}`}
             >
-              <span className="font-medium">{p.name}</span>
-              <span className="min-w-0 flex-1 truncate text-[12px] text-ink-3">
-                {p.base_url || "api.anthropic.com"} · {p.default_model || "未设默认模型"}
-                {p.light_model ? ` · ⚡${p.light_model}` : ""}
-                {p.price_input_per_million > 0 || p.price_output_per_million > 0
-                  ? ` · ${p.price_currency || "USD"}/百万 输入 ${p.price_input_per_million || 0} 输出 ${p.price_output_per_million || 0}`
-                  : ""}
-                {providerTest[p.id] ? ` · ${providerTest[p.id]}` : ""}
-                {providerTaskTest[p.id] ? ` · 质量基准：${providerTaskTest[p.id].text}` : ""}
-              </span>
-              {providerTaskTest[p.id]?.taskId && (
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="font-semibold text-ink">{p.name}</div>
+                  <div className="mt-0.5 break-all text-[11.5px] leading-snug text-ink-3">
+                    {p.base_url || "api.anthropic.com"}
+                  </div>
+                </div>
                 <button
-                  onClick={() => onOpenTask?.(providerTaskTest[p.id]!.taskId!)}
-                  className="rounded px-1.5 text-[12px] text-accent hover:bg-accent-soft"
-                  title="打开该模型演练任务的详情、活动日志和交付物"
+                  onClick={() => {
+                    if (editingId === p.id) resetForm();
+                    void ws.deleteProvider(p.id);
+                  }}
+                  className="shrink-0 rounded px-1.5 py-0.5 text-[11.5px] text-ink-3 hover:bg-sel hover:text-red-500"
+                  title="删除后，引用它的同事将回退到官方通道"
                 >
-                  打开任务
+                  删除
                 </button>
+              </div>
+              <div className="mt-2 flex flex-wrap gap-1.5 text-[11.5px] text-ink-2">
+                <span className="rounded bg-sel px-2 py-1">主模型 · {p.default_model || "未设置"}</span>
+                {p.light_model && <span className="rounded bg-sel px-2 py-1">轻量 · {p.light_model}</span>}
+                {(p.price_input_per_million > 0 || p.price_output_per_million > 0) && (
+                  <span className="rounded bg-sel px-2 py-1">
+                    {p.price_currency || "USD"}/百万 · 输入 {p.price_input_per_million || 0} · 输出 {p.price_output_per_million || 0}
+                  </span>
+                )}
+              </div>
+              {providerTest[p.id] && (
+                <div className="mt-2 rounded bg-sel/60 px-2 py-1.5 text-[11.5px] leading-snug text-ink-2">连通测试：{providerTest[p.id]}</div>
               )}
-              <button
-                onClick={() => void testProvider(p.id)}
-                className="rounded px-1.5 text-[12px] text-ink-2 hover:bg-sel hover:text-ink"
-                title="发送一次最小模型请求，验证 Base URL / Key / 模型名 / 协议适配"
-              >
-                测试
-              </button>
-              <button
-                onClick={() => void runProviderTaskTest(p.id)}
-                disabled={Boolean(providerTaskBusy[p.id])}
-                className="rounded px-1.5 text-[12px] text-ink-2 hover:bg-sel hover:text-ink disabled:opacity-40"
-                title="运行固定隔离业务题：轻量模型产出、强模型独立复核和自动返工；24k billable 触线暂停，单次请求可能小幅越界"
-              >
-                {providerTaskBusy[p.id] ? "基准中…" : "质量基准"}
-              </button>
-              <button
-                onClick={() => startEdit(p.id)}
-                className="rounded px-1.5 text-[12px] text-ink-2 hover:bg-sel hover:text-ink"
-                title="编辑该供应商"
-              >
-                编辑
-              </button>
-              <button
-                onClick={() => {
-                  if (editingId === p.id) resetForm();
-                  void ws.deleteProvider(p.id);
-                }}
-                className="rounded px-1.5 text-ink-3 hover:bg-sel hover:text-ink"
-                title="删除（引用它的同事将回退到官方通道）"
-              >
-                ✕
-              </button>
+              {providerTaskTest[p.id] && (
+                <div className="mt-2 rounded bg-sel/60 px-2 py-1.5 text-[11.5px] leading-snug text-ink-2">质量基准：{providerTaskTest[p.id].text}</div>
+              )}
+              <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                <button
+                  onClick={() => void testProvider(p.id)}
+                  className="whitespace-nowrap rounded-md border border-line px-2.5 py-1.5 text-[12px] text-ink-2 hover:bg-sel hover:text-ink"
+                  title="发送一次最小模型请求，验证 Base URL、Key、模型名与协议适配"
+                >
+                  连通测试
+                </button>
+                <button
+                  onClick={() => void runProviderTaskTest(p.id)}
+                  disabled={Boolean(providerTaskBusy[p.id])}
+                  className="whitespace-nowrap rounded-md border border-accent/40 bg-accent-soft px-2.5 py-1.5 text-[12px] text-accent hover:border-accent disabled:opacity-40"
+                  title="先查看并确认实际预算，再运行固定隔离业务题；取消不会调用模型"
+                >
+                  {providerTaskBusy[p.id] ? "基准运行中…" : "运行质量基准"}
+                </button>
+                <button
+                  onClick={() => startEdit(p.id)}
+                  className="whitespace-nowrap rounded-md border border-line px-2.5 py-1.5 text-[12px] text-ink-2 hover:bg-sel hover:text-ink"
+                >
+                  编辑配置
+                </button>
+                {providerTaskTest[p.id]?.taskId && (
+                  <button
+                    onClick={() => onOpenTask?.(providerTaskTest[p.id]!.taskId!)}
+                    className="whitespace-nowrap rounded-md px-2.5 py-1.5 text-[12px] text-accent hover:bg-accent-soft"
+                    title="打开该模型演练任务的详情、活动日志和交付物"
+                  >
+                    查看结果
+                  </button>
+                )}
+              </div>
             </div>
           ))}
         </div>
@@ -840,7 +861,7 @@ export function SettingsModal({
         <input className="mt-0.5" type="checkbox" checked={runTaskAfterSave} onChange={(e) => setRunTaskAfterSave(e.target.checked)} />
         <span>
           保存后立即跑质量基准：固定业务题由轻量模型产出、强模型独立复核并自动返工，
-          同时验证工具、来源追溯、交付、验收和用量；24k billable 内为强模型复核预留 8k，
+          同时验证工具、来源追溯、交付、验收和用量；运行前会展示实际 token 上限、复核预留和可估算金额，
           余额不足会保留初稿并暂停，批准后直接从复核继续，不重复生成。
         </span>
       </label>

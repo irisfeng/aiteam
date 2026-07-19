@@ -146,6 +146,25 @@ export interface ProviderTaskTestResult {
   };
 }
 
+export interface ProviderBenchmarkPlan {
+  confirmation_version: number;
+  provider: { id: string; name: string };
+  models: { worker: string; reviewer: string };
+  budget_billable: number;
+  review_reserve_billable: number;
+  estimated_cost_ceiling: number | null;
+  price_currency: string;
+  stages: string[];
+  warning: string;
+}
+
+export interface ProviderBenchmarkRunInput {
+  channel_id?: string | null;
+  project_id?: string | null;
+  confirmation_version: number;
+  confirmed_budget_billable: number;
+}
+
 export interface McpTaskTestResult {
   ok: boolean;
   server: {
@@ -253,9 +272,10 @@ export const api = {
   updateProvider: (id: string, data: ProviderInput) =>
     req<Provider>(`/providers/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
   testProvider: (id: string) => req<ProviderTestResult>(`/providers/${id}/test`, { method: "POST" }),
+  providerTaskTestPlan: (id: string) => req<ProviderBenchmarkPlan>(`/providers/${id}/task-test/plan`),
   startLinkCheck: (data: { channel_id?: string | null } = {}) =>
     req<LinkCheckStartResult>("/link-checks", { method: "POST", body: JSON.stringify(data) }),
-  runProviderTaskTest: (id: string, data: { channel_id?: string | null; project_id?: string | null } = {}) =>
+  runProviderTaskTest: (id: string, data: ProviderBenchmarkRunInput) =>
     req<ProviderTaskTestResult>(`/providers/${id}/task-test`, { method: "POST", body: JSON.stringify(data) }),
   deleteProvider: (id: string) => req<{ ok: boolean }>(`/providers/${id}`, { method: "DELETE" }),
   getImageProvider: () => req<ImageProviderInfo>("/image-provider"),

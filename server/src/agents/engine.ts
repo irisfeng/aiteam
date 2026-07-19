@@ -1091,7 +1091,7 @@ function finishRevokedTaskExecution(task: Task, channel: Channel, agent: Agent):
 }
 
 const PROVIDER_QUALITY_BENCHMARK_PREFIX = "真实模型质量基准：AiTeam 产品落地决策简报";
-const PROVIDER_QUALITY_REVIEW_RESERVE_BILLABLE = Math.max(
+export const PROVIDER_QUALITY_REVIEW_RESERVE_BILLABLE = Math.max(
   1_000,
   Math.round(Number(process.env.AITEAM_PROVIDER_BENCHMARK_REVIEW_RESERVE) || 6_000),
 );

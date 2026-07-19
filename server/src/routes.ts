@@ -78,6 +78,7 @@ import {
   sanitizeProvider,
   setImageProvider,
   updateProvider,
+  type Provider,
 } from "./db.js";
 import { slidesToPptx } from "./pptx.js";
 import { MCP_REGISTRY, SKILL_PACK_REGISTRY } from "./registry.js";
@@ -86,6 +87,7 @@ import { providerBenchmarkPassed, providerBenchmarkSourceTrace } from "./quality
 import {
   assessProviderQualityBenchmarkDocument,
   isProviderQualityBenchmarkTask,
+  PROVIDER_QUALITY_REVIEW_RESERVE_BILLABLE,
   isMock,
   onMessage,
   onBudgetResolved,
@@ -149,6 +151,30 @@ const PROVIDER_QUALITY_BENCHMARK = {
     "7. 文末必须附逐条自查表，按本验收标准标注满足/不满足及正文证据位置。",
   ],
 } as const;
+
+const PROVIDER_QUALITY_CONFIRMATION_VERSION = 1;
+
+function providerQualityBenchmarkPlan(provider: Provider) {
+  const workerModel = provider.light_model || provider.default_model;
+  const reviewerModel = provider.default_model || workerModel;
+  const highestConfiguredRate = Math.max(
+    provider.price_input_per_million || 0,
+    provider.price_output_per_million || 0,
+  );
+  return {
+    confirmation_version: PROVIDER_QUALITY_CONFIRMATION_VERSION,
+    provider: { id: provider.id, name: provider.name },
+    models: { worker: workerModel, reviewer: reviewerModel },
+    budget_billable: PROVIDER_QUALITY_BENCHMARK.budgetBillable,
+    review_reserve_billable: PROVIDER_QUALITY_REVIEW_RESERVE_BILLABLE,
+    estimated_cost_ceiling: highestConfiguredRate > 0
+      ? PROVIDER_QUALITY_BENCHMARK.budgetBillable * highestConfiguredRate / 1_000_000
+      : null,
+    price_currency: provider.price_currency || "USD",
+    stages: ["轻量模型生成", "机器契约检查", "强模型独立复核", "必要时按配置自动返工", "人工审计后关单"],
+    warning: "到达计费 token 上限会暂停；单个已发出的模型请求可能造成小幅越界。",
+  };
+}
 
 function providerBenchmarkAgentName(prefix: string, providerId: string, providerName: string, model: string, role: string) {
   const suffix = createHash("sha256").update(`${providerId}\0${model}\0${role}`).digest("hex").slice(0, 8);
@@ -739,6 +765,16 @@ api.post("/providers/:id/test", requireAdmin, async (req, res) => {
   }
 });
 
+api.get("/providers/:id/task-test/plan", requireAdmin, (req, res) => {
+  const provider = getProvider(req.params.id);
+  if (!provider) return res.status(404).json({ error: "provider not found" });
+  if (!provider.api_key) return res.status(400).json({ error: "provider api key is missing" });
+  if (!(provider.light_model || provider.default_model)) {
+    return res.status(400).json({ error: "provider default model is missing" });
+  }
+  res.json(providerQualityBenchmarkPlan(provider));
+});
+
 api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
   try {
     const provider = getProvider(req.params.id);
@@ -747,6 +783,19 @@ api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
     const workerModel = provider.light_model || provider.default_model;
     const reviewerModel = provider.default_model || workerModel;
     if (!workerModel) return res.status(400).json({ error: "provider default model is missing" });
+    const benchmarkPlan = providerQualityBenchmarkPlan(provider);
+    const confirmedBudget = Number(req.body?.confirmed_budget_billable);
+    if (
+      req.body?.confirmation_version !== benchmarkPlan.confirmation_version ||
+      !Number.isFinite(confirmedBudget) ||
+      confirmedBudget !== benchmarkPlan.budget_billable
+    ) {
+      return res.status(428).json({
+        error: "请先确认本次真实模型质量基准的计费 token 上限",
+        code: "PROVIDER_BENCHMARK_BUDGET_CONFIRMATION_REQUIRED",
+        plan: benchmarkPlan,
+      });
+    }
 
     let channel = req.body?.channel_id ? getChannel(String(req.body.channel_id)) : undefined;
     channel = channel ?? listChannels().find((c) => c.kind === "channel");
@@ -823,6 +872,10 @@ api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
         rubric_count: PROVIDER_QUALITY_BENCHMARK.rubric.length,
         budget_billable: PROVIDER_QUALITY_BENCHMARK.budgetBillable,
         link_check: Boolean(projectId),
+        spend_confirmation: {
+          version: benchmarkPlan.confirmation_version,
+          confirmed_budget_billable: confirmedBudget,
+        },
       },
     });
     emitTaskEvent({

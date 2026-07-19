@@ -219,7 +219,7 @@ async function register(page, label) {
     })()
   `);
   await waitFor(() => page.eval(`!!document.querySelector('input[placeholder="显示名（如 张三）"]')`));
-  const email = `ui-${label}-${Date.now()}@test.local`;
+  const email = `ui-${label}@test.local`;
   await page.eval(`
     (() => {
       const setValue = (input, value) => {
@@ -279,6 +279,77 @@ async function runViewport(debugPort, baseUrl, label, viewport) {
     ok(`${label} focus composer visible`, await page.eval(`document.body.innerText.includes('今天要推进什么？')`));
     ok(`${label} three shortcuts visible`, await page.eval(`['调研并给出决策建议','写一份可交付文档','规划并推进一个项目'].every((text) => document.body.innerText.includes(text))`));
     ok(`${label} advanced controls are progressively disclosed`, await page.eval(`!document.body.innerText.includes('启动前检查') && document.body.innerText.includes('运行与验收工具')`));
+
+    const budgetProviderName = `UI预算确认-${label}-${Date.now()}`;
+    const budgetProvider = await page.eval(`
+      fetch('/aiteam/api/providers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: ${JSON.stringify(budgetProviderName)},
+          api_key: 'sk-ui-budget-only',
+          base_url: 'http://127.0.0.1:1/v1',
+          default_model: 'ui-budget-reviewer',
+          light_model: 'ui-budget-worker',
+          price_input_per_million: 1,
+          price_output_per_million: 2,
+          price_currency: 'CNY',
+        }),
+      }).then((res) => res.json())
+    `, true);
+    ok(`${label} budget-only provider fixture is created`, Boolean(budgetProvider?.id), JSON.stringify(budgetProvider));
+    await page.eval(`window.__aiteamBeforeProviderReload = true`);
+    await page.send("Page.reload", { ignoreCache: true });
+    await waitFor(() => page.eval(`typeof window.__aiteamBeforeProviderReload === 'undefined'`));
+    await page.waitText("今天要推进什么？");
+    const reloadedProviderVisible = await page.eval(`
+      fetch('/aiteam/api/bootstrap').then((res) => res.json()).then((data) =>
+        data.providers.some((provider) => provider.id === ${JSON.stringify(budgetProvider.id)})
+      )
+    `, true);
+    ok(`${label} budget-only provider survives reload`, reloadedProviderVisible);
+    const tasksBeforeBudgetCancel = await page.eval(`fetch('/aiteam/api/tasks').then((res) => res.json()).then((tasks) => tasks.length)`, true);
+    const settingsOpened = await page.eval(`
+      window.__aiteamBudgetWarning = '';
+      window.confirm = (message) => {
+        window.__aiteamBudgetWarning = String(message);
+        return false;
+      };
+      const button = document.querySelector('button[title="设置"]');
+      button?.click();
+      Boolean(button);
+    `);
+    ok(`${label} settings opens for budget confirmation`, settingsOpened);
+    await page.waitText(budgetProviderName);
+    const clickedBudgetBenchmark = await page.eval(`
+      (() => {
+        const row = [...document.querySelectorAll('div')]
+          .find((element) => element.textContent?.includes(${JSON.stringify(budgetProviderName)}) &&
+            [...element.querySelectorAll('button')].some((button) => (button.innerText || '').trim() === '运行质量基准'));
+        const button = row && [...row.querySelectorAll('button')]
+          .find((item) => (item.innerText || '').trim() === '运行质量基准');
+        button?.click();
+        return Boolean(button);
+      })()
+    `);
+    ok(`${label} budget benchmark control is reachable`, clickedBudgetBenchmark);
+    const budgetWarningReady = await waitFor(() => page.eval(`window.__aiteamBudgetWarning.includes(${JSON.stringify(budgetProviderName)})`));
+    ok(`${label} paid benchmark shows provider, models, token cap, reserve and cost before running`, Boolean(budgetWarningReady) && await page.eval(`
+      window.__aiteamBudgetWarning.includes('ui-budget-worker') &&
+      window.__aiteamBudgetWarning.includes('ui-budget-reviewer') &&
+      window.__aiteamBudgetWarning.includes('20k billable tokens') &&
+      window.__aiteamBudgetWarning.includes('预留复核：6k') &&
+      window.__aiteamBudgetWarning.includes('CNY 0.04') &&
+      window.__aiteamBudgetWarning.includes('取消')
+    `));
+    await page.waitText("已取消 · 未调用模型、未创建任务");
+    const tasksAfterBudgetCancel = await page.eval(`fetch('/aiteam/api/tasks').then((res) => res.json()).then((tasks) => tasks.length)`, true);
+    ok(`${label} cancelling paid benchmark creates no task and makes no model call`, tasksAfterBudgetCancel === tasksBeforeBudgetCancel);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await page.screenshot(`budget-confirm-${label}`);
+    await page.eval(`fetch('/aiteam/api/providers/${budgetProvider.id}', { method: 'DELETE' })`, true);
+    await page.clickText("✕");
+
     await page.clickText("写一份可交付文档");
     const templateNeedsTopic = await page.eval(`
       (() => {
@@ -516,7 +587,7 @@ try {
       AITEAM_CREDENTIAL_KEY: "82".repeat(32),
       AITEAM_AUTH_MODE: "standalone",
       AITEAM_ALLOW_SIGNUP: "1",
-      AITEAM_ADMIN_EMAILS: "ui-smoke@test.local",
+      AITEAM_ADMIN_EMAILS: "ui-desktop@test.local,ui-mobile@test.local",
     },
     stdio: "ignore",
   });

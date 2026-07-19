@@ -256,7 +256,7 @@ interface Store extends State {
   createProvider: (data: import("./api").ProviderInput) => Promise<Provider>;
   updateProvider: (id: string, data: import("./api").ProviderInput) => Promise<Provider>;
   deleteProvider: (id: string) => Promise<void>;
-  runProviderTaskTest: (id: string, data?: { channel_id?: string | null; project_id?: string | null }) => Promise<import("./api").ProviderTaskTestResult>;
+  runProviderTaskTest: (id: string, data: import("./api").ProviderBenchmarkRunInput) => Promise<import("./api").ProviderTaskTestResult>;
   runMcpTaskTest: (id: string, data?: { channel_id?: string | null; project_id?: string | null }) => Promise<import("./api").McpTaskTestResult>;
   runSkillTaskTest: (id: string, data?: { channel_id?: string | null; project_id?: string | null }) => Promise<import("./api").SkillTaskTestResult>;
   moveTask: (task: Task, status: Task["status"]) => Promise<void>;
@@ -482,7 +482,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         dispatch({ type: "providers:set", providers: fresh.providers, mockMode: fresh.mock_mode });
       },
       runProviderTaskTest: async (id, data) => {
-        const result = await api.runProviderTaskTest(id, data ?? {});
+        const result = await api.runProviderTaskTest(id, data);
         const fresh = await api.bootstrap();
         dispatch({ type: "bootstrap:merge", data: fresh });
         return result;
