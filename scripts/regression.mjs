@@ -306,7 +306,10 @@ const benchmarkGoodReport = [
       proseOnlyWorkflowStep?.pass === false && proseOnlyWorkflowStep.gaps.some((gap) => gap.includes("revise")) &&
       legitimateLabelTables?.pass === true && legitimateLabelTables.gaps.length === 0 &&
       benchmarkPrompt.includes("当前产品已经有 Electron 桌面客户端") &&
-      benchmarkPrompt.includes("| human close | ... | ... | ... |") &&
+      benchmarkPrompt.includes("建议立即以“任务简报→AI认领→过程留痕→独立复核→自动返工→人工关单”为唯一首测主线") &&
+      benchmarkPrompt.includes("| brief | 人类发起人 | 任务描述、预期交付物与验收标准 | 信息不全则退回补充 |") &&
+      benchmarkPrompt.includes("| human close | 人类发起人 | 人工确认清单与 user_close 事件 | 三重验收未完成不得关单 |") &&
+      !benchmarkPrompt.includes("| brief | ... | ... | ... |") &&
       benchmarkPrompt.includes("2200–3800 个非空白字符（含 Markdown 标记）") &&
       benchmarkPrompt.includes("14 天计划至少拆成三个阶段") &&
       benchmarkPrompt.includes("本次未使用外部资料。") &&
@@ -345,6 +348,16 @@ const benchmarkGoodReport = [
     [{ content: "本次未使用任何外部资料，包括但不限于 web_search、web_fetch、浏览器、插件或 MCP。当前产品支持 MCP 工具，但本次没有调用。" }],
     actors,
   );
+  const capabilityTrace = qualityBenchmark.providerBenchmarkSourceTrace(
+    [{ id: "e-cap", type: "tool", agent_id: "worker", metadata_json: JSON.stringify({ tool: "write_document" }) }],
+    [{ content: "AI 模型基于当前可调用 Skills 或 MCP 完成任务编排。本次未使用外部资料，也未调用 MCP。" }],
+    actors,
+  );
+  const mixedCapabilityTrace = qualityBenchmark.providerBenchmarkSourceTrace(
+    [{ id: "e-mixed", type: "tool", agent_id: "worker", metadata_json: JSON.stringify({ tool: "write_document" }) }],
+    [{ content: "当前支持并可调用 MCP；本次实际通过 MCP 查询获得了资料。" }],
+    actors,
+  );
   const badTrace = qualityBenchmark.providerBenchmarkSourceTrace(
     [
       { id: "e3", type: "tool", agent_id: "worker", metadata_json: JSON.stringify({ tool: "web_search" }) },
@@ -372,6 +385,10 @@ const benchmarkGoodReport = [
     "固定质量基准来源账本：仅接受执行者 write_document 与复核者 submit_verdict，且未完成任务禁止通过",
     cleanTrace.clean === true &&
       cleanTrace.authorized_tools.length === 2 &&
+      capabilityTrace.clean === true &&
+      capabilityTrace.unobserved_claims.length === 0 &&
+      mixedCapabilityTrace.clean === false &&
+      mixedCapabilityTrace.unobserved_claims.includes("mcp") &&
       badTrace.clean === false &&
       badTrace.unauthorized_tool_events.length === 2 &&
       ["browser", "plugin", "web_search"].every((tool) => badTrace.unobserved_claims.includes(tool)) &&
@@ -381,7 +398,7 @@ const benchmarkGoodReport = [
       qualityBenchmark.providerBenchmarkRunStatus({ observerDone: true, passed: true, pendingApproval: false }) === "passed" &&
       qualityBenchmark.providerBenchmarkRunStatus({ observerDone: true, passed: false, pendingApproval: true }) === "pending_approval" &&
       qualityBenchmark.providerBenchmarkRunStatus({ observerDone: true, passed: false, pendingApproval: false }) === "failed",
-    `clean=${cleanTrace.clean}/${cleanTrace.authorized_tools.length} bad=${badTrace.clean}/${badTrace.unauthorized_tool_events.length}/${badTrace.unobserved_claims.join(",")} completedGate=${qualityBenchmark.providerBenchmarkPassed({ ...allPassChecks, completed: false })} observerTimeout=${qualityBenchmark.providerBenchmarkRunStatus({ observerDone: false, passed: false, pendingApproval: false })}`,
+    `clean=${cleanTrace.clean}/${cleanTrace.authorized_tools.length} capability=${capabilityTrace.clean}/${capabilityTrace.unobserved_claims.join(",")} mixed=${mixedCapabilityTrace.clean}/${mixedCapabilityTrace.unobserved_claims.join(",")} bad=${badTrace.clean}/${badTrace.unauthorized_tool_events.length}/${badTrace.unobserved_claims.join(",")} completedGate=${qualityBenchmark.providerBenchmarkPassed({ ...allPassChecks, completed: false })} observerTimeout=${qualityBenchmark.providerBenchmarkRunStatus({ observerDone: false, passed: false, pendingApproval: false })}`,
   );
 }
 
@@ -416,7 +433,8 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
     "固定质量基准返工：隔离上下文重新携带可信产品事实、固定骨架与具体复核意见",
     reworkPrompt.includes("当前产品已经有 Electron 桌面客户端") &&
       reworkPrompt.includes("当前已经使用 SQLite") &&
-      reworkPrompt.includes("| goal | ... | ... | ... |") &&
+      reworkPrompt.includes("| goal | 人类发起人 | 任务标题、目标与 created 事件 | 缺少目标则不进入执行 |") &&
+      reworkPrompt.includes("| review | 独立复核人 | verification 事件与 verdicts 结构化裁决 | 未通过则进入 revise |") &&
       reworkPrompt.includes("本次未使用外部资料。") &&
       reworkPrompt.includes("删除编造字段，并缩短开头结论") &&
       reworkPrompt.includes("你处于隔离上下文"),

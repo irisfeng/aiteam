@@ -73,6 +73,26 @@ function explicitlyNegated(sentence: string, tool: string, specificPattern: RegE
   return (TOOL_ALIASES[tool] ?? [tool]).some((alias) => negativeClause.includes(alias));
 }
 
+function capabilityMentionOnly(sentence: string, tool: string) {
+  const lower = sentence.toLowerCase();
+  let sawCapability = false;
+  for (const alias of TOOL_ALIASES[tool] ?? [tool]) {
+    let from = 0;
+    while (from < lower.length) {
+      const index = lower.indexOf(alias, from);
+      if (index < 0) break;
+      const prefix = lower.slice(Math.max(0, index - 32), index);
+      const locallyNegated = /(?:没有|未|不得|禁止|不曾|无需)(?:调用|使用|接入)?[^。！？\n]{0,24}$/.test(prefix);
+      const describesCapability = /(?:支持|可|可以|能够|能)(?:调用|使用|接入)?[^。！？\n]{0,24}$/.test(prefix);
+      const describesObservedUse = /(?:已经|已|实际|本次|通过|借助)[^。！？\n]{0,24}$/.test(prefix);
+      if (describesObservedUse && !locallyNegated) return false;
+      if (describesCapability) sawCapability = true;
+      from = index + alias.length;
+    }
+  }
+  return sawCapability;
+}
+
 export function providerBenchmarkSourceTrace(
   events: BenchmarkEvent[],
   docs: BenchmarkDoc[],
@@ -102,7 +122,11 @@ export function providerBenchmarkSourceTrace(
   const sentences = combined.split(/(?<=[。！？\n])/).map((sentence) => sentence.trim()).filter(Boolean);
   const unobservedClaims = TOOL_CLAIMS
     .filter(([tool, positive, negative]) =>
-      !authorizedTools.has(tool) && sentences.some((sentence) => positive.test(sentence) && !explicitlyNegated(sentence, tool, negative)),
+      !authorizedTools.has(tool) && sentences.some((sentence) =>
+        positive.test(sentence) &&
+        !explicitlyNegated(sentence, tool, negative) &&
+        !capabilityMentionOnly(sentence, tool),
+      ),
     )
     .map(([tool]) => tool);
 
