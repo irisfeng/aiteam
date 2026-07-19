@@ -536,14 +536,19 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
     taskReviewEvidencePanel,
     `reviewEvidencePanel=${taskReviewEvidencePanel}`);
   const benchmarkHumanAuditGate =
-    taskDetailSource.includes("真实质量基准 · 人工审计") &&
+    taskDetailSource.includes("三重验收") &&
+    taskDetailSource.includes("自动检查 → 独立复核 → 你的确认") &&
+    taskDetailSource.includes("当前文档通过") &&
+    taskDetailSource.includes("通过且绑定当前文档") &&
+    taskDetailSource.includes("前两步已通过，可以开始最终确认") &&
+    taskDetailSource.includes("最后一步 · 你的质量确认") &&
     taskDetailSource.includes("decision_useful") &&
     taskDetailSource.includes("evidence_traceable") &&
     taskDetailSource.includes("no_fabrication") &&
     taskDetailSource.includes("workflow_actionable") &&
     taskDetailSource.includes("no_padding") &&
-    taskDetailSource.includes("提交人工审计并关单") &&
-    taskDetailSource.includes("不能用人工 override 跳过") &&
+    taskDetailSource.includes("确认质量并关单") &&
+    taskDetailSource.includes("不能跳过三重验收") &&
     routesSource.includes("BENCHMARK_HUMAN_AUDIT_REQUIRED") &&
     routesSource.includes("machine_contract_passed") &&
     routesSource.includes("task-level human audit before project close");
@@ -3998,6 +4003,7 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
       method: "PATCH",
       body: JSON.stringify({ status: "done", human_audit: fullAuditPayload }),
     });
+    const staleGate = (await J(`/tasks/${result.task.id}/quality-gate`)).body;
     const currentDocVerdict = db.createVerdict({
       task_id: result.task.id,
       project_id: result.task.project_id,
@@ -4009,6 +4015,7 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
       reasons: "当前文档版本逐项复核通过",
       source: "auto",
     });
+    const readyGate = (await J(`/tasks/${result.task.id}/quality-gate`)).body;
     const completedAudit = await J(`/tasks/${result.task.id}`, {
       method: "PATCH",
       body: JSON.stringify({
@@ -4016,6 +4023,7 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
         human_audit: fullAuditPayload,
       }),
     });
+    const completedGate = (await J(`/tasks/${result.task.id}/quality-gate`)).body;
     const closeEvents = (await J(`/tasks/${result.task.id}/events`)).body.filter((event) => event.type === "user_close");
     const closeMeta = (() => {
       try { return JSON.parse(closeEvents.at(-1)?.metadata_json || "{}"); } catch { return {}; }
@@ -4026,7 +4034,21 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
       missingAudit.ok === false && missingAudit.body.code === "BENCHMARK_HUMAN_AUDIT_REQUIRED" &&
         partialAudit.ok === false && partialAudit.body.gaps?.some((gap) => gap.includes("workflow_actionable")) &&
         staleVerdictAudit.ok === false && staleVerdictAudit.body.gaps?.some((gap) => gap.includes("未绑定当前文档版本")) &&
+        staleGate.machine?.pass === true &&
+        staleGate.reviewer?.result_passed === true &&
+        staleGate.reviewer?.bound_to_current_document === false &&
+        staleGate.ready_for_human_audit === false &&
+        readyGate.document?.id === newerUnreviewedDoc.id &&
+        readyGate.machine?.pass === true &&
+        readyGate.reviewer?.ready === true &&
+        readyGate.reviewer?.verdict_id === currentDocVerdict.id &&
+        readyGate.ready_for_human_audit === true &&
+        readyGate.human?.completed === false &&
         completedAudit.ok === true && completedAudit.body.status === "done" &&
+        completedGate.complete === true &&
+        completedGate.human?.completed === true &&
+        completedGate.human?.checks_completed === 5 &&
+        completedGate.human?.note === auditNote &&
         closeEvents.length === 1 &&
         closeMeta.human_override === false &&
         closeMeta.human_audit?.version === 1 &&
@@ -4035,7 +4057,7 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
         closeMeta.human_audit?.document_id === newerUnreviewedDoc.id &&
         closeMeta.human_audit?.verdict_id === currentDocVerdict.id &&
         currentDocVerdict.doc_id === newerUnreviewedDoc.id,
-      `missing=${missingAudit.status}/${missingAudit.body.code} partial=${partialAudit.status}/${partialAudit.body.gaps?.length} stale=${staleVerdictAudit.status}/${staleVerdictAudit.body.gaps?.length} completed=${completedAudit.status}/${completedAudit.body.status} close=${closeEvents.length}/${closeMeta.human_audit?.version}/${closeMeta.human_override}`,
+      `missing=${missingAudit.status}/${missingAudit.body.code} partial=${partialAudit.status}/${partialAudit.body.gaps?.length} stale=${staleVerdictAudit.status}/${staleGate.reviewer?.bound_to_current_document} ready=${readyGate.ready_for_human_audit} completed=${completedAudit.status}/${completedGate.complete} close=${closeEvents.length}/${closeMeta.human_audit?.version}/${closeMeta.human_override}`,
     );
   }
 

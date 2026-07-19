@@ -153,6 +153,13 @@ const PROVIDER_QUALITY_BENCHMARK = {
 } as const;
 
 const PROVIDER_QUALITY_CONFIRMATION_VERSION = 1;
+const PROVIDER_HUMAN_AUDIT_KEYS = [
+  "decision_useful",
+  "evidence_traceable",
+  "no_fabrication",
+  "workflow_actionable",
+  "no_padding",
+] as const;
 
 function providerQualityBenchmarkPlan(provider: Provider) {
   const workerModel = provider.light_model || provider.default_model;
@@ -173,6 +180,63 @@ function providerQualityBenchmarkPlan(provider: Provider) {
     price_currency: provider.price_currency || "USD",
     stages: ["轻量模型生成", "机器契约检查", "强模型独立复核", "必要时按配置自动返工", "人工审计后关单"],
     warning: "到达计费 token 上限会暂停；单个已发出的模型请求可能造成小幅越界。",
+  };
+}
+
+function providerQualityGate(taskId: string) {
+  const task = getTask(taskId);
+  if (!task || !isProviderQualityBenchmarkTask(task)) return null;
+  const latestDocument = listDocuments()
+    .filter((document) => document.task_id === task.id && document.kind === "report")
+    .sort((a, b) => b.created_at - a.created_at)[0] ?? null;
+  const latestVerdict = listVerdictsForTask(task.id).at(-1) ?? null;
+  const machine = latestDocument
+    ? assessProviderQualityBenchmarkDocument(latestDocument.content)
+    : { pass: false, gaps: ["缺少当前交付文档"] };
+  const reviewerResultPassed = latestVerdict?.result === "pass";
+  const reviewerBoundToCurrentDocument = Boolean(
+    reviewerResultPassed && latestDocument && latestVerdict?.doc_id === latestDocument.id,
+  );
+  let recordedHumanAudit: Record<string, unknown> | null = null;
+  const closeEvents = listTaskEvents(task.id).filter((event) => event.type === "user_close").reverse();
+  for (const event of closeEvents) {
+    try {
+      const metadata = JSON.parse(event.metadata_json || "{}") as { human_audit?: unknown };
+      if (metadata.human_audit && typeof metadata.human_audit === "object") {
+        recordedHumanAudit = metadata.human_audit as Record<string, unknown>;
+        break;
+      }
+    } catch { /* 损坏的历史事件不应让质量门接口失败 */ }
+  }
+  const humanChecksCompleted = recordedHumanAudit
+    ? PROVIDER_HUMAN_AUDIT_KEYS.filter((key) => recordedHumanAudit?.[key] === true).length
+    : 0;
+  const humanNote = typeof recordedHumanAudit?.note === "string" ? recordedHumanAudit.note.trim() : "";
+  const humanCompleted = humanChecksCompleted === PROVIDER_HUMAN_AUDIT_KEYS.length && humanNote.length >= 12;
+  return {
+    task_id: task.id,
+    document: latestDocument
+      ? { id: latestDocument.id, title: latestDocument.title, kind: latestDocument.kind, created_at: latestDocument.created_at }
+      : null,
+    machine: { pass: machine.pass, gaps: machine.gaps },
+    reviewer: {
+      ready: reviewerResultPassed && reviewerBoundToCurrentDocument,
+      result_passed: reviewerResultPassed,
+      bound_to_current_document: reviewerBoundToCurrentDocument,
+      verdict_id: latestVerdict?.id ?? null,
+      document_id: latestVerdict?.doc_id ?? null,
+      result: latestVerdict?.result ?? null,
+      reasons: latestVerdict?.reasons ?? "",
+      source: latestVerdict?.source ?? null,
+    },
+    human: {
+      completed: humanCompleted,
+      checks_completed: humanChecksCompleted,
+      checks_total: PROVIDER_HUMAN_AUDIT_KEYS.length,
+      note: humanNote,
+    },
+    ready_for_human_audit: Boolean(machine.pass && reviewerResultPassed && reviewerBoundToCurrentDocument),
+    complete: Boolean(machine.pass && reviewerResultPassed && reviewerBoundToCurrentDocument && humanCompleted),
   };
 }
 
@@ -1009,6 +1073,14 @@ api.delete("/providers/:id", requireAdmin, (req, res) => {
 
 api.get("/tasks", (_req, res) => res.json(listTasks()));
 
+api.get("/tasks/:id/quality-gate", (req, res) => {
+  const task = getTask(req.params.id);
+  if (!task) return res.status(404).json({ error: "task not found" });
+  const gate = providerQualityGate(task.id);
+  if (!gate) return res.status(400).json({ error: "task is not a provider quality benchmark" });
+  res.json(gate);
+});
+
 api.get("/tasks/:id/events", (req, res) => {
   const task = getTask(req.params.id);
   if (!task) return res.status(404).json({ error: "task not found" });
@@ -1419,30 +1491,17 @@ api.patch("/tasks/:id", (req, res) => {
       }
     }
     if (nextStatus === "done" && isProviderQualityBenchmarkTask(prev)) {
-      const closeDocs = listDocuments().filter((document) => document.task_id === prev.id);
-      const latestDoc = closeDocs[0];
-      const closeVerdicts = listVerdictsForTask(prev.id);
-      const latestVerdict = closeVerdicts.at(-1);
+      const gate = providerQualityGate(prev.id);
       const audit = human_audit && typeof human_audit === "object" ? human_audit as Record<string, unknown> : {};
-      const requiredChecks = [
-        "decision_useful",
-        "evidence_traceable",
-        "no_fabrication",
-        "workflow_actionable",
-        "no_padding",
-      ] as const;
-      const missingChecks = requiredChecks.filter((key) => audit[key] !== true);
+      const missingChecks = PROVIDER_HUMAN_AUDIT_KEYS.filter((key) => audit[key] !== true);
       const note = typeof audit.note === "string" ? audit.note.trim() : "";
-      const machineAssessment = latestDoc
-        ? assessProviderQualityBenchmarkDocument(latestDoc.content)
-        : { pass: false, gaps: ["缺少当前交付文档"] };
       const auditGaps = [
-        ...(latestVerdict?.result === "pass" ? [] : ["缺少独立复核 pass verdict"]),
-        ...(!latestDoc ? ["缺少当前交付文档"] : []),
-        ...(latestVerdict?.result === "pass" && latestDoc && latestVerdict.doc_id !== latestDoc.id
+        ...(gate?.reviewer.result_passed ? [] : ["缺少独立复核 pass verdict"]),
+        ...(!gate?.document ? ["缺少当前交付文档"] : []),
+        ...(gate?.reviewer.result_passed && !gate.reviewer.bound_to_current_document
           ? ["独立复核 pass verdict 未绑定当前文档版本"]
           : []),
-        ...(!machineAssessment.pass ? [`当前文档未通过机器契约：${machineAssessment.gaps.join("；")}`] : []),
+        ...(!gate?.machine.pass ? [`当前文档未通过机器契约：${gate?.machine.gaps.join("；") || "质量门不可用"}`] : []),
         ...(missingChecks.length > 0 ? [`人工审计未确认：${missingChecks.join("、")}`] : []),
         ...(note.length < 12 ? ["人工决策说明至少需要 12 个字符"] : []),
         ...(note.length > 500 ? ["人工决策说明不能超过 500 个字符"] : []),
@@ -1534,7 +1593,8 @@ api.patch("/tasks/:id", (req, res) => {
       const closeVerdicts = listVerdictsForTask(task.id);
       const latestVerdict = closeVerdicts.at(-1);
       const humanOverride = latestVerdict?.result !== "pass";
-      const benchmarkAudit = isProviderQualityBenchmarkTask(task)
+      const benchmarkGateAtClose = isProviderQualityBenchmarkTask(task) ? providerQualityGate(task.id) : null;
+      const benchmarkAudit = benchmarkGateAtClose
         ? {
             version: 1,
             decision_useful: human_audit.decision_useful === true,
@@ -1543,11 +1603,9 @@ api.patch("/tasks/:id", (req, res) => {
             workflow_actionable: human_audit.workflow_actionable === true,
             no_padding: human_audit.no_padding === true,
             note: String(human_audit.note).trim(),
-            document_id: closeDocs[0]?.id ?? null,
+            document_id: benchmarkGateAtClose.document?.id ?? null,
             verdict_id: latestVerdict?.id ?? null,
-            machine_contract_passed: closeDocs[0]
-              ? assessProviderQualityBenchmarkDocument(closeDocs[0].content).pass
-              : false,
+            machine_contract_passed: benchmarkGateAtClose.machine.pass,
           }
         : null;
       emitTaskEvent({
@@ -1557,7 +1615,7 @@ api.patch("/tasks/:id", (req, res) => {
         agent_id: task.assignee_agent_id,
         type: "user_close",
         summary: benchmarkAudit
-          ? "用户完成五项人工质量审计并关闭真实模型质量基准任务"
+          ? "用户完成五项质量确认并关闭真实模型质量基准任务"
           : humanOverride
             ? "用户在缺少结构化复核通过裁决时，基于人工判断验收并关闭任务"
             : "用户验收并关闭了任务",

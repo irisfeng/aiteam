@@ -165,6 +165,30 @@ export interface ProviderBenchmarkRunInput {
   confirmed_budget_billable: number;
 }
 
+export interface ProviderQualityGate {
+  task_id: string;
+  document: { id: string; title: string; kind: string; created_at: number } | null;
+  machine: { pass: boolean; gaps: string[] };
+  reviewer: {
+    ready: boolean;
+    result_passed: boolean;
+    bound_to_current_document: boolean;
+    verdict_id: string | null;
+    document_id: string | null;
+    result: "pass" | "revise" | null;
+    reasons: string;
+    source: "auto" | "fallback" | "human" | null;
+  };
+  human: {
+    completed: boolean;
+    checks_completed: number;
+    checks_total: number;
+    note: string;
+  };
+  ready_for_human_audit: boolean;
+  complete: boolean;
+}
+
 export interface McpTaskTestResult {
   ok: boolean;
   server: {
@@ -304,6 +328,7 @@ export const api = {
     req<ScenarioStartResult>(`/scenarios/${id}/start`, { method: "POST", body: JSON.stringify(data) }),
   taskEvents: (id: string) => req<TaskEvent[]>(`/tasks/${id}/events`),
   taskVerdicts: (id: string) => req<Verdict[]>(`/tasks/${id}/verdicts`),
+  taskQualityGate: (id: string) => req<ProviderQualityGate>(`/tasks/${id}/quality-gate`),
   quality: () => req<QualitySummary>("/quality"),
   updateTask: (id: string, data: TaskUpdateInput) =>
     req<Task>(`/tasks/${id}`, { method: "PATCH", body: JSON.stringify(data) }),

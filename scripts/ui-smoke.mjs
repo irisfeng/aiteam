@@ -478,8 +478,29 @@ async function runViewport(debugPort, baseUrl, label, viewport) {
     `, true), 15000);
     ok(`${label} benchmark task reaches human review`, Boolean(benchmarkReviewReady));
     await page.send("Page.navigate", { url: `${baseUrl}?task=${encodeURIComponent(benchmarkTaskId)}` });
-    await page.waitText("真实质量基准 · 人工审计");
-    await page.waitText("提交人工审计并关单");
+    await page.waitText("三重验收");
+    await page.waitText("最后一步 · 你的质量确认");
+    await page.waitText("确认质量并关单");
+    const visibleBenchmarkGate = await page.eval(`
+      fetch('/aiteam/api/tasks/${benchmarkTaskId}/quality-gate')
+        .then((res) => res.json())
+        .then((gate) => ({
+          gate,
+          text: document.body.innerText,
+        }))
+    `, true);
+    ok(
+      `${label} benchmark drawer explains all three gates and current failure reasons before close`,
+      visibleBenchmarkGate?.gate?.machine?.pass === false &&
+        visibleBenchmarkGate?.gate?.reviewer?.ready === false &&
+        visibleBenchmarkGate?.gate?.human?.completed === false &&
+        visibleBenchmarkGate?.gate?.ready_for_human_audit === false &&
+        visibleBenchmarkGate?.text?.includes("自动检查") &&
+        visibleBenchmarkGate?.text?.includes("独立复核") &&
+        visibleBenchmarkGate?.text?.includes("待完成 · 0/5") &&
+        visibleBenchmarkGate?.text?.includes("先补齐当前文档的自动检查与独立复核"),
+      JSON.stringify(visibleBenchmarkGate?.gate),
+    );
     ok(`${label} benchmark human audit shows five explicit checks`, await page.eval(`
       [
         '结论足以支持继续/停止决策',
@@ -489,11 +510,11 @@ async function runViewport(debugPort, baseUrl, label, viewport) {
         '没有重复段落、占位符或为凑篇幅写的空泛内容',
       ].every((text) => document.body.innerText.includes(text))
     `));
-    await page.clickText("提交人工审计并关单");
+    await page.clickText("确认质量并关单");
     await page.waitText("真实质量基准不能跳过三重验收");
     ok(`${label} benchmark UI refuses incomplete human audit instead of offering override`, await page.eval(`
       document.body.innerText.includes('真实质量基准不能跳过三重验收') &&
-      document.body.innerText.includes('不能用人工 override 跳过')
+      document.body.innerText.includes('不能跳过三重验收')
     `));
     const directBenchmarkBypass = await page.eval(`
       fetch('/aiteam/api/tasks/${benchmarkTaskId}', {
@@ -517,6 +538,12 @@ async function runViewport(debugPort, baseUrl, label, viewport) {
       directBenchmarkBypass?.status === 400 && directBenchmarkBypass?.body?.code === "BENCHMARK_HUMAN_AUDIT_REQUIRED",
       JSON.stringify(directBenchmarkBypass),
     );
+    await page.eval(`
+      [...document.querySelectorAll('div')]
+        .find((element) => (element.textContent || '').trim() === '三重验收')
+        ?.scrollIntoView({ block: 'center' })
+    `);
+    await new Promise((resolve) => setTimeout(resolve, 200));
     await page.screenshot(`benchmark-audit-${label}`);
     await assertNoHorizontalOverflow(page, `${label} benchmark audit drawer`);
 

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useWorkspace } from "../store";
 import type { Approval, Doc, HumanQualityAudit, Task, TaskEvent, Verdict } from "../types";
-import { api, billableTokens, parseTaskUsage } from "../api";
+import { api, billableTokens, parseTaskUsage, type ProviderQualityGate } from "../api";
 import { formatNetworkApprovalPayload } from "../lib/approvals";
 
 const EVENT_LABEL: Record<TaskEvent["type"], string> = {
@@ -181,6 +181,7 @@ export function TaskDetailDrawer({
   onOpenTask?: (task: Task) => void;
 }) {
   const ws = useWorkspace();
+  const isProviderQualityBenchmark = task.title.startsWith(PROVIDER_QUALITY_BENCHMARK_PREFIX);
   const [closing, setClosing] = useState(false);
   const [resuming, setResuming] = useState(false);
   const [revising, setRevising] = useState(false);
@@ -204,6 +205,7 @@ export function TaskDetailDrawer({
     no_padding: false,
   });
   const [humanAuditNote, setHumanAuditNote] = useState("");
+  const [benchmarkGate, setBenchmarkGate] = useState<ProviderQualityGate | null | undefined>(undefined);
 
   useEffect(() => {
     let alive = true;
@@ -234,6 +236,18 @@ export function TaskDetailDrawer({
     });
     setHumanAuditNote("");
   }, [task.id, task.status]);
+  useEffect(() => {
+    let alive = true;
+    if (!isProviderQualityBenchmark) {
+      setBenchmarkGate(undefined);
+      return () => { alive = false; };
+    }
+    setBenchmarkGate(undefined);
+    api.taskQualityGate(task.id)
+      .then((gate) => alive && setBenchmarkGate(gate))
+      .catch(() => alive && setBenchmarkGate(null));
+    return () => { alive = false; };
+  }, [isProviderQualityBenchmark, task.id, task.status]);
   const assignee = ws.agentById(task.assignee_agent_id);
   const reviewer = ws.agentById(task.reviewer_agent_id);
   const creator = task.created_by === "user" ? null : ws.agentById(task.created_by);
@@ -244,7 +258,6 @@ export function TaskDetailDrawer({
   const docs = ws.documents.filter((d) => d.task_id === task.id).sort((a, b) => b.created_at - a.created_at);
   const latestDoc = docs[0];
   const events = ws.taskEvents.filter((e) => e.task_id === task.id).sort((a, b) => a.created_at - b.created_at);
-  const isProviderQualityBenchmark = task.title.startsWith(PROVIDER_QUALITY_BENCHMARK_PREFIX);
   const recordedHumanAudit = parseRecordedHumanAudit(events);
   const tools = events.filter((e) => e.type === "tool").slice(-6).reverse();
   const acceptanceItems = splitAcceptanceCriteria(task.acceptance_criteria);
@@ -264,8 +277,22 @@ export function TaskDetailDrawer({
   const closeEvidenceGaps = [
     !deliveryEvidence ? "未看到交付物" : "",
     !selfCheckEvidence ? "未检出交付自查表" : "",
-    !verificationPassed
+    !isProviderQualityBenchmark && !verificationPassed
       ? latestVerdict?.result === "revise" ? "最近一次复核要求返工" : "暂无结构化复核通过裁决"
+      : "",
+    isProviderQualityBenchmark && benchmarkGate === undefined
+      ? "正在读取当前文档的三重验收状态"
+      : "",
+    isProviderQualityBenchmark && benchmarkGate === null
+      ? "三重验收状态读取失败，请刷新后重试"
+      : "",
+    isProviderQualityBenchmark && benchmarkGate && !benchmarkGate.machine.pass
+      ? `当前文档自动检查未通过（${benchmarkGate.machine.gaps.length} 项差距）`
+      : "",
+    isProviderQualityBenchmark && benchmarkGate && !benchmarkGate.reviewer.ready
+      ? benchmarkGate.reviewer.result_passed
+        ? "独立复核结论未绑定当前文档版本"
+        : "当前文档尚无独立复核通过结论"
       : "",
     isProviderQualityBenchmark && checkedHumanAuditCount < HUMAN_AUDIT_ITEMS.length
       ? `人工质量审计仅完成 ${checkedHumanAuditCount}/${HUMAN_AUDIT_ITEMS.length} 项`
@@ -290,7 +317,7 @@ export function TaskDetailDrawer({
     if (task.status === "review" && closeEvidenceGaps.length > 0 &&
       !window.confirm(`关单证据仍有缺口：\n- ${closeEvidenceGaps.join("\n- ")}\n\n是否基于你的人工判断，仍然验收并关闭该任务？`)) return;
     if (task.status === "review" && isProviderQualityBenchmark &&
-      !window.confirm("确认这份真实模型交付已经通过机器契约、独立复核和你的五项人工审计，并记录为可用于产品决策的验收结果？")) return;
+      !window.confirm("确认这份真实模型交付已经通过自动检查、独立复核和你的五项质量确认，并记录为可用于产品决策的验收结果？")) return;
     setActionError("");
     setClosing(true);
     try {
@@ -638,10 +665,78 @@ export function TaskDetailDrawer({
                     </div>
                   </div>
                 )}
+                {isProviderQualityBenchmark && (
+                  <div className="border-t border-line px-3 py-3">
+                    <div className="flex flex-wrap items-baseline justify-between gap-1">
+                      <div className="text-[11px] font-semibold text-ink-2">三重验收</div>
+                      <div className="text-[10px] text-ink-3">自动检查 → 独立复核 → 你的确认</div>
+                    </div>
+                    {benchmarkGate === undefined ? (
+                      <div className="mt-2 text-[11.5px] text-ink-3">正在核对当前文档与复核记录…</div>
+                    ) : benchmarkGate === null ? (
+                      <div className="mt-2 rounded bg-red-50 px-2 py-1.5 text-[11.5px] text-red-600 dark:bg-red-950/20 dark:text-red-300">
+                        暂时无法读取质量门，请刷新任务后重试。
+                      </div>
+                    ) : (
+                      <div className="mt-2 space-y-2">
+                        <div className="rounded-md border border-line bg-paper px-2.5 py-2">
+                          <div className="flex items-center gap-2 text-[11.5px]">
+                            <span className="font-mono text-[10px] text-ink-3">01</span>
+                            <span className="font-medium text-ink-2">自动检查</span>
+                            <span className={`ml-auto rounded px-1.5 py-px text-[10px] font-medium ${benchmarkGate.machine.pass ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300" : "bg-red-50 text-red-600 dark:bg-red-950/20 dark:text-red-300"}`}>
+                              {benchmarkGate.machine.pass ? "当前文档通过" : `未通过 · ${benchmarkGate.machine.gaps.length} 项`}
+                            </span>
+                          </div>
+                          {benchmarkGate.document && (
+                            <div className="mt-1 truncate text-[10.5px] text-ink-3" title={benchmarkGate.document.title}>
+                              文档：{benchmarkGate.document.title}
+                            </div>
+                          )}
+                          {!benchmarkGate.machine.pass && benchmarkGate.machine.gaps.length > 0 && (
+                            <ul className="mt-1.5 space-y-1 text-[10.5px] leading-snug text-red-600 dark:text-red-300">
+                              {benchmarkGate.machine.gaps.slice(0, 3).map((gap) => <li key={gap}>· {gap}</li>)}
+                              {benchmarkGate.machine.gaps.length > 3 && <li>· 另有 {benchmarkGate.machine.gaps.length - 3} 项差距</li>}
+                            </ul>
+                          )}
+                        </div>
+                        <div className="rounded-md border border-line bg-paper px-2.5 py-2">
+                          <div className="flex items-center gap-2 text-[11.5px]">
+                            <span className="font-mono text-[10px] text-ink-3">02</span>
+                            <span className="font-medium text-ink-2">独立复核</span>
+                            <span className={`ml-auto rounded px-1.5 py-px text-[10px] font-medium ${benchmarkGate.reviewer.ready ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300" : "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-300"}`}>
+                              {benchmarkGate.reviewer.ready
+                                ? "通过且绑定当前文档"
+                                : benchmarkGate.reviewer.result_passed
+                                  ? "通过但版本已变化"
+                                  : "尚未通过"}
+                            </span>
+                          </div>
+                          {!benchmarkGate.reviewer.ready && benchmarkGate.reviewer.reasons && (
+                            <div className="mt-1 line-clamp-3 text-[10.5px] leading-snug text-ink-3">{benchmarkGate.reviewer.reasons}</div>
+                          )}
+                        </div>
+                        <div className="rounded-md border border-line bg-paper px-2.5 py-2">
+                          <div className="flex items-center gap-2 text-[11.5px]">
+                            <span className="font-mono text-[10px] text-ink-3">03</span>
+                            <span className="font-medium text-ink-2">你的确认</span>
+                            <span className={`ml-auto rounded px-1.5 py-px text-[10px] font-medium ${benchmarkGate.human.completed ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300" : "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-300"}`}>
+                              {benchmarkGate.human.completed ? "已完成 5/5" : `待完成 · ${checkedHumanAuditCount}/5`}
+                            </span>
+                          </div>
+                          <div className="mt-1 text-[10.5px] leading-snug text-ink-3">
+                            {benchmarkGate.ready_for_human_audit
+                              ? "前两步已通过，可以开始最终确认。"
+                              : "先补齐当前文档的自动检查与独立复核，再进行最终确认。"}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
                 {isProviderQualityBenchmark && task.status === "review" && (
                   <div className="border-t border-line px-3 py-3">
                     <div className="flex items-center justify-between gap-2">
-                      <div className="text-[11px] font-semibold text-ink-2">真实质量基准 · 人工审计</div>
+                      <div className="text-[11px] font-semibold text-ink-2">最后一步 · 你的质量确认</div>
                       <span className={`rounded px-1.5 py-px font-mono text-[10px] ${humanAuditComplete ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300" : "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-300"}`}>
                         {checkedHumanAuditCount}/{HUMAN_AUDIT_ITEMS.length}
                       </span>
@@ -660,7 +755,7 @@ export function TaskDetailDrawer({
                       ))}
                     </div>
                     <label className="mt-3 block text-[11px] text-ink-3">
-                      人工决策说明（至少 12 个字符）
+                      最终判断（至少 12 个字符）
                       <textarea
                         value={humanAuditNote}
                         onChange={(event) => setHumanAuditNote(event.target.value)}
@@ -671,7 +766,7 @@ export function TaskDetailDrawer({
                       />
                     </label>
                     <div className="mt-1 text-[10.5px] leading-relaxed text-ink-3">
-                      关单时会把五项确认、决策说明、当前文档和独立 verdict 一起写入审计事件，不能用人工 override 跳过。
+                      关单时会把五项确认、最终判断、当前文档和独立复核结果一起留痕，不能跳过。
                     </div>
                   </div>
                 )}
@@ -685,7 +780,7 @@ export function TaskDetailDrawer({
                   <div className="border-t border-amber-200 bg-amber-50 px-3 py-2 text-[11.5px] leading-relaxed text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/20 dark:text-amber-300">
                     关单前仍需人工确认：{closeEvidenceGaps.join("；")}。
                     {isProviderQualityBenchmark
-                      ? "真实质量基准必须补齐全部证据，不能用人工 override 跳过。"
+                      ? "真实质量基准必须补齐全部证据，不能跳过三重验收。"
                       : "你仍可基于人工判断验收关闭，但系统会在操作时再次提醒。"}
                   </div>
                 )}
@@ -977,7 +1072,7 @@ export function TaskDetailDrawer({
               ? "先处理该任务的审批或输入"
               : task.status === "review"
                 ? isProviderQualityBenchmark
-                  ? "补齐机器契约、独立复核与五项人工审计后关单"
+                  ? "补齐自动检查、独立复核与五项最终确认后关单"
                   : "验收通过后由人类确认关单"
                 : "取消只归档，不代表验收通过"}
           >
@@ -988,7 +1083,7 @@ export function TaskDetailDrawer({
                 : closing
                   ? task.status === "review" ? "关闭中…" : "取消中…"
                   : task.status === "review"
-                    ? isProviderQualityBenchmark ? "提交人工审计并关单" : "确认关闭任务"
+                    ? isProviderQualityBenchmark ? "确认质量并关单" : "确认关闭任务"
                     : "取消任务"}
           </button>
           <button onClick={onClose} className="rounded-lg border border-line px-3 py-1.5 text-[13px] text-ink-2 hover:bg-sel">
