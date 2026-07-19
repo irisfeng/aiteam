@@ -1112,6 +1112,50 @@ export function isProviderQualityBenchmarkTask(task: Task): boolean {
 
 export type ProviderQualityDocumentAssessment = { pass: boolean; gaps: string[] };
 
+const BENCHMARK_SCHEMA_FIELDS: Record<string, ReadonlySet<string>> = {
+  tasks: new Set([
+    "id", "owner_id", "channel_id", "title", "description", "status", "assignee_agent_id", "reviewer_agent_id",
+    "blocked_approval_id", "created_by", "acceptance_criteria", "depends_on", "model_tier", "source_doc_ids",
+    "project_id", "revision_count", "usage_json", "budget_billable", "estimate_billable", "created_at", "updated_at",
+  ]),
+  task_events: new Set(["id", "owner_id", "task_id", "channel_id", "project_id", "agent_id", "type", "summary", "metadata_json", "created_at"]),
+  documents: new Set(["id", "owner_id", "channel_id", "task_id", "agent_id", "title", "content", "kind", "version", "superseded_by", "binary_format", "original_blob_path", "template_meta", "created_at", "updated_at"]),
+  approvals: new Set(["id", "owner_id", "channel_id", "agent_id", "title", "payload", "status", "kind", "ref_id", "resolved_at", "consumed_at", "created_at"]),
+  verdicts: new Set(["id", "owner_id", "task_id", "project_id", "doc_id", "verifier_agent_id", "worker_agent_id", "attempt", "result", "reasons", "source", "created_at"]),
+  providers: new Set(["id", "name", "base_url", "api_key", "default_model", "light_model", "max_tokens", "is_official", "web_tools", "is_strong", "price_input_per_million", "price_output_per_million", "price_currency", "created_at"]),
+  users: new Set(["id", "email", "password_hash", "display_name", "role", "created_at"]),
+  app_settings: new Set(["key", "value"]),
+};
+const BENCHMARK_TASK_EVENT_TYPES = new Set([
+  "created", "claim", "start", "tool", "blocked", "handoff", "delivery", "verification", "approval", "user_close", "cancelled", "failure",
+]);
+const BENCHMARK_TASK_STATUSES = new Set(["todo", "doing", "review", "blocked", "done", "cancelled"]);
+
+function unsupportedImplementationClaims(text: string): string[] {
+  const found = new Set<string>();
+  for (const match of text.matchAll(/\b([a-z][a-z0-9_]*)\.([a-z][a-z0-9_]*)\b/gi)) {
+    const table = match[1].toLowerCase();
+    const field = match[2].toLowerCase();
+    if (BENCHMARK_SCHEMA_FIELDS[table] && !BENCHMARK_SCHEMA_FIELDS[table].has(field)) found.add(`${table}.${field}`);
+  }
+  for (const match of text.matchAll(/\b([a-z][a-z0-9_]*)\b\s*表/gi)) {
+    const table = match[1].toLowerCase();
+    if (!BENCHMARK_SCHEMA_FIELDS[table]) found.add(`${table} 表`);
+  }
+  for (const match of text.matchAll(/\b([a-z][a-z0-9_]*)\b\s*事件/gi)) {
+    const eventType = match[1].toLowerCase();
+    if (eventType !== "task_events" && !BENCHMARK_TASK_EVENT_TYPES.has(eventType)) found.add(`${eventType} 事件`);
+  }
+  for (const match of text.matchAll(/\bstatus\s*=\s*([a-z][a-z0-9_]*)\b/gi)) {
+    const status = match[1].toLowerCase();
+    if (!BENCHMARK_TASK_STATUSES.has(status)) found.add(`status=${status}`);
+  }
+  for (const identifier of ["brief_generated", "final_close", "task_owner", "vendor_configs"]) {
+    if (new RegExp(`\\b${identifier}\\b`, "i").test(text)) found.add(identifier);
+  }
+  return [...found].slice(0, 8);
+}
+
 function markdownSection(text: string, titlePattern: RegExp): string {
   const lines = text.split("\n");
   for (let index = 0; index < lines.length; index++) {
@@ -1191,6 +1235,11 @@ export function assessProviderQualityBenchmarkDocument(content: string): Provide
     !/(?:https?:\/\/|假设|待验证|待核实|建议阈值|不得虚构)/.test(sentence),
   );
   if (unqualifiedExternalClaim) gaps.push("存在未给 URL、也未标为假设/待验证的外部事实声明");
+
+  const unsupportedClaims = unsupportedImplementationClaims(text);
+  if (unsupportedClaims.length > 0) {
+    gaps.push(`存在与当前实现不符或任务未提供的精确字段/事件/状态声明：${unsupportedClaims.join("、")}`);
+  }
 
   const selfCheck = markdownSection(text, /自查/);
   if (!selfCheck) gaps.push("缺少文末逐条自查表");

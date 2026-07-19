@@ -181,6 +181,12 @@ const benchmarkGoodReport = [
   const fabricated = typeof assess === "function"
     ? assess(benchmarkGoodReport.replace("本次未使用外部资料。", "数据显示市场规模已经达到 100 亿元。"))
     : null;
+  const inventedImplementation = typeof assess === "function"
+    ? assess(benchmarkGoodReport.replace(
+        "本次未使用外部资料。",
+        "本次未使用外部资料。系统把 goal 写入 tasks.goal，并生成 brief_generated 事件，最终设置 status=closed；供应商配置保存在 vendor_configs 表。",
+      ))
+    : null;
   const numberedNested = typeof assess === "function"
     ? assess(
         benchmarkGoodReport
@@ -214,8 +220,9 @@ const benchmarkGoodReport = [
       numberedNested?.pass === true && numberedNested.gaps.length === 0 &&
       chineseNumbered?.pass === true && chineseNumbered.gaps.length === 0 &&
       hollow?.pass === false && hollow.gaps.length >= 5 &&
-      fabricated?.pass === false && fabricated.gaps.some((gap) => gap.includes("URL")),
-    `assessor=${typeof assess} good=${good?.pass}/${good?.gaps.length} numbered=${numberedNested?.pass}/${numberedNested?.gaps.length} chinese=${chineseNumbered?.pass}/${chineseNumbered?.gaps.length} hollow=${hollow?.pass}/${hollow?.gaps.length} fabricated=${fabricated?.pass}/${fabricated?.gaps.length}`,
+      fabricated?.pass === false && fabricated.gaps.some((gap) => gap.includes("URL")) &&
+      inventedImplementation?.pass === false && inventedImplementation.gaps.some((gap) => gap.includes("精确字段")),
+    `assessor=${typeof assess} good=${good?.pass}/${good?.gaps.length} numbered=${numberedNested?.pass}/${numberedNested?.gaps.length} chinese=${chineseNumbered?.pass}/${chineseNumbered?.gaps.length} hollow=${hollow?.pass}/${hollow?.gaps.length} fabricated=${fabricated?.pass}/${fabricated?.gaps.length} invented=${inventedImplementation?.pass}/${inventedImplementation?.gaps.length}`,
   );
 }
 
