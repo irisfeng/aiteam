@@ -1156,9 +1156,23 @@ function unsupportedImplementationClaims(text: string): string[] {
     const table = match[1].toLowerCase();
     if (!BENCHMARK_SCHEMA_FIELDS[table]) found.add(`${table} 表`);
   }
-  for (const match of text.matchAll(/\b([a-z][a-z0-9_]*)\b\s*事件/gi)) {
+  for (const match of text.matchAll(/`?([a-z][a-z0-9_]*)`?\s*事件/gi)) {
     const eventType = match[1].toLowerCase();
     if (eventType !== "task_events" && !BENCHMARK_TASK_EVENT_TYPES.has(eventType)) found.add(`${eventType} 事件`);
+  }
+  if (/(?:`?verification`?\s*事件)[^。\n|]{0,80}\bverdict\b|\bverdict\b[^。\n|]{0,80}(?:`?verification`?\s*事件)/i.test(text)) {
+    found.add("verification.verdict");
+  }
+  if (/(?:`?created`?\s*事件)[^。\n|]{0,80}(?:包含|含有)[^。\n|]{0,50}`?(?:goal|brief)`?/i.test(text)) {
+    found.add("created.goal/brief");
+  }
+  if (/(?:`?tool`?\s*事件)[^。\n|]{0,80}(?:非空)?数组/i.test(text)) found.add("tool 事件数组");
+  for (const context of text.matchAll(/(?:event\.type\s*字段判断|任务生命周期事件)[^。\n|]{0,220}/gi)) {
+    for (const identifier of context[0].matchAll(/`?\b([a-z][a-z0-9_]*)\b`?/gi)) {
+      const value = identifier[1].toLowerCase();
+      if (["event", "type", "task_events"].includes(value)) continue;
+      if (!BENCHMARK_TASK_EVENT_TYPES.has(value)) found.add(`${value} 事件`);
+    }
   }
   for (const match of text.matchAll(/\bstatus\s*=\s*([a-z][a-z0-9_]*)\b/gi)) {
     const status = match[1].toLowerCase();
@@ -1168,6 +1182,16 @@ function unsupportedImplementationClaims(text: string): string[] {
     if (new RegExp(`\\b${identifier}\\b`, "i").test(text)) found.add(identifier);
   }
   return [...found].slice(0, 8);
+}
+
+function providerQualityBenchmarkImplementationFacts(): string[] {
+  return [
+    "任务目标、简报和验收信息来自 tasks 的 title、description、acceptance_criteria；created 只是事件类型，禁止声称 created 事件含 goal/brief 字段。",
+    "返工没有 revise 事件类型；返工证据是新文档版本、verification 事件、tasks.revision_count 和 verdicts 裁决。",
+    "独立裁决保存在 verdicts 表；verification 事件本身没有 verdict 字段。",
+    "每次工具调用是一条 type=tool 的 task_events 记录，不是 tool 事件数组。",
+    `本固定基准当前最多自动返工 ${PROVIDER_QUALITY_MAX_REVISIONS} 次；其他次数、时限、人数、比例和停止条件只能标为建议阈值，不能写成已实现系统规则。`,
+  ];
 }
 
 function markdownSection(text: string, titlePattern: RegExp): string {
@@ -1404,12 +1428,15 @@ export function buildProviderQualityBenchmarkBrief(task: Task): string {
     "- 当前已经有 standalone 登录、admin/member 角色门控、任务负责人、独立复核人、返工、审批和人工关单；",
     "- 当前已经支持模型供应商、Skills、MCP 和可选 Seedream 生图；网络 MCP 受单次审批约束。",
     "- Helio 只作为交互机制的灵感来源；本基准没有提供任何 Helio 或市场事实，禁止写竞品能力、融资、用户、市场规模等外部主张。",
+    "- 精确实现口径（写工作流证据时必须逐条遵守）：",
+    ...providerQualityBenchmarkImplementationFacts().map((fact) => `  - ${fact}`),
     "",
     "输出约束：",
     "1. 写成 2200–3800 个非空白字符（含 Markdown 标记）的中文创始人决策简报，结论先行、信息密度高，拒绝堆篇幅；开头“结论与推荐决策”章节只能放一个 70–100 个非空白字符的纯文本段落，不加引用、注释、第二段或“共 X 字”自报计数。",
     "2. 计划和指标可以作为待验证的决策阈值，但必须明确标为“建议阈值”，不能伪装成已有数据。",
     "3. 产品边界必须以上述已实现能力为起点，禁止把已有桌面/Web UI、SQLite、登录权限或任务闭环写成尚未开发。",
     "4. 只可复述上方提供的能力，不得自行编造数据库字段名、事件类型、状态值、生产部署状态或用户反馈；例如不要写 tasks.goal、brief_generated、final_close、status=closed 等未提供细节。",
+    "4a. 上方逐条列出的产品能力与精确实现口径本身就是本任务可信证据；不要反过来把它们标成‘未在任务上下文中提供’或‘待验证’。",
     "5. “来源与假设”章节必须逐字包含独立句子“本次未使用外部资料。”，并说明内部事实来自任务简报与运行事件；不得声称调用过 web_search、web_fetch、MCP 或任何未提供工具。",
     "6. 只调用一次 write_document，kind=report，把完整正文放入文档；不要在工具调用前后输出长篇正文。",
     "7. 文末逐条自查七项验收标准，不能用“已满足”代替正文证据位置，也不要声称未实际计算的字数。",
@@ -1444,22 +1471,37 @@ function pauseTaskAfterWorkIfBudgetReached(agent: Agent, taskId: string, reserve
   return true;
 }
 
-function shouldResumeAtVerification(taskId: string): boolean {
+export function shouldResumeAtVerification(taskId: string): boolean {
   const approval = listApprovals()
     .filter((item) => item.kind === "budget" && item.ref_id === taskId && item.status === "approved" && item.resolved_at)
     .sort((a, b) => (b.resolved_at ?? 0) - (a.resolved_at ?? 0))[0];
-  if (!approval?.resolved_at) return false;
-  let resumePhase = "";
-  try {
-    const payload = JSON.parse(approval.payload || "{}") as { resume_phase?: unknown };
-    resumePhase = typeof payload.resume_phase === "string" ? payload.resume_phase : "";
-  } catch {
-    return false;
+  if (approval?.resolved_at) {
+    let resumePhase = "";
+    try {
+      const payload = JSON.parse(approval.payload || "{}") as { resume_phase?: unknown };
+      resumePhase = typeof payload.resume_phase === "string" ? payload.resume_phase : "";
+    } catch {
+      resumePhase = "";
+    }
+    if (resumePhase === "verification") {
+      const docs = listDocuments().filter((doc) => doc.task_id === taskId);
+      if (docs.length > 0 && !listVerdictsForTask(taskId).some((verdict) => verdict.created_at >= approval.resolved_at!)) return true;
+    }
   }
-  if (resumePhase !== "verification") return false;
-  const docs = listDocuments().filter((doc) => doc.task_id === taskId);
-  if (docs.length === 0) return false;
-  return !listVerdictsForTask(taskId).some((verdict) => verdict.created_at >= approval.resolved_at!);
+
+  // Electron / 服务端若在强模型复核期间退出，当前版文档已经通过机器预检；重启后只能重跑复核，
+  // 不能把 doing 误当成尚未生成并再次调用执行模型。用“当前版之后开始复核、但尚无裁决”识别该断点。
+  const task = getTask(taskId);
+  if (!task || task.status !== "doing" || !isProviderQualityBenchmarkTask(task)) return false;
+  const latestDoc = listDocuments()
+    .filter((doc) => doc.task_id === taskId)
+    .sort((a, b) => b.created_at - a.created_at)[0];
+  if (!latestDoc) return false;
+  const interruptedReview = listTaskEvents(taskId)
+    .filter((event) => event.type === "verification" && event.created_at >= latestDoc.created_at && event.summary.includes("开始验收交付物"))
+    .sort((a, b) => b.created_at - a.created_at)[0];
+  if (!interruptedReview) return false;
+  return !listVerdictsForTask(taskId).some((verdict) => verdict.created_at >= interruptedReview.created_at);
 }
 
 async function runTaskWork(agent: Agent, taskId: string) {
@@ -1521,8 +1563,9 @@ async function runTaskWork(agent: Agent, taskId: string) {
   const qualityBenchmark = isProviderQualityBenchmarkTask(task);
   const revisionLimit = qualityBenchmark ? PROVIDER_QUALITY_MAX_REVISIONS : MAX_REVISIONS;
   let skipWorkOnce = resumeAtVerification;
+  const initialAttempt = resumeAtVerification ? Math.min(task.revision_count, revisionLimit) : 0;
 
-  for (let attempt = 0; attempt <= revisionLimit; attempt++) {
+  for (let attempt = initialAttempt; attempt <= revisionLimit; attempt++) {
     if (!skipWorkOnce) {
       const ctx = newCtx(agent, channel, "work", task.id);
       const prompt = qualityBenchmark
@@ -1845,6 +1888,9 @@ async function runVerification(
     task.acceptance_criteria
       ? `验收标准（逐条核验）：\n${task.acceptance_criteria}`
       : `（未写明验收标准 —— 按任务标题与详情判断交付物是否完整、可直接使用、无明显错误）`,
+    isProviderQualityBenchmarkTask(task)
+      ? `本固定基准的可信实现口径（这是任务证据，不得要求作者改标为待验证）：\n${providerQualityBenchmarkImplementationFacts().map((fact) => `- ${fact}`).join("\n")}`
+      : ``,
     ``,
     `交付物《${doc.title}》（${doc.kind}）全文：`,
     `<deliverable>`,

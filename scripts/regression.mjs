@@ -218,6 +218,24 @@ const benchmarkGoodReport = [
         "本次未使用外部资料。系统把 goal 写入 tasks.goal，并生成 brief_generated 事件，最终设置 status=closed；供应商配置保存在 vendor_configs 表。",
       ))
     : null;
+  const backtickedInventedEvent = typeof assess === "function"
+    ? assess(benchmarkGoodReport.replace(
+        "本次未使用外部资料。",
+        "本次未使用外部资料。\n系统为每轮返工新增 `revise` 事件。",
+      ))
+    : null;
+  const inventedEventFields = typeof assess === "function"
+    ? assess(benchmarkGoodReport.replace(
+        "本次未使用外部资料。",
+        "本次未使用外部资料。\n`created` 事件必须包含 `goal` 与 `brief` 字段；`verification` 事件带有 `verdict` 字段；`tool` 事件必须是非空数组。",
+      ))
+    : null;
+  const inventedEventAliases = typeof assess === "function"
+    ? assess(benchmarkGoodReport.replace(
+        "本次未使用外部资料。",
+        "本次未使用外部资料。\n通过 event.type 字段判断，如 `created`、`brief_updated`、`claimed`、`tool_used`、`verified`、`revision`、`closed`。",
+      ))
+    : null;
   const paraphrasedSourceBoundary = typeof assess === "function"
     ? assess(benchmarkGoodReport.replace("本次未使用外部资料。", "本次未使用任何外部资料。"))
     : null;
@@ -307,6 +325,9 @@ const benchmarkGoodReport = [
       hollow?.pass === false && hollow.gaps.length >= 5 &&
       fabricated?.pass === false && fabricated.gaps.some((gap) => gap.includes("URL")) &&
       inventedImplementation?.pass === false && inventedImplementation.gaps.some((gap) => gap.includes("精确字段")) &&
+      backtickedInventedEvent?.pass === false && backtickedInventedEvent.gaps.some((gap) => gap.includes("revise 事件")) &&
+      inventedEventFields?.pass === false && inventedEventFields.gaps.some((gap) => gap.includes("created.goal/brief") && gap.includes("verification.verdict") && gap.includes("tool 事件数组")) &&
+      inventedEventAliases?.pass === false && inventedEventAliases.gaps.some((gap) => gap.includes("brief_updated 事件") && gap.includes("claimed 事件")) &&
       paraphrasedSourceBoundary?.pass === false && paraphrasedSourceBoundary.gaps.some((gap) => gap.includes("独立一行")) &&
       misplacedSourceBoundary?.pass === false && misplacedSourceBoundary.gaps.some((gap) => gap.includes("独立一行")) &&
       overlongConclusion?.pass === false && overlongConclusion.gaps.some((gap) => gap.includes("70–100")) &&
@@ -318,6 +339,8 @@ const benchmarkGoodReport = [
       proseOnlyWorkflowStep?.pass === false && proseOnlyWorkflowStep.gaps.some((gap) => gap.includes("revise")) &&
       legitimateLabelTables?.pass === true && legitimateLabelTables.gaps.length === 0 &&
       benchmarkPrompt.includes("当前产品已经有 Electron 桌面客户端") &&
+      benchmarkPrompt.includes("verification 事件本身没有 verdict 字段") &&
+      benchmarkPrompt.includes("上方逐条列出的产品能力与精确实现口径本身就是本任务可信证据") &&
       benchmarkPrompt.includes("建议立即以“任务简报→AI认领→过程留痕→独立复核→自动返工→人工关单”为唯一首测主线") &&
       benchmarkPrompt.includes("| brief | 人类发起人 | 任务描述、预期交付物与验收标准 | 信息不全则退回补充 |") &&
       benchmarkPrompt.includes("| human close | 人类发起人 | 人工确认清单与 user_close 事件 | 三重验收未完成不得关单 |") &&
@@ -326,7 +349,7 @@ const benchmarkGoodReport = [
       benchmarkPrompt.includes("14 天计划至少拆成三个阶段") &&
       benchmarkPrompt.includes("本次未使用外部资料。") &&
       benchmarkPrompt.includes("| 7 | 满足/不满足 | ... |"),
-    `assessor=${typeof assess} prompt=${benchmarkPrompt.length} good=${good?.pass}/${good?.gaps.length} normalized=${normalizedEvidence?.replacements.length}/${normalizedEvidenceAssessment?.pass} numbered=${numberedNested?.pass}/${numberedNested?.gaps.length} chinese=${chineseNumbered?.pass}/${chineseNumbered?.gaps.length} hollow=${hollow?.pass}/${hollow?.gaps.length} fabricated=${fabricated?.pass}/${fabricated?.gaps.length} invented=${inventedImplementation?.pass}/${inventedImplementation?.gaps.length} source=${paraphrasedSourceBoundary?.pass}/${paraphrasedSourceBoundary?.gaps.length}/${misplacedSourceBoundary?.pass}/${misplacedSourceBoundary?.gaps.length} conclusion=${shortConclusion?.pass}/${overlongConclusion?.pass} length=${underLength?.pass}/${overLength?.pass} repetitive=${repetitiveFiller?.pass}/${repetitiveFiller?.gaps.length} plan=${thinPlan?.pass}/${thinPlan?.gaps.length} workflow=${proseOnlyWorkflowStep?.pass}/${proseOnlyWorkflowStep?.gaps.length} labels=${legitimateLabelTables?.pass}/${legitimateLabelTables?.gaps.length}`,
+    `assessor=${typeof assess} prompt=${benchmarkPrompt.length} good=${good?.pass}/${good?.gaps.length} normalized=${normalizedEvidence?.replacements.length}/${normalizedEvidenceAssessment?.pass} numbered=${numberedNested?.pass}/${numberedNested?.gaps.length} chinese=${chineseNumbered?.pass}/${chineseNumbered?.gaps.length} hollow=${hollow?.pass}/${hollow?.gaps.length} fabricated=${fabricated?.pass}/${fabricated?.gaps.length} invented=${inventedImplementation?.pass}/${inventedImplementation?.gaps.length} backtick=${backtickedInventedEvent?.pass}/${backtickedInventedEvent?.gaps.join(";")} fields=${inventedEventFields?.pass}/${inventedEventFields?.gaps.join(";")} aliases=${inventedEventAliases?.pass}/${inventedEventAliases?.gaps.join(";")} source=${paraphrasedSourceBoundary?.pass}/${paraphrasedSourceBoundary?.gaps.length}/${misplacedSourceBoundary?.pass}/${misplacedSourceBoundary?.gaps.length} conclusion=${shortConclusion?.pass}/${overlongConclusion?.pass} length=${underLength?.pass}/${overLength?.pass} repetitive=${repetitiveFiller?.pass}/${repetitiveFiller?.gaps.length} plan=${thinPlan?.pass}/${thinPlan?.gaps.length} workflow=${proseOnlyWorkflowStep?.pass}/${proseOnlyWorkflowStep?.gaps.length} labels=${legitimateLabelTables?.pass}/${legitimateLabelTables?.gaps.length}`,
   );
 }
 
@@ -448,6 +471,54 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
   db.listSkills().length === BUILTIN_SKILLS.length &&
   skillNames.has("信息图/封面/配图生成法") && skillNames.has("可验证规格法") && skillNames.has("文档解析能力"),
   `技能数=${db.listSkills().length}/${BUILTIN_SKILLS.length}`);
+
+{
+  const interrupted = db.createTask({
+    channel_id: ch.id,
+    title: "真实模型质量基准：AiTeam 产品落地决策简报（复核中断回归）",
+    description: "验证复核中断恢复",
+    acceptance_criteria: "恢复后不得重复生成初稿",
+    assignee_agent_id: eng.id,
+    reviewer_agent_id: pm.id,
+    created_by: "user",
+    status: "doing",
+  });
+  const interruptedDoc = db.createDocument({
+    channel_id: ch.id,
+    task_id: interrupted.id,
+    agent_id: eng.id,
+    title: "复核中断交付物",
+    content: benchmarkGoodReport,
+    kind: "report",
+  });
+  db.createTaskEvent({
+    task_id: interrupted.id,
+    channel_id: ch.id,
+    agent_id: pm.id,
+    type: "verification",
+    summary: "质量复核开始验收交付物《复核中断交付物》",
+    metadata: { doc_id: interruptedDoc.id },
+  });
+  const resumesInterruptedReview = engine.shouldResumeAtVerification(interrupted.id);
+  db.createVerdict({
+    task_id: interrupted.id,
+    doc_id: interruptedDoc.id,
+    verifier_agent_id: pm.id,
+    worker_agent_id: null,
+    attempt: 0,
+    result: "pass",
+    reasons: "回归裁决",
+    source: "auto",
+  });
+  const doesNotResumeCompletedReview = engine.shouldResumeAtVerification(interrupted.id);
+  db.updateTask(interrupted.id, { status: "cancelled" });
+  check(
+    "QW4I",
+    "固定质量基准复核中断：当前版已开始强模型复核但无裁决时只恢复复核，已有裁决不重复恢复",
+    resumesInterruptedReview === true && doesNotResumeCompletedReview === false,
+    `interrupted=${resumesInterruptedReview} completed=${doesNotResumeCompletedReview}`,
+  );
+}
 
 {
   const reworkPrompt = engine.buildProviderQualityBenchmarkReworkBrief({
