@@ -1197,7 +1197,7 @@ export function assessProviderQualityBenchmarkDocument(content: string): Provide
     .replace(/[`*_#>-]/g, "")
     .replace(/\s+/g, "") ?? "";
   if (!conclusion) gaps.push("缺少结论/推荐决策章节及明确正文");
-  else if (Array.from(conclusion).length > 140) gaps.push("开头结论超过 120 字目标（含少量 Markdown 容差上限 140 字）");
+  else if (Array.from(conclusion).length > 120) gaps.push("开头结论超过 120 字上限");
 
   for (const label of ["目标用户", "核心待办", "产品边界"]) {
     if (!text.includes(label)) gaps.push(`缺少“${label}”的明确说明`);
@@ -1227,8 +1227,11 @@ export function assessProviderQualityBenchmarkDocument(content: string): Provide
     gaps.push("关键风险不足 3 项，或缺少逐项缓解动作/停止条件");
   }
 
-  if (!/(?:来源与假设|来源和假设)/.test(text)) gaps.push("缺少“来源与假设”章节");
-  if (!/未使用(?:任何)?外部(?:资料|来源|数据)/.test(text)) gaps.push("未明确声明本基准没有使用外部资料");
+  const sourceSection = markdownSection(text, /^(?:来源与假设|来源和假设)/);
+  if (!sourceSection) gaps.push("缺少“来源与假设”章节");
+  if (!sourceSection.split("\n").some((line) => line.trim() === "本次未使用外部资料。")) {
+    gaps.push("“来源与假设”必须用独立一行逐字声明：本次未使用外部资料。");
+  }
   if (!/(?:任务简报|运行事件)/.test(text)) gaps.push("未说明内部事实来自任务简报或运行事件");
   const unqualifiedExternalClaim = text.split(/[。！？\n]/).find((sentence) =>
     /(?:数据显示|调研表明|市场规模|客户反馈(?:显示|表明)|根据[^，。]{0,30}报告)/.test(sentence) &&
@@ -1259,7 +1262,52 @@ function providerQualityBenchmarkTools(): Anthropic.ToolUnion[] {
   return writeDocument ? [writeDocument] : [];
 }
 
-function buildProviderQualityBenchmarkBrief(task: Task): string {
+export function providerQualityBenchmarkScaffold(): string {
+  return [
+    "请严格使用以下 Markdown 骨架；保留全部章节、表头和七个英文步骤名，可在对应位置扩写，但不要新增一段开头摘要：",
+    "# AiTeam 14 天产品落地决策简报",
+    "## 结论与推荐决策",
+    "[仅一个 70–100 个汉字的纯文本段落]",
+    "## 目标用户、核心待办与产品边界",
+    "[分别明确写出：目标用户、核心待办、产品边界]",
+    "## 核心工作流与证据",
+    "| 步骤 | 责任人 | 可验证证据 | 失败处理 |",
+    "|---|---|---|---|",
+    "| goal | ... | ... | ... |",
+    "| brief | ... | ... | ... |",
+    "| claim | ... | ... | ... |",
+    "| work | ... | ... | ... |",
+    "| review | ... | ... | ... |",
+    "| revise | ... | ... | ... |",
+    "| human close | ... | ... | ... |",
+    "## 按优先级排序的 14 天计划",
+    "| 优先级/时间 | 阶段目标 | 负责人 | 退出条件 | 可量化验收指标（建议阈值） |",
+    "|---|---|---|---|---|",
+    "| ... | ... | ... | ... | ... |",
+    "## 执行与验证细则",
+    "[说明如何采集证据、判断失败并处理最早断点，确保全文达到要求的信息量]",
+    "## 关键风险、缓解动作与停止条件",
+    "| 风险/依赖 | 缓解动作 | 停止条件 |",
+    "|---|---|---|",
+    "| ... | ... | ... |",
+    "[至少三项]",
+    "## 来源与假设",
+    "本次未使用外部资料。",
+    "[另起一段说明内部事实边界、未调用的外部工具，以及所有数字均为建议阈值]",
+    "## 交付自查表",
+    "| 标准 | 状态 | 正文证据位置 |",
+    "|---|---|---|",
+    "| 1 | 满足/不满足 | ... |",
+    "| 2 | 满足/不满足 | ... |",
+    "| 3 | 满足/不满足 | ... |",
+    "| 4 | 满足/不满足 | ... |",
+    "| 5 | 满足/不满足 | ... |",
+    "| 6 | 满足/不满足 | ... |",
+    "| 7 | 满足/不满足 | ... |",
+  ].join("\n");
+}
+
+export function buildProviderQualityBenchmarkBrief(task: Task): string {
   return [
     "你正在完成 AiTeam 的固定、隔离质量基准。以下内容就是全部可信输入，不需要也不允许读取工作区其他文档、技能、记忆或联网资料。",
     "",
@@ -1287,18 +1335,20 @@ function buildProviderQualityBenchmarkBrief(task: Task): string {
     "5. “来源与假设”章节必须逐字包含独立句子“本次未使用外部资料。”，并说明内部事实来自任务简报与运行事件；不得声称调用过 web_search、web_fetch、MCP 或任何未提供工具。",
     "6. 只调用一次 write_document，kind=report，把完整正文放入文档；不要在工具调用前后输出长篇正文。",
     "7. 文末逐条自查七项验收标准，不能用“已满足”代替正文证据位置，也不要声称未实际计算的字数。",
+    "",
+    providerQualityBenchmarkScaffold(),
   ].filter(Boolean).join("\n");
 }
 
-function buildProviderQualityBenchmarkReworkBrief(task: Task, feedback: string): string {
+export function buildProviderQualityBenchmarkReworkBrief(task: Task, feedback: string): string {
   const current = listDocuments().find((doc) => doc.task_id === task.id && doc.kind === "report");
   return [
-    "固定质量基准的上一版未通过独立复核。请依据复核意见重写完整报告，并再次只调用一次 write_document 交付。",
-    `任务：${task.title}`,
-    task.acceptance_criteria ? `验收标准：\n${task.acceptance_criteria}` : "",
+    buildProviderQualityBenchmarkBrief(task),
+    "",
+    "返工说明：固定质量基准的上一版未通过复核。你处于隔离上下文，上方可信输入、输出约束和固定骨架仍须全部遵守；请依据下方意见重写完整报告，并再次只调用一次 write_document 交付。",
     `复核意见：\n${feedback}`,
     current ? `上一版全文（只用于修订，不代表其中事实可信）：\n<previous>\n${current.content.slice(0, 12000)}\n</previous>` : "",
-    "仍须遵守：不得补造外部事实、来源或工具调用；没有外部资料就明确写未使用，并把数字写成建议阈值。",
+    "返工时先删除上一版中所有复核指出的内容，再按固定骨架从头生成；不得因复用上一版而保留未经上方可信输入支持的精确实现声明。",
   ].filter(Boolean).join("\n\n");
 }
 

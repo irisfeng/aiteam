@@ -158,7 +158,8 @@ const benchmarkGoodReport = [
   "| 新用户看不懂工作流 | 首屏只暴露下一步并观察首次任务 | 3 位测试者中 2 位无法独立开工则暂停扩展 |",
   "",
   "## 来源与假设",
-  "本次未使用外部资料。内部事实仅来自任务简报与运行事件；没有调用 web_search、web_fetch 或 MCP。所有时间、数量、比例和停止条件均为建议阈值，待真实用户测试验证，不代表已有业绩或客户反馈。",
+  "本次未使用外部资料。",
+  "内部事实仅来自任务简报与运行事件；没有调用 web_search、web_fetch 或 MCP。所有时间、数量、比例和停止条件均为建议阈值，待真实用户测试验证，不代表已有业绩或客户反馈。",
   "",
   "## 交付自查表",
   "| 标准 | 状态 | 正文证据位置 |",
@@ -174,6 +175,12 @@ const benchmarkGoodReport = [
 
 {
   const assess = engine.assessProviderQualityBenchmarkDocument;
+  const benchmarkPrompt = engine.buildProviderQualityBenchmarkBrief({
+    id: "prompt-contract",
+    title: "真实模型质量基准：AiTeam 产品落地决策简报（离线）",
+    description: "验证固定工作流",
+    acceptance_criteria: "逐条验收",
+  });
   const good = typeof assess === "function" ? assess(benchmarkGoodReport) : null;
   const hollow = typeof assess === "function"
     ? assess("# 决策简报\n\n建议尽快上线。\n\n## 自查表\n1. 满足\n2. 满足\n3. 满足\n4. 满足\n5. 满足\n6. 满足\n7. 满足")
@@ -187,6 +194,20 @@ const benchmarkGoodReport = [
         "本次未使用外部资料。系统把 goal 写入 tasks.goal，并生成 brief_generated 事件，最终设置 status=closed；供应商配置保存在 vendor_configs 表。",
       ))
     : null;
+  const paraphrasedSourceBoundary = typeof assess === "function"
+    ? assess(benchmarkGoodReport.replace("本次未使用外部资料。", "本次未使用任何外部资料。"))
+    : null;
+  const misplacedSourceBoundary = typeof assess === "function"
+    ? assess(benchmarkGoodReport
+        .replace("# AiTeam 14 天产品落地决策简报", "# AiTeam 14 天产品落地决策简报\n\n本次未使用外部资料。")
+        .replace("## 来源与假设\n本次未使用外部资料。", "## 来源与假设"))
+    : null;
+  const overlongConclusion = typeof assess === "function"
+    ? assess(benchmarkGoodReport.replace(
+        "建议未来 14 天只验证一条闭环：完整简报进入后，AI 同事认领、交付、独立复核、按意见返工，最后由人类关单；未达到证据完整率建议阈值就停止扩功能。",
+        "建议未来 14 天只验证一条闭环：完整简报进入后，AI 同事认领、交付、独立复核、按意见返工，最后由人类关单；未达到证据完整率建议阈值就停止扩功能。还应同步扩展频道、自动化、图像生成、外部连接、多人协作和更多模型，以便一次覆盖所有潜在需求并尽快形成完整平台。",
+      ))
+    : null;
   const numberedNested = typeof assess === "function"
     ? assess(
         benchmarkGoodReport
@@ -196,7 +217,6 @@ const benchmarkGoodReport = [
             "| 风险 | 缓解动作 | 停止条件 |\n|---|---|---|\n| 输出看似完整但没有证据 | 机器契约预检后再由独立模型复核 | 连续两轮仍缺关键证据就转人工 |\n| 模型成本失控 | 任务预算、复核预留与断点续跑 | 达到预算且未获批准立即停止 |\n| 新用户看不懂工作流 | 首屏只暴露下一步并观察首次任务 | 3 位测试者中 2 位无法独立开工则暂停扩展 |",
             "### 风险 1：输出看似完整但没有证据\n| 要素 | 内容 |\n|---|---|\n| 缓解动作 | 机器契约预检后再由独立模型复核 |\n| 停止条件 | 连续两轮仍缺关键证据就转人工 |\n\n### 风险 2：模型成本失控\n| 要素 | 内容 |\n|---|---|\n| 缓解动作 | 任务预算、复核预留与断点续跑 |\n| 停止条件 | 达到预算且未获批准立即停止 |\n\n### 风险 3：新用户看不懂工作流\n| 要素 | 内容 |\n|---|---|\n| 缓解动作 | 首屏只暴露下一步并观察首次任务 |\n| 停止条件 | 3 位测试者中 2 位无法独立开工则暂停扩展 |",
           )
-          .replace("本次未使用外部资料。", "本次未使用任何外部资料。"),
       )
     : null;
   const chineseNumbered = typeof assess === "function"
@@ -221,8 +241,15 @@ const benchmarkGoodReport = [
       chineseNumbered?.pass === true && chineseNumbered.gaps.length === 0 &&
       hollow?.pass === false && hollow.gaps.length >= 5 &&
       fabricated?.pass === false && fabricated.gaps.some((gap) => gap.includes("URL")) &&
-      inventedImplementation?.pass === false && inventedImplementation.gaps.some((gap) => gap.includes("精确字段")),
-    `assessor=${typeof assess} good=${good?.pass}/${good?.gaps.length} numbered=${numberedNested?.pass}/${numberedNested?.gaps.length} chinese=${chineseNumbered?.pass}/${chineseNumbered?.gaps.length} hollow=${hollow?.pass}/${hollow?.gaps.length} fabricated=${fabricated?.pass}/${fabricated?.gaps.length} invented=${inventedImplementation?.pass}/${inventedImplementation?.gaps.length}`,
+      inventedImplementation?.pass === false && inventedImplementation.gaps.some((gap) => gap.includes("精确字段")) &&
+      paraphrasedSourceBoundary?.pass === false && paraphrasedSourceBoundary.gaps.some((gap) => gap.includes("独立一行")) &&
+      misplacedSourceBoundary?.pass === false && misplacedSourceBoundary.gaps.some((gap) => gap.includes("独立一行")) &&
+      overlongConclusion?.pass === false && overlongConclusion.gaps.some((gap) => gap.includes("120 字")) &&
+      benchmarkPrompt.includes("当前产品已经有 Electron 桌面客户端") &&
+      benchmarkPrompt.includes("| human close | ... | ... | ... |") &&
+      benchmarkPrompt.includes("本次未使用外部资料。") &&
+      benchmarkPrompt.includes("| 7 | 满足/不满足 | ... |"),
+    `assessor=${typeof assess} prompt=${benchmarkPrompt.length} good=${good?.pass}/${good?.gaps.length} numbered=${numberedNested?.pass}/${numberedNested?.gaps.length} chinese=${chineseNumbered?.pass}/${chineseNumbered?.gaps.length} hollow=${hollow?.pass}/${hollow?.gaps.length} fabricated=${fabricated?.pass}/${fabricated?.gaps.length} invented=${inventedImplementation?.pass}/${inventedImplementation?.gaps.length} source=${paraphrasedSourceBoundary?.pass}/${paraphrasedSourceBoundary?.gaps.length}/${misplacedSourceBoundary?.pass}/${misplacedSourceBoundary?.gaps.length} conclusion=${overlongConclusion?.pass}/${overlongConclusion?.gaps.length}`,
   );
 }
 
@@ -310,6 +337,26 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
   db.listSkills().length === BUILTIN_SKILLS.length &&
   skillNames.has("信息图/封面/配图生成法") && skillNames.has("可验证规格法") && skillNames.has("文档解析能力"),
   `技能数=${db.listSkills().length}/${BUILTIN_SKILLS.length}`);
+
+{
+  const reworkPrompt = engine.buildProviderQualityBenchmarkReworkBrief({
+    id: "rework-contract",
+    title: "真实模型质量基准：AiTeam 产品落地决策简报（离线返工）",
+    description: "验证隔离返工上下文",
+    acceptance_criteria: "1. 结论；2. 证据；3. 自查",
+  }, "删除编造字段，并缩短开头结论");
+  check(
+    "QW4R",
+    "固定质量基准返工：隔离上下文重新携带可信产品事实、固定骨架与具体复核意见",
+    reworkPrompt.includes("当前产品已经有 Electron 桌面客户端") &&
+      reworkPrompt.includes("当前已经使用 SQLite") &&
+      reworkPrompt.includes("| goal | ... | ... | ... |") &&
+      reworkPrompt.includes("本次未使用外部资料。") &&
+      reworkPrompt.includes("删除编造字段，并缩短开头结论") &&
+      reworkPrompt.includes("你处于隔离上下文"),
+    `length=${reworkPrompt.length}`,
+  );
+}
 
 {
   const storeSource = readFileSync(join(root, "web/src/store.tsx"), "utf8");
@@ -3768,7 +3815,7 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
       result.run_status === "passed" &&
       result.task?.status === "review" &&
       benchmark?.id === "executive-decision-brief-v1" &&
-      benchmark?.version === 4 &&
+      benchmark?.version === 5 &&
       benchmark?.worker_model === "fake-chat-model" &&
       benchmark?.reviewer_model === "fake-chat-model" &&
       benchmark?.budget_billable === 20000 &&
