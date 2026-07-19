@@ -148,7 +148,22 @@ const benchmarkGoodReport = [
   "| P1 / 第 12–14 天 | 复盘并做继续/停止决策 | 创始人 | 证据清单齐全 | 建议阈值：3 位用户中至少 2 位愿意复用 |",
   "",
   "## 执行细则",
-  ...Array.from({ length: 12 }, (_, index) => `### 执行检查 ${index + 1}\n每次只观察一个可证伪问题：用户是否理解下一步、任务是否有明确责任人、交付物是否能定位到验收证据、复核意见是否可执行。记录输入、实际动作、结构化事件和最终状态；任何数字都只是建议阈值，必须等真实用户测试后再确认。发现失败时先修复闭环中的最早断点，不用新增频道、角色或泛化功能掩盖问题。`),
+  "### 1. 样本与简报门槛",
+  "第 1 天由产品负责人准备五个真实但已脱敏的知识工作目标，并故意加入两个缺背景或缺验收标准的坏样本。观察新用户能否在不阅读说明书的前提下补齐交付物、验收标准和责任链；坏样本若仍可开工，先修简报入口，不进入模型质量比较。所有数量均为建议阈值。",
+  "### 2. 认领与唯一责任人",
+  "工程师在第 2–3 天回放多人同时认领、负责人改派和重复启动场景。每次运行必须能从任务详情定位唯一执行者、独立复核者及 claim 事件；出现两个执行者同时工作、旧执行者继续写入或责任人为空时，立即停止该轮并修复状态机。",
+  "### 3. 工作过程证据",
+  "第 4–5 天只检查一次完整交付：输入简报、允许的工具、实际工具调用、文档版本和用量应能按时间顺序回放。交付物中的每个产品能力声明要么来自本任务可信输入，要么明确写成待验证假设；不能把篇幅、模型自报字数或漂亮排版当作质量证据。",
+  "### 4. 阻塞与用户输入",
+  "第 6 天构造一个必须澄清才能继续的任务，确认执行者请求输入后任务真实停止，用户答复只恢复当前有效审批一次，旧授权和旧负责人上下文不得复活。若模型在缺少关键输入时仍继续生成完整报告，该任务直接判失败而不是用人工润色掩盖。",
+  "### 5. 独立复核",
+  "第 7–8 天让与执行者不同的强模型逐条核对七项标准，并保存结构化 verdict、理由和对应文档版本。复核者只能看到固定任务证据，不能通过额外检索替执行者补资料；机器契约未通过时不消耗强模型额度，避免让评审替空泛初稿兜底。",
+  "### 6. 返工与版本链",
+  "第 9 天故意植入一个超长结论和一个不存在的实现字段，验证机器预检能够指出具体差距并触发一次返工。返工提示必须重新携带全部可信事实、固定骨架、复核意见和标为不可信的上一版全文；新版产生后，旧版仍可回放但不能出现在当前交付列表。",
+  "### 7. 首次使用体验",
+  "第 10–11 天邀请三位未参与开发的测试者，只告诉他们要完成一份决策简报，不解释内部状态名。记录他们是否能找到目标入口、理解当前下一步、看到为什么被阻塞，并在复核后完成关单。建议阈值是至少两人无需口头指导跑完整条链路，否则先减界面复杂度。",
+  "### 8. 成本与停止决策",
+  "第 12–14 天汇总每次运行的输入输出用量、返工次数、机器契约结果、独立 verdict 和人工审计结论。创始人只在证据链完整且至少两位测试者愿意再次委派时继续扩展；任一任务突破批准预算、连续两轮编造事实或人工无法解释最终结论时，停止增加功能并回到最早失败步骤。",
   "",
   "## 关键风险、缓解动作与停止条件",
   "| 风险 | 缓解动作 | 停止条件 |",
@@ -208,6 +223,24 @@ const benchmarkGoodReport = [
         "建议未来 14 天只验证一条闭环：完整简报进入后，AI 同事认领、交付、独立复核、按意见返工，最后由人类关单；未达到证据完整率建议阈值就停止扩功能。还应同步扩展频道、自动化、图像生成、外部连接、多人协作和更多模型，以便一次覆盖所有潜在需求并尽快形成完整平台。",
       ))
     : null;
+  const repetitiveFiller = typeof assess === "function"
+    ? assess(benchmarkGoodReport.replace(
+        /## 执行细则[\s\S]*?## 关键风险、缓解动作与停止条件/,
+        `## 执行细则\n${Array.from({ length: 10 }, (_, index) => `### 重复检查 ${index + 1}\n每次只观察同一个问题，记录输入、动作、事件和状态；每次只观察同一个问题，记录输入、动作、事件和状态；每次只观察同一个问题，记录输入、动作、事件和状态；所有数字都是建议阈值，等待真实用户测试后确认。`).join("\n")}\n## 关键风险、缓解动作与停止条件`,
+      ))
+    : null;
+  const thinPlan = typeof assess === "function"
+    ? assess(benchmarkGoodReport.replace(
+        /\| P0 \/ 第 1–3 天[\s\S]*?\| P1 \/ 第 12–14 天[^\n]*/,
+        "| P0 / 第 1–14 天 | 一次完成所有工作 | 产品负责人 | 输出一份报告 | 建议阈值：完成一次闭环 |",
+      ))
+    : null;
+  const proseOnlyWorkflowStep = typeof assess === "function"
+    ? assess(benchmarkGoodReport.replace(
+        "| revise | AI 执行者 | 新文档版本与 revision 计数 | 达上限转人工 |",
+        "revise 步骤由 AI 执行者负责，产出新文档版本并在达到上限时转人工。",
+      ))
+    : null;
   const numberedNested = typeof assess === "function"
     ? assess(
         benchmarkGoodReport
@@ -245,11 +278,15 @@ const benchmarkGoodReport = [
       paraphrasedSourceBoundary?.pass === false && paraphrasedSourceBoundary.gaps.some((gap) => gap.includes("独立一行")) &&
       misplacedSourceBoundary?.pass === false && misplacedSourceBoundary.gaps.some((gap) => gap.includes("独立一行")) &&
       overlongConclusion?.pass === false && overlongConclusion.gaps.some((gap) => gap.includes("120 字")) &&
+      repetitiveFiller?.pass === false && repetitiveFiller.gaps.some((gap) => gap.includes("重复 3 次")) &&
+      thinPlan?.pass === false && thinPlan.gaps.some((gap) => gap.includes("至少需要 3 个")) &&
+      proseOnlyWorkflowStep?.pass === false && proseOnlyWorkflowStep.gaps.some((gap) => gap.includes("revise")) &&
       benchmarkPrompt.includes("当前产品已经有 Electron 桌面客户端") &&
       benchmarkPrompt.includes("| human close | ... | ... | ... |") &&
+      benchmarkPrompt.includes("14 天计划至少拆成三个阶段") &&
       benchmarkPrompt.includes("本次未使用外部资料。") &&
       benchmarkPrompt.includes("| 7 | 满足/不满足 | ... |"),
-    `assessor=${typeof assess} prompt=${benchmarkPrompt.length} good=${good?.pass}/${good?.gaps.length} numbered=${numberedNested?.pass}/${numberedNested?.gaps.length} chinese=${chineseNumbered?.pass}/${chineseNumbered?.gaps.length} hollow=${hollow?.pass}/${hollow?.gaps.length} fabricated=${fabricated?.pass}/${fabricated?.gaps.length} invented=${inventedImplementation?.pass}/${inventedImplementation?.gaps.length} source=${paraphrasedSourceBoundary?.pass}/${paraphrasedSourceBoundary?.gaps.length}/${misplacedSourceBoundary?.pass}/${misplacedSourceBoundary?.gaps.length} conclusion=${overlongConclusion?.pass}/${overlongConclusion?.gaps.length}`,
+    `assessor=${typeof assess} prompt=${benchmarkPrompt.length} good=${good?.pass}/${good?.gaps.length} numbered=${numberedNested?.pass}/${numberedNested?.gaps.length} chinese=${chineseNumbered?.pass}/${chineseNumbered?.gaps.length} hollow=${hollow?.pass}/${hollow?.gaps.length} fabricated=${fabricated?.pass}/${fabricated?.gaps.length} invented=${inventedImplementation?.pass}/${inventedImplementation?.gaps.length} source=${paraphrasedSourceBoundary?.pass}/${paraphrasedSourceBoundary?.gaps.length}/${misplacedSourceBoundary?.pass}/${misplacedSourceBoundary?.gaps.length} conclusion=${overlongConclusion?.pass}/${overlongConclusion?.gaps.length} repetitive=${repetitiveFiller?.pass}/${repetitiveFiller?.gaps.length} plan=${thinPlan?.pass}/${thinPlan?.gaps.length} workflow=${proseOnlyWorkflowStep?.pass}/${proseOnlyWorkflowStep?.gaps.length}`,
   );
 }
 
@@ -3815,7 +3852,7 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
       result.run_status === "passed" &&
       result.task?.status === "review" &&
       benchmark?.id === "executive-decision-brief-v1" &&
-      benchmark?.version === 5 &&
+      benchmark?.version === 6 &&
       benchmark?.worker_model === "fake-chat-model" &&
       benchmark?.reviewer_model === "fake-chat-model" &&
       benchmark?.budget_billable === 20000 &&

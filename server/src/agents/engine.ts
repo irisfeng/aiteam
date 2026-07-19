@@ -1203,17 +1203,29 @@ export function assessProviderQualityBenchmarkDocument(content: string): Provide
     if (!text.includes(label)) gaps.push(`缺少“${label}”的明确说明`);
   }
 
+  const workflowSection = markdownSection(text, /工作流.*证据|核心工作流/);
   const workflowSteps = ["goal", "brief", "claim", "work", "review", "revise", "human close"];
-  const lower = text.toLowerCase();
-  const missingSteps = workflowSteps.filter((step) => !lower.includes(step));
-  if (missingSteps.length > 0) gaps.push(`七步工作流缺少：${missingSteps.join("、")}`);
-  if (!text.includes("|") || !/(?:责任人|负责人)/.test(text) || !/(?:可验证证据|证据)/.test(text)) {
+  const missingSteps = workflowSteps.filter((step) =>
+    !new RegExp(`^\\|\\s*${step.replace(" ", "\\s+")}\\s*\\|`, "im").test(workflowSection),
+  );
+  if (missingSteps.length > 0) gaps.push(`七步工作流表缺少独立行：${missingSteps.join("、")}`);
+  if (!workflowSection || !/(?:责任人|负责人)/.test(workflowSection) || !/(?:可验证证据|证据)/.test(workflowSection)) {
     gaps.push("七步工作流必须用表格同时标明责任人和可验证证据");
   }
 
-  if (!/14\s*天/i.test(text)) gaps.push("缺少 14 天落地计划");
+  const planSection = markdownSection(text, /(?:14\s*天.*计划|计划.*14\s*天)/i);
+  if (!planSection) gaps.push("缺少 14 天落地计划");
   for (const label of ["优先级", "负责人", "退出条件", "建议阈值"]) {
-    if (!text.includes(label)) gaps.push(`14 天计划缺少“${label}”`);
+    if (!planSection.includes(label)) gaps.push(`14 天计划缺少“${label}”`);
+  }
+  const planRows = planSection.split("\n").filter((line) => {
+    const trimmed = line.trim();
+    return trimmed.startsWith("|") &&
+      !/^\|?\s*:?-{3}/.test(trimmed) &&
+      !/(?:优先级).*(?:阶段目标)/.test(trimmed);
+  });
+  if (planSection && planRows.length < 3) {
+    gaps.push("14 天计划至少需要 3 个按优先级/时间拆分的执行阶段");
   }
 
   const riskSection = markdownSection(text, /风险/);
@@ -1242,6 +1254,21 @@ export function assessProviderQualityBenchmarkDocument(content: string): Provide
   const unsupportedClaims = unsupportedImplementationClaims(text);
   if (unsupportedClaims.length > 0) {
     gaps.push(`存在与当前实现不符或任务未提供的精确字段/事件/状态声明：${unsupportedClaims.join("、")}`);
+  }
+
+  const substantiveLines = text.split("\n")
+    .map((line) => line.replace(/^#{1,6}\s*/, "").trim())
+    .filter((line) => line.length >= 80 && !line.startsWith("|"));
+  const normalizedLineCounts = new Map<string, number>();
+  for (const line of substantiveLines) {
+    const normalized = line.replace(/[\s，。；：、！？,.!?:;（）()“”"'`*_#>-]/g, "").toLowerCase();
+    normalizedLineCounts.set(normalized, (normalizedLineCounts.get(normalized) ?? 0) + 1);
+  }
+  if ([...normalizedLineCounts.values()].some((count) => count >= 3)) {
+    gaps.push("存在同一大段内容重复 3 次以上的填充，必须改为各阶段独立、可执行的信息");
+  }
+  if (/\[(?:仅一个|分别明确|说明如何|至少三项|另起一段)[^\]]*\]|\|\s*\.\.\.\s*\|/.test(text)) {
+    gaps.push("交付物仍包含固定骨架占位符，必须替换为真实内容");
   }
 
   const selfCheck = markdownSection(text, /自查/);
@@ -1283,7 +1310,9 @@ export function providerQualityBenchmarkScaffold(): string {
     "## 按优先级排序的 14 天计划",
     "| 优先级/时间 | 阶段目标 | 负责人 | 退出条件 | 可量化验收指标（建议阈值） |",
     "|---|---|---|---|---|",
-    "| ... | ... | ... | ... | ... |",
+    "| P0 / 第 1–3 天 | ... | ... | ... | ... |",
+    "| P0 / 第 4–7 天 | ... | ... | ... | ... |",
+    "| P1 / 第 8–14 天 | ... | ... | ... | ... |",
     "## 执行与验证细则",
     "[说明如何采集证据、判断失败并处理最早断点，确保全文达到要求的信息量]",
     "## 关键风险、缓解动作与停止条件",
@@ -1335,6 +1364,7 @@ export function buildProviderQualityBenchmarkBrief(task: Task): string {
     "5. “来源与假设”章节必须逐字包含独立句子“本次未使用外部资料。”，并说明内部事实来自任务简报与运行事件；不得声称调用过 web_search、web_fetch、MCP 或任何未提供工具。",
     "6. 只调用一次 write_document，kind=report，把完整正文放入文档；不要在工具调用前后输出长篇正文。",
     "7. 文末逐条自查七项验收标准，不能用“已满足”代替正文证据位置，也不要声称未实际计算的字数。",
+    "8. 七步工作流必须各占表格一行，14 天计划至少拆成三个阶段；不得保留骨架占位符，也不得复制同一大段内容来凑篇幅。",
     "",
     providerQualityBenchmarkScaffold(),
   ].filter(Boolean).join("\n");
