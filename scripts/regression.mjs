@@ -227,6 +227,26 @@ const benchmarkGoodReport = [
 }
 
 {
+  const mockDoc = engine.mockTaskDocument?.({
+    title: "为新用户输出上手方案",
+    description: "帮助首次使用者完成一次从目标到人工关单的协作任务。",
+    acceptance_criteria: "开头说明核心结论\n文末提供逐条自查",
+  }, "产品经理") ?? "";
+  check(
+    "QW4D",
+    "Mock 交付物诚实展示质量结构：明确演示边界、结论、风险、来源和逐条自查",
+    mockDoc.includes("Mock 演示交付") &&
+      mockDoc.includes("不可作为真实业务决策依据") &&
+      mockDoc.includes("## 结论先行") &&
+      mockDoc.includes("## 风险与停止条件") &&
+      mockDoc.includes("本次未使用外部资料") &&
+      mockDoc.includes("## 交付自查表") &&
+      mockDoc.includes("文末提供逐条自查"),
+    `len=${mockDoc.length}`,
+  );
+}
+
+{
   const actors = { workerAgentId: "worker", reviewerAgentId: "reviewer" };
   const cleanTrace = qualityBenchmark.providerBenchmarkSourceTrace(
     [
@@ -317,7 +337,8 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
     focusSource.includes("ws.createTask") &&
     focusSource.includes("budget_billable: 16_000") &&
     uiSmokeSource.includes("focus task reaches review with deliverable and audit trail") &&
-    uiSmokeSource.includes("human closes reviewed focus task with user_close evidence") &&
+    uiSmokeSource.includes("closing without a pass verdict requires explicit human acknowledgement") &&
+    uiSmokeSource.includes("human_override === true") &&
     focusSource.includes("进行中的任务") &&
     !appSource.includes("WelcomeOverlay");
   check("UX1", "首屏体验：默认落 Focus Composer，一次只突出目标提交、快捷入口和少量当前任务",
@@ -395,7 +416,9 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
     taskDetailSource.includes("splitAcceptanceCriteria") &&
     taskDetailSource.includes("deliveryEvidence") &&
     taskDetailSource.includes("selfCheckEvidence") &&
-    taskDetailSource.includes("verificationEvidence") &&
+    taskDetailSource.includes("latestVerdict") &&
+    taskDetailSource.includes("暂无结构化裁决") &&
+    taskDetailSource.includes("closeEvidenceGaps") &&
     taskDetailSource.includes("pendingApprovalCount") &&
     taskDetailSource.includes("closeDisabled") &&
     taskDetailSource.includes("先处理该任务的审批或输入");

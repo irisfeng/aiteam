@@ -3271,6 +3271,46 @@ async function llmLoop(
 // Mock 模式
 // ---------------------------------------------------------------------------
 
+export function mockTaskDocument(task: Pick<Task, "title" | "description" | "acceptance_criteria">, agentName: string): string {
+  const acceptance = task.acceptance_criteria
+    .split(/\n|；|;/)
+    .map((item) => item.replace(/^[-*•\d.、)\s]+/, "").trim())
+    .filter(Boolean)
+    .slice(0, 6);
+  const checklist = acceptance.length > 0
+    ? acceptance.map((item, index) => `| ${index + 1} | 待人工核对 | ${item} |`).join("\n")
+    : "| 1 | 待人工核对 | 目标、范围与下一步是否清楚 |";
+  return [
+    `# ${task.title}`,
+    "",
+    "> **Mock 演示交付**：以下内容只用于体验任务、证据和人工关单流程，不代表真实调研结论。接入模型后才会生成正式内容。",
+    "",
+    "## 结论先行",
+    `建议先由 ${agentName} 按任务简报补齐正式内容，再由独立复核人逐条核验；当前演示稿不可作为真实业务决策依据。`,
+    "",
+    "## 目标与边界",
+    task.description || "以任务标题为目标；Mock 模式不访问外部资料，也不虚构事实、客户反馈或实施结果。",
+    "",
+    "## 建议执行步骤",
+    "1. 核对目标、交付物、验收标准和责任人是否完整。",
+    "2. 执行者产出当前版本，并把工具调用与交付事件写入活动日志。",
+    "3. 独立复核人给出通过或返工裁决；存在缺口时生成新版本。",
+    "4. 人类逐条核对证据后决定关闭或退回，不把流程完成等同于质量通过。",
+    "",
+    "## 风险与停止条件",
+    "- 如果缺少真实来源、结构化复核裁决或可核对证据，应停止关单并退回补充。",
+    "- 如果模型预算不足或需要外部网络工具，应先暂停并等待人工批准。",
+    "",
+    "## 来源与假设",
+    "本次未使用外部资料。内容仅来自任务简报与 Mock 流程规则，所有业务判断均待真实执行验证。",
+    "",
+    "## 交付自查表",
+    "| 序号 | 状态 | 验收标准 / 证据位置 |",
+    "|---|---|---|",
+    checklist,
+  ].join("\n");
+}
+
 async function mockRun(ctx: RunCtx, emit: (delta: string) => void) {
   const { agent } = ctx;
   let text: string;
@@ -3281,7 +3321,9 @@ async function mockRun(ctx: RunCtx, emit: (delta: string) => void) {
       task_id: ctx.taskId,
       agent_id: agent.id,
       title: `（Mock）${task?.title ?? "交付物"}`,
-      content: `# ${task?.title ?? "交付物"}\n\n这是 Mock 模式生成的演示交付物。配置 \`ANTHROPIC_API_KEY\` 后，${agent.name} 会真实调研并撰写完整文档。`,
+      content: task
+        ? mockTaskDocument(task, agent.name)
+        : `# 交付物\n\n这是 Mock 模式生成的演示交付物。接入模型后才会生成正式内容。`,
     });
     ctx.createdDocIds.push(doc.id);
     broadcast({ type: "doc:upsert", payload: doc });

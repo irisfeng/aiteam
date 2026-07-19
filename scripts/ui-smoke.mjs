@@ -327,30 +327,54 @@ async function runViewport(debugPort, baseUrl, label, viewport) {
         fetch('/aiteam/api/tasks').then((res) => res.json()),
         fetch('/aiteam/api/documents').then((res) => res.json()),
         fetch('/aiteam/api/tasks/${quickTask.id}/events').then((res) => res.json()),
-      ]).then(([tasks, docs, events]) => {
+        fetch('/aiteam/api/tasks/${quickTask.id}/verdicts').then((res) => res.json()),
+      ]).then(([tasks, docs, events, verdicts]) => {
         const task = tasks.find((item) => item.id === ${JSON.stringify(quickTask.id)});
         const eventTypes = new Set(events.map((event) => event.type));
         return Boolean(
           task?.status === 'review' &&
           docs.some((doc) => doc.task_id === task.id) &&
-          ['claim', 'start', 'delivery', 'verification'].every((type) => eventTypes.has(type))
+          ['claim', 'start', 'delivery'].every((type) => eventTypes.has(type)) &&
+          verdicts.length === 0
         );
       })
     `, true), 15000);
-    ok(`${label} focus task reaches review with deliverable and audit trail`, Boolean(reviewReady));
+    ok(`${label} focus task reaches review with deliverable and audit trail without a fake Mock verdict`, Boolean(reviewReady));
+    ok(`${label} Mock review truthfully shows missing structured verdict`, await page.eval(`
+      document.body.innerText.includes('暂无结构化裁决') &&
+      document.body.innerText.includes('关单前仍需人工确认')
+    `));
+    await page.eval(`
+      window.__aiteamCloseWarning = '';
+      window.confirm = (message) => {
+        window.__aiteamCloseWarning = String(message);
+        return true;
+      };
+    `);
     await page.waitText("确认关闭任务");
     await page.clickText("确认关闭任务");
     await page.waitText("已关闭");
+    ok(`${label} closing without a pass verdict requires explicit human acknowledgement`, await page.eval(`
+      window.__aiteamCloseWarning.includes('暂无结构化复核通过裁决') &&
+      window.__aiteamCloseWarning.includes('人工判断')
+    `));
     const humanClosed = await waitFor(() => page.eval(`
       Promise.all([
         fetch('/aiteam/api/tasks').then((res) => res.json()),
         fetch('/aiteam/api/tasks/${quickTask.id}/events').then((res) => res.json()),
       ]).then(([tasks, events]) => {
         const task = tasks.find((item) => item.id === ${JSON.stringify(quickTask.id)});
-        return task?.status === 'done' && events.some((event) => event.type === 'user_close');
+        const closeEvent = events.find((event) => event.type === 'user_close');
+        let closeMeta = {};
+        try { closeMeta = JSON.parse(closeEvent?.metadata_json || '{}'); } catch {}
+        return task?.status === 'done' &&
+          closeEvent?.summary.includes('基于人工判断') &&
+          closeMeta.human_override === true &&
+          closeMeta.latest_verdict === null &&
+          closeMeta.document_count >= 1;
       })
     `, true));
-    ok(`${label} human closes reviewed focus task with user_close evidence`, Boolean(humanClosed));
+    ok(`${label} human closes reviewed focus task with explicit override evidence`, Boolean(humanClosed));
     await page.screenshot(`closed-${label}`);
     await assertNoHorizontalOverflow(page, `${label} closed drawer`);
 

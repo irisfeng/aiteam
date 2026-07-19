@@ -1439,13 +1439,25 @@ api.patch("/tasks/:id", (req, res) => {
         summary: "任务提交到人工评审",
       });
     } else if (task.status === "done") {
+      const closeDocs = listDocuments().filter((document) => document.task_id === task.id);
+      const closeVerdicts = listVerdictsForTask(task.id);
+      const latestVerdict = closeVerdicts.at(-1);
+      const humanOverride = latestVerdict?.result !== "pass";
       emitTaskEvent({
         task_id: task.id,
         channel_id: task.channel_id,
         project_id: task.project_id,
         agent_id: task.assignee_agent_id,
         type: "user_close",
-        summary: "用户关闭了任务",
+        summary: humanOverride
+          ? "用户在缺少结构化复核通过裁决时，基于人工判断验收并关闭任务"
+          : "用户验收并关闭了任务",
+        metadata: {
+          document_count: closeDocs.length,
+          verdict_count: closeVerdicts.length,
+          latest_verdict: latestVerdict?.result ?? null,
+          human_override: humanOverride,
+        },
       });
     } else if (task.status === "cancelled") {
       emitTaskEvent({

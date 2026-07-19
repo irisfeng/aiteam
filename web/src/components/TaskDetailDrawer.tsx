@@ -101,6 +101,11 @@ function splitAcceptanceCriteria(raw: string) {
     .filter(Boolean);
 }
 
+function hasSelfCheckEvidence(content: string) {
+  return /(?:^|\n)#{1,6}\s+[^\n]*(?:自查|验收核对)/m.test(content) ||
+    /(?:^|\n)\s*\|[^\n]*(?:状态|是否满足)[^\n]*\|[^\n]*(?:证据|验收标准)/m.test(content);
+}
+
 function nextActionHint(task: Task, pendingApprovals: Approval[], docs: Doc[], dependencies: Task[], assignee?: { name: string } | undefined) {
   if (task.status === "cancelled") {
     return { tone: "idle" as const, label: "已取消", body: "任务已取消归档，不代表交付或验收通过，也不会解锁下游依赖。" };
@@ -203,8 +208,9 @@ export function TaskDetailDrawer({
   const tools = events.filter((e) => e.type === "tool").slice(-6).reverse();
   const acceptanceItems = splitAcceptanceCriteria(task.acceptance_criteria);
   const deliveryEvidence = docs.length > 0;
-  const selfCheckEvidence = docs.some((d) => /自查表|验收标准|是否满足|证据位置/.test(d.content));
-  const verificationEvidence = events.some((e) => e.type === "verification");
+  const selfCheckEvidence = docs.some((d) => hasSelfCheckEvidence(d.content));
+  const latestVerdict = verdicts.at(-1);
+  const verificationPassed = latestVerdict?.result === "pass";
   const approvals = ws.approvals
     .filter((a) => a.ref_id === task.id || a.id === task.blocked_approval_id)
     .sort((a, b) => Number(b.status === "pending") - Number(a.status === "pending") || b.created_at - a.created_at);
@@ -212,6 +218,13 @@ export function TaskDetailDrawer({
   const actionHint = nextActionHint(task, pendingApprovals, docs, dependencies, assignee);
   const terminal = task.status === "done" || task.status === "cancelled";
   const closeDisabled = terminal || closing || pendingApprovals.length > 0;
+  const closeEvidenceGaps = [
+    !deliveryEvidence ? "未看到交付物" : "",
+    !selfCheckEvidence ? "未检出交付自查表" : "",
+    !verificationPassed
+      ? latestVerdict?.result === "revise" ? "最近一次复核要求返工" : "暂无结构化复核通过裁决"
+      : "",
+  ].filter(Boolean);
   const captureActionError = (error: unknown) => {
     setActionError(error instanceof Error ? error.message : String(error));
   };
@@ -221,6 +234,8 @@ export function TaskDetailDrawer({
     // 未交付评审只能取消，不能伪装成 done；只有 review → done 才表示人类验收通过。
     if (task.status !== "review" &&
       !window.confirm(`确认取消任务「${task.title}」？\n取消后会归档，但不计入交付、质量覆盖，也不会解锁下游依赖。`)) return;
+    if (task.status === "review" && closeEvidenceGaps.length > 0 &&
+      !window.confirm(`关单证据仍有缺口：\n- ${closeEvidenceGaps.join("\n- ")}\n\n是否基于你的人工判断，仍然验收并关闭该任务？`)) return;
     setActionError("");
     setClosing(true);
     try {
@@ -532,9 +547,13 @@ export function TaskDetailDrawer({
                     </div>
                   </div>
                   <div className="border-r border-t border-line px-3 py-2">
-                    <span className="text-ink-3">复核事件</span>
-                    <div className={`mt-0.5 font-medium ${verificationEvidence ? "text-emerald-600" : "text-ink-3"}`}>
-                      {verificationEvidence ? "已有复核留痕" : "暂无复核留痕"}
+                    <span className="text-ink-3">复核裁决</span>
+                    <div className={`mt-0.5 font-medium ${verificationPassed ? "text-emerald-600" : latestVerdict ? "text-amber-600" : "text-ink-3"}`}>
+                      {verificationPassed
+                        ? `已通过 · ${VERDICT_SOURCE_LABEL[latestVerdict.source]}`
+                        : latestVerdict
+                          ? `要求返工 · ${VERDICT_SOURCE_LABEL[latestVerdict.source]}`
+                          : "暂无结构化裁决"}
                     </div>
                   </div>
                   <div className="border-t border-line px-3 py-2">
@@ -555,6 +574,11 @@ export function TaskDetailDrawer({
                         </div>
                       ))}
                     </div>
+                  </div>
+                )}
+                {task.status === "review" && closeEvidenceGaps.length > 0 && (
+                  <div className="border-t border-amber-200 bg-amber-50 px-3 py-2 text-[11.5px] leading-relaxed text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/20 dark:text-amber-300">
+                    关单前仍需人工确认：{closeEvidenceGaps.join("；")}。你仍可基于人工判断验收关闭，但系统会在操作时再次提醒。
                   </div>
                 )}
               </div>
