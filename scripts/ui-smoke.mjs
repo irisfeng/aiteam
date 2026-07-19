@@ -503,6 +503,46 @@ async function runViewport(debugPort, baseUrl, label, viewport) {
         visibleBenchmarkGate?.text?.includes("先补齐当前文档的自动检查与独立复核"),
       JSON.stringify(visibleBenchmarkGate?.gate),
     );
+    const liveGateRefreshTriggered = await page.eval(`
+      (async () => {
+        window.__aiteamQualityGateFetches = 0;
+        window.__aiteamFetchBeforeQualityGateProbe = window.fetch.bind(window);
+        window.fetch = (...args) => {
+          if (String(args[0] || '').includes('/tasks/${benchmarkTaskId}/quality-gate')) {
+            window.__aiteamQualityGateFetches += 1;
+          }
+          return window.__aiteamFetchBeforeQualityGateProbe(...args);
+        };
+        const [bootstrap, tasks] = await Promise.all([
+          window.__aiteamFetchBeforeQualityGateProbe('/aiteam/api/bootstrap').then((res) => res.json()),
+          window.__aiteamFetchBeforeQualityGateProbe('/aiteam/api/tasks').then((res) => res.json()),
+        ]);
+        const task = tasks.find((item) => item.id === ${JSON.stringify(benchmarkTaskId)});
+        const nextReviewer = bootstrap.agents.find((agent) =>
+          agent.id !== task?.assignee_agent_id && agent.id !== task?.reviewer_agent_id
+        );
+        if (!task || !nextReviewer || task.status !== 'review') return false;
+        const response = await window.__aiteamFetchBeforeQualityGateProbe('/aiteam/api/tasks/${benchmarkTaskId}', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reviewer_agent_id: nextReviewer.id }),
+        });
+        return response.ok;
+      })()
+    `, true);
+    const liveGateRefreshObserved = liveGateRefreshTriggered && await waitFor(() => page.eval(`
+      window.__aiteamQualityGateFetches > 0
+    `, true), 5000);
+    await page.eval(`
+      if (window.__aiteamFetchBeforeQualityGateProbe) {
+        window.fetch = window.__aiteamFetchBeforeQualityGateProbe;
+        delete window.__aiteamFetchBeforeQualityGateProbe;
+      }
+    `);
+    ok(
+      `${label} benchmark gate refreshes on same-status evidence events without reopening the drawer`,
+      Boolean(liveGateRefreshObserved),
+    );
     ok(`${label} benchmark human audit shows five explicit checks`, await page.eval(`
       [
         '结论足以支持继续/停止决策',

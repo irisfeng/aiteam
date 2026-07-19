@@ -206,17 +206,38 @@ export function TaskDetailDrawer({
   });
   const [humanAuditNote, setHumanAuditNote] = useState("");
   const [benchmarkGate, setBenchmarkGate] = useState<ProviderQualityGate | null | undefined>(undefined);
+  const taskEvidenceVersion = useMemo(() => {
+    const documents = ws.documents
+      .filter((document) => document.task_id === task.id)
+      .map((document) => `${document.id}:${document.version}:${document.updated_at}`)
+      .sort()
+      .join("|");
+    const events = ws.taskEvents
+      .filter((event) => event.task_id === task.id && ["delivery", "verification", "user_close"].includes(event.type))
+      .map((event) => `${event.id}:${event.created_at}:${event.metadata_json}`)
+      .sort()
+      .join("|");
+    return `${documents}::${events}`;
+  }, [task.id, ws.documents, ws.taskEvents]);
 
   useEffect(() => {
-    let alive = true;
     // 抽屉切换任务时不卸载：先清上一个任务的裁决链，避免请求返回前闪现旧数据
     setVerdicts([]);
     setExpandedVerdicts({});
-    api.taskVerdicts(task.id).then((v) => alive && setVerdicts(v)).catch(() => undefined);
+  }, [task.id]);
+  useEffect(() => {
+    let alive = true;
+    const loadVerdicts = () => api.taskVerdicts(task.id)
+      .then((value) => alive && setVerdicts(value))
+      .catch(() => undefined);
+    void loadVerdicts();
+    // task event 会先于相邻写入通过 WebSocket 到达时，短延迟再核对一次，避免同状态下漏掉最新裁决。
+    const retry = window.setTimeout(loadVerdicts, 250);
     return () => {
       alive = false;
+      window.clearTimeout(retry);
     };
-  }, [task.id]);
+  }, [task.id, taskEvidenceVersion]);
 
   useEffect(() => {
     setBudgetInput(task.budget_billable > 0 ? String(task.budget_billable) : "");
@@ -237,17 +258,26 @@ export function TaskDetailDrawer({
     setHumanAuditNote("");
   }, [task.id, task.status]);
   useEffect(() => {
-    let alive = true;
     if (!isProviderQualityBenchmark) {
       setBenchmarkGate(undefined);
-      return () => { alive = false; };
+      return;
     }
     setBenchmarkGate(undefined);
-    api.taskQualityGate(task.id)
+  }, [isProviderQualityBenchmark, task.id]);
+  useEffect(() => {
+    if (!isProviderQualityBenchmark) return;
+    let alive = true;
+    const loadGate = () => api.taskQualityGate(task.id)
       .then((gate) => alive && setBenchmarkGate(gate))
       .catch(() => alive && setBenchmarkGate(null));
-    return () => { alive = false; };
-  }, [isProviderQualityBenchmark, task.id, task.status]);
+    void loadGate();
+    // 文档、复核事件或人工关单在状态不变时也必须刷新；延迟复核一次吸收 WebSocket/事务提交时序差。
+    const retry = window.setTimeout(loadGate, 250);
+    return () => {
+      alive = false;
+      window.clearTimeout(retry);
+    };
+  }, [isProviderQualityBenchmark, task.id, task.status, taskEvidenceVersion]);
   const assignee = ws.agentById(task.assignee_agent_id);
   const reviewer = ws.agentById(task.reviewer_agent_id);
   const creator = task.created_by === "user" ? null : ws.agentById(task.created_by);

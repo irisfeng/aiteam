@@ -561,6 +561,8 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
     taskDetailSource.includes("当前文档通过") &&
     taskDetailSource.includes("通过且绑定当前文档") &&
     taskDetailSource.includes("前两步已通过，可以开始最终确认") &&
+    taskDetailSource.includes("taskEvidenceVersion") &&
+    taskDetailSource.includes("window.setTimeout(loadGate, 250)") &&
     taskDetailSource.includes("最后一步 · 你的质量确认") &&
     taskDetailSource.includes("decision_useful") &&
     taskDetailSource.includes("evidence_traceable") &&
