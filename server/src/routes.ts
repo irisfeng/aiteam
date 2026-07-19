@@ -133,7 +133,7 @@ const PROVIDER_QUALITY_BENCHMARK_BUDGET = Math.max(
 
 const PROVIDER_QUALITY_BENCHMARK = {
   id: "executive-decision-brief-v1",
-  version: 7,
+  version: 8,
   title: "真实模型质量基准：AiTeam 产品落地决策简报",
   budgetBillable: PROVIDER_QUALITY_BENCHMARK_BUDGET,
   description: [

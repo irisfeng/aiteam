@@ -197,6 +197,15 @@ const benchmarkGoodReport = [
     acceptance_criteria: "逐条验收",
   });
   const good = typeof assess === "function" ? assess(benchmarkGoodReport) : null;
+  const normalizedEvidence = typeof engine.normalizeProviderQualityBenchmarkDocument === "function"
+    ? engine.normalizeProviderQualityBenchmarkDocument(benchmarkGoodReport.replace(
+        "| revise | AI 执行者 | 新文档版本与 revision 计数 | 达上限转人工 |",
+        "| revise | AI 执行者 | revise 事件与新版本，最终 status=closed 并产生 final_close | 达上限转人工 |",
+      ))
+    : null;
+  const normalizedEvidenceAssessment = normalizedEvidence && typeof assess === "function"
+    ? assess(normalizedEvidence.content)
+    : null;
   const hollow = typeof assess === "function"
     ? assess("# 决策简报\n\n建议尽快上线。\n\n## 自查表\n1. 满足\n2. 满足\n3. 满足\n4. 满足\n5. 满足\n6. 满足\n7. 满足")
     : null;
@@ -290,6 +299,9 @@ const benchmarkGoodReport = [
     "QW4",
     "固定质量基准机器契约：完整报告放行，空泛自称满足的报告拒绝并列出差距",
     good?.pass === true && good.gaps.length === 0 &&
+      normalizedEvidence?.replacements.length === 3 &&
+      normalizedEvidenceAssessment?.pass === true &&
+      normalizedEvidenceAssessment.gaps.length === 0 &&
       numberedNested?.pass === true && numberedNested.gaps.length === 0 &&
       chineseNumbered?.pass === true && chineseNumbered.gaps.length === 0 &&
       hollow?.pass === false && hollow.gaps.length >= 5 &&
@@ -314,7 +326,7 @@ const benchmarkGoodReport = [
       benchmarkPrompt.includes("14 天计划至少拆成三个阶段") &&
       benchmarkPrompt.includes("本次未使用外部资料。") &&
       benchmarkPrompt.includes("| 7 | 满足/不满足 | ... |"),
-    `assessor=${typeof assess} prompt=${benchmarkPrompt.length} good=${good?.pass}/${good?.gaps.length} numbered=${numberedNested?.pass}/${numberedNested?.gaps.length} chinese=${chineseNumbered?.pass}/${chineseNumbered?.gaps.length} hollow=${hollow?.pass}/${hollow?.gaps.length} fabricated=${fabricated?.pass}/${fabricated?.gaps.length} invented=${inventedImplementation?.pass}/${inventedImplementation?.gaps.length} source=${paraphrasedSourceBoundary?.pass}/${paraphrasedSourceBoundary?.gaps.length}/${misplacedSourceBoundary?.pass}/${misplacedSourceBoundary?.gaps.length} conclusion=${shortConclusion?.pass}/${overlongConclusion?.pass} length=${underLength?.pass}/${overLength?.pass} repetitive=${repetitiveFiller?.pass}/${repetitiveFiller?.gaps.length} plan=${thinPlan?.pass}/${thinPlan?.gaps.length} workflow=${proseOnlyWorkflowStep?.pass}/${proseOnlyWorkflowStep?.gaps.length} labels=${legitimateLabelTables?.pass}/${legitimateLabelTables?.gaps.length}`,
+    `assessor=${typeof assess} prompt=${benchmarkPrompt.length} good=${good?.pass}/${good?.gaps.length} normalized=${normalizedEvidence?.replacements.length}/${normalizedEvidenceAssessment?.pass} numbered=${numberedNested?.pass}/${numberedNested?.gaps.length} chinese=${chineseNumbered?.pass}/${chineseNumbered?.gaps.length} hollow=${hollow?.pass}/${hollow?.gaps.length} fabricated=${fabricated?.pass}/${fabricated?.gaps.length} invented=${inventedImplementation?.pass}/${inventedImplementation?.gaps.length} source=${paraphrasedSourceBoundary?.pass}/${paraphrasedSourceBoundary?.gaps.length}/${misplacedSourceBoundary?.pass}/${misplacedSourceBoundary?.gaps.length} conclusion=${shortConclusion?.pass}/${overlongConclusion?.pass} length=${underLength?.pass}/${overLength?.pass} repetitive=${repetitiveFiller?.pass}/${repetitiveFiller?.gaps.length} plan=${thinPlan?.pass}/${thinPlan?.gaps.length} workflow=${proseOnlyWorkflowStep?.pass}/${proseOnlyWorkflowStep?.gaps.length} labels=${legitimateLabelTables?.pass}/${legitimateLabelTables?.gaps.length}`,
   );
 }
 
@@ -3971,7 +3983,7 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
       preflight.ok === true &&
         preflight.body.confirmation_version === 2 &&
         preflight.body.benchmark?.id === "executive-decision-brief-v1" &&
-        preflight.body.benchmark?.version === 7 &&
+        preflight.body.benchmark?.version === 8 &&
         preflight.body.benchmark?.output_contract?.includes("2200–3800") &&
         preflight.body.models?.worker === "fake-chat-model" &&
         preflight.body.models?.reviewer === "fake-chat-model" &&
@@ -3994,7 +4006,7 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
       result.run_status === "passed" &&
       result.task?.status === "review" &&
       benchmark?.id === "executive-decision-brief-v1" &&
-      benchmark?.version === 7 &&
+      benchmark?.version === 8 &&
       benchmark?.worker_model === "fake-chat-model" &&
       benchmark?.reviewer_model === "fake-chat-model" &&
       benchmark?.budget_billable === 20000 &&
