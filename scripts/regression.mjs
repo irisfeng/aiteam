@@ -241,6 +241,11 @@ const benchmarkGoodReport = [
         "revise 步骤由 AI 执行者负责，产出新文档版本并在达到上限时转人工。",
       ))
     : null;
+  const legitimateLabelTables = typeof assess === "function"
+    ? assess(benchmarkGoodReport
+        .replace("| 3 | 满足 | 核心工作流与证据表 |", "| 3 | 满足 | 第 3 节 human close 表 |")
+        .replace("| 4 | 满足 | 14 天计划表 |", "| 4 | 满足 | 第 4 节 KPI 表 |"))
+    : null;
   const numberedNested = typeof assess === "function"
     ? assess(
         benchmarkGoodReport
@@ -281,12 +286,13 @@ const benchmarkGoodReport = [
       repetitiveFiller?.pass === false && repetitiveFiller.gaps.some((gap) => gap.includes("重复 3 次")) &&
       thinPlan?.pass === false && thinPlan.gaps.some((gap) => gap.includes("至少需要 3 个")) &&
       proseOnlyWorkflowStep?.pass === false && proseOnlyWorkflowStep.gaps.some((gap) => gap.includes("revise")) &&
+      legitimateLabelTables?.pass === true && legitimateLabelTables.gaps.length === 0 &&
       benchmarkPrompt.includes("当前产品已经有 Electron 桌面客户端") &&
       benchmarkPrompt.includes("| human close | ... | ... | ... |") &&
       benchmarkPrompt.includes("14 天计划至少拆成三个阶段") &&
       benchmarkPrompt.includes("本次未使用外部资料。") &&
       benchmarkPrompt.includes("| 7 | 满足/不满足 | ... |"),
-    `assessor=${typeof assess} prompt=${benchmarkPrompt.length} good=${good?.pass}/${good?.gaps.length} numbered=${numberedNested?.pass}/${numberedNested?.gaps.length} chinese=${chineseNumbered?.pass}/${chineseNumbered?.gaps.length} hollow=${hollow?.pass}/${hollow?.gaps.length} fabricated=${fabricated?.pass}/${fabricated?.gaps.length} invented=${inventedImplementation?.pass}/${inventedImplementation?.gaps.length} source=${paraphrasedSourceBoundary?.pass}/${paraphrasedSourceBoundary?.gaps.length}/${misplacedSourceBoundary?.pass}/${misplacedSourceBoundary?.gaps.length} conclusion=${overlongConclusion?.pass}/${overlongConclusion?.gaps.length} repetitive=${repetitiveFiller?.pass}/${repetitiveFiller?.gaps.length} plan=${thinPlan?.pass}/${thinPlan?.gaps.length} workflow=${proseOnlyWorkflowStep?.pass}/${proseOnlyWorkflowStep?.gaps.length}`,
+    `assessor=${typeof assess} prompt=${benchmarkPrompt.length} good=${good?.pass}/${good?.gaps.length} numbered=${numberedNested?.pass}/${numberedNested?.gaps.length} chinese=${chineseNumbered?.pass}/${chineseNumbered?.gaps.length} hollow=${hollow?.pass}/${hollow?.gaps.length} fabricated=${fabricated?.pass}/${fabricated?.gaps.length} invented=${inventedImplementation?.pass}/${inventedImplementation?.gaps.length} source=${paraphrasedSourceBoundary?.pass}/${paraphrasedSourceBoundary?.gaps.length}/${misplacedSourceBoundary?.pass}/${misplacedSourceBoundary?.gaps.length} conclusion=${overlongConclusion?.pass}/${overlongConclusion?.gaps.length} repetitive=${repetitiveFiller?.pass}/${repetitiveFiller?.gaps.length} plan=${thinPlan?.pass}/${thinPlan?.gaps.length} workflow=${proseOnlyWorkflowStep?.pass}/${proseOnlyWorkflowStep?.gaps.length} labels=${legitimateLabelTables?.pass}/${legitimateLabelTables?.gaps.length}`,
   );
 }
 

@@ -1138,7 +1138,7 @@ function unsupportedImplementationClaims(text: string): string[] {
     const field = match[2].toLowerCase();
     if (BENCHMARK_SCHEMA_FIELDS[table] && !BENCHMARK_SCHEMA_FIELDS[table].has(field)) found.add(`${table}.${field}`);
   }
-  for (const match of text.matchAll(/\b([a-z][a-z0-9_]*)\b\s*表/gi)) {
+  for (const match of text.matchAll(/(?:数据库|sqlite|sql|存入|写入|保存(?:在|至)?|落入|查询|新增|创建)[^。\n|]{0,40}\b([a-z][a-z0-9_]*)\b\s*(?:数据)?表/gi)) {
     const table = match[1].toLowerCase();
     if (!BENCHMARK_SCHEMA_FIELDS[table]) found.add(`${table} 表`);
   }
