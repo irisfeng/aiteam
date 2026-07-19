@@ -481,6 +481,16 @@ interface RuntimeOpts {
   tier?: "light" | "standard";
 }
 
+export function preferredStrongProviderId(
+  agentProviderId: string | null | undefined,
+  providers: Array<{ id: string; api_key: string; is_strong: number | boolean }>,
+) {
+  const boundStrong = agentProviderId
+    ? providers.find((provider) => provider.id === agentProviderId && provider.api_key && provider.is_strong)
+    : undefined;
+  return boundStrong?.id ?? providers.find((provider) => provider.api_key && provider.is_strong)?.id ?? null;
+}
+
 /**
  * 模型分级路由（choose model wisely）：
  * - preferStrong：验收/汇总是质量闭环的下限，官方通道可用时强制最强模型
@@ -504,7 +514,11 @@ function resolveRuntime(agent: Agent, opts: RuntimeOpts = {}): Runtime {
       };
     }
     // 无官方 key：用户标记了「强通道」的供应商承担验收/汇总（用其 default_model 全力档）
-    const strong = listProviders().find((p) => p.api_key && p.is_strong);
+    // 显式复核者的供应商若也被标为强通道，必须尊重其模型绑定；否则多个强通道并存时，
+    // listProviders 的插入顺序会把 SiliconFlow GLM 复核悄悄路由到更早创建的 DeepSeek。
+    const providers = listProviders();
+    const strongId = preferredStrongProviderId(agent.provider_id, providers);
+    const strong = strongId ? providers.find((provider) => provider.id === strongId) : undefined;
     if (strong) return fromProvider(strong, strong.default_model || agent.model);
   }
   if (agent.provider_id) {

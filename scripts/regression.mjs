@@ -331,6 +331,22 @@ const benchmarkGoodReport = [
 }
 
 {
+  const strongProviders = [
+    { id: "deepseek", api_key: "x", is_strong: 1 },
+    { id: "siliconflow", api_key: "y", is_strong: 1 },
+    { id: "ordinary", api_key: "z", is_strong: 0 },
+  ];
+  check(
+    "QW4S",
+    "强模型路由：显式复核者绑定的强供应商优先于列表首个强通道",
+    engine.preferredStrongProviderId?.("siliconflow", strongProviders) === "siliconflow" &&
+      engine.preferredStrongProviderId?.("ordinary", strongProviders) === "deepseek" &&
+      engine.preferredStrongProviderId?.(null, strongProviders) === "deepseek",
+    `bound=${engine.preferredStrongProviderId?.("siliconflow", strongProviders)} fallback=${engine.preferredStrongProviderId?.("ordinary", strongProviders)}`,
+  );
+}
+
+{
   const mockDoc = engine.mockTaskDocument?.({
     title: "为新用户输出上手方案",
     description: "帮助首次使用者完成一次从目标到人工关单的协作任务。",
