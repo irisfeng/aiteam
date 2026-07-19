@@ -105,7 +105,7 @@ export interface ProviderTestResult {
 
 export interface ProviderTaskTestResult {
   ok: boolean;
-  run_status: "passed" | "pending_approval" | "failed";
+  run_status: "running" | "passed" | "pending_approval" | "failed";
   pending_approval_id: string | null;
   provider: Provider;
   model: string;

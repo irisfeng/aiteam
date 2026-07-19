@@ -639,10 +639,13 @@ export function SettingsModal({
         r.checks.pending_approval ? "复核预算待批" : r.checks.within_budget ? "预算内" : "已触线",
         r.checks.usage_tracked ? "用量" : "无用量",
       ].join(" / ");
+      const resultText = r.run_status === "running"
+        ? `仍在后台运行，请勿重复启动 · ${r.task.status} · 已等待 ${r.latency_ms}ms · 当前已记 ${formatTokenCount(r.usage_summary?.billable)} billable${formatEstimatedCost(r.usage_summary?.estimated_cost, r.usage_summary?.price_currency)}`
+        : `${r.run_status === "passed" ? "通过" : r.run_status === "pending_approval" ? "已产出初稿，等待预算审批" : "未通过"} · ${r.task.status} · ${checks} · ${r.latency_ms}ms · ${formatTokenCount(r.usage_summary?.billable)} billable${formatEstimatedCost(r.usage_summary?.estimated_cost, r.usage_summary?.price_currency)}`;
       setProviderTaskTest((s) => ({
         ...s,
         [id]: {
-          text: `${r.run_status === "passed" ? "通过" : r.run_status === "pending_approval" ? "已产出初稿，等待预算审批" : "未通过"} · ${r.task.status} · ${checks} · ${r.latency_ms}ms · ${formatTokenCount(r.usage_summary?.billable)} billable${formatEstimatedCost(r.usage_summary?.estimated_cost, r.usage_summary?.price_currency)}`,
+          text: resultText,
           taskId: r.task.id,
         },
       }));

@@ -129,3 +129,20 @@ export function providerBenchmarkPassed(checks: ProviderBenchmarkChecks) {
     checks.document_contract &&
     !checks.pending_approval;
 }
+
+export type ProviderBenchmarkRunStatus = "running" | "passed" | "pending_approval" | "failed";
+
+/**
+ * The HTTP observer can time out while the assigned agent is still working.
+ * That is an in-progress run, not a failed quality verdict.
+ */
+export function providerBenchmarkRunStatus(input: {
+  observerDone: boolean;
+  passed: boolean;
+  pendingApproval: boolean;
+}): ProviderBenchmarkRunStatus {
+  if (!input.observerDone) return "running";
+  if (input.passed) return "passed";
+  if (input.pendingApproval) return "pending_approval";
+  return "failed";
+}

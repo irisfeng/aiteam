@@ -572,8 +572,10 @@ export function WorklineOverview({
             results.push({
               id: `provider:${provider.id}`,
               label: `模型 · ${provider.name}`,
-              status: out.run_status === "passed" ? "passed" : out.run_status === "pending_approval" ? "waiting" : "failed",
-              detail: `${out.models.worker}→${out.models.reviewer} · ${Math.round(out.latency_ms)}ms · ${formatTokenCount(out.usage_summary?.billable)} billable${formatEstimatedCost(out.usage_summary?.estimated_cost, out.usage_summary?.price_currency)} · ${out.checks.delivered ? "交付" : "未交付"} / ${out.checks.quality_contract ? "7项契约" : "契约缺失"} / ${out.checks.document_contract ? "机器预检" : "结构缺项"} / ${out.checks.independent_reviewer ? "独立复核" : "复核冲突"} / ${out.checks.verdict_recorded ? "pass" : out.checks.pending_approval ? "待复核" : "未通过"} / ${out.checks.source_trace_clean ? "来源可追溯" : "来源冲突"} / ${out.checks.pending_approval ? "复核预算待批" : out.checks.within_budget ? "预算内" : "已触线"}`,
+              status: out.run_status === "passed" ? "passed" : out.run_status === "pending_approval" || out.run_status === "running" ? "waiting" : "failed",
+              detail: out.run_status === "running"
+                ? `${out.models.worker}→${out.models.reviewer} · 后台仍在运行，请勿重复启动 · 已等待 ${Math.round(out.latency_ms)}ms · 当前已记 ${formatTokenCount(out.usage_summary?.billable)} billable${formatEstimatedCost(out.usage_summary?.estimated_cost, out.usage_summary?.price_currency)}`
+                : `${out.models.worker}→${out.models.reviewer} · ${Math.round(out.latency_ms)}ms · ${formatTokenCount(out.usage_summary?.billable)} billable${formatEstimatedCost(out.usage_summary?.estimated_cost, out.usage_summary?.price_currency)} · ${out.checks.delivered ? "交付" : "未交付"} / ${out.checks.quality_contract ? "7项契约" : "契约缺失"} / ${out.checks.document_contract ? "机器预检" : "结构缺项"} / ${out.checks.independent_reviewer ? "独立复核" : "复核冲突"} / ${out.checks.verdict_recorded ? "pass" : out.checks.pending_approval ? "待复核" : "未通过"} / ${out.checks.source_trace_clean ? "来源可追溯" : "来源冲突"} / ${out.checks.pending_approval ? "复核预算待批" : out.checks.within_budget ? "预算内" : "已触线"}`,
               taskId: out.task.id,
             });
           } catch (e: any) {

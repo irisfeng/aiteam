@@ -83,7 +83,7 @@ import {
 import { slidesToPptx } from "./pptx.js";
 import { MCP_REGISTRY, SKILL_PACK_REGISTRY } from "./registry.js";
 import { DEFAULT_IMAGE_BASE_URL, generateImageBytes } from "./agents/images.js";
-import { providerBenchmarkPassed, providerBenchmarkSourceTrace } from "./qualityBenchmark.js";
+import { providerBenchmarkPassed, providerBenchmarkRunStatus, providerBenchmarkSourceTrace } from "./qualityBenchmark.js";
 import {
   assessProviderQualityBenchmarkDocument,
   isProviderQualityBenchmarkTask,
@@ -1015,7 +1015,11 @@ api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
       pending_approval: pendingBudgetApproval,
     };
     const ok = providerBenchmarkPassed(checks);
-    const runStatus = ok ? "passed" : pendingBudgetApproval ? "pending_approval" : "failed";
+    const runStatus = providerBenchmarkRunStatus({
+      observerDone: done,
+      passed: ok,
+      pendingApproval: pendingBudgetApproval,
+    });
     const benchmark = {
       id: PROVIDER_QUALITY_BENCHMARK.id,
       version: PROVIDER_QUALITY_BENCHMARK.version,
@@ -1024,7 +1028,9 @@ api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
       worker_model: workerModel,
       reviewer_model: reviewerModel,
     };
-    const resultEvent = emitTaskEvent({
+    // 观察窗口结束不代表后台任务失败。慢模型仍在 doing 时只返回 running，
+    // 不写 failure 事件，避免 UI、审计和后续恢复把超时误当质量裁决。
+    const resultEvent = runStatus === "running" ? null : emitTaskEvent({
       task_id: task.id,
       channel_id: task.channel_id,
       project_id: task.project_id,
@@ -1065,7 +1071,7 @@ api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
       task: finalTask ?? task,
       docs,
       verdicts,
-      events: [...events, resultEvent],
+      events: resultEvent ? [...events, resultEvent] : events,
       checks,
       usage_summary: usageSummaryWithCost,
     });

@@ -376,8 +376,12 @@ const benchmarkGoodReport = [
       badTrace.unauthorized_tool_events.length === 2 &&
       ["browser", "plugin", "web_search"].every((tool) => badTrace.unobserved_claims.includes(tool)) &&
       qualityBenchmark.providerBenchmarkPassed(allPassChecks) === true &&
-      qualityBenchmark.providerBenchmarkPassed({ ...allPassChecks, completed: false }) === false,
-    `clean=${cleanTrace.clean}/${cleanTrace.authorized_tools.length} bad=${badTrace.clean}/${badTrace.unauthorized_tool_events.length}/${badTrace.unobserved_claims.join(",")} completedGate=${qualityBenchmark.providerBenchmarkPassed({ ...allPassChecks, completed: false })}`,
+      qualityBenchmark.providerBenchmarkPassed({ ...allPassChecks, completed: false }) === false &&
+      qualityBenchmark.providerBenchmarkRunStatus({ observerDone: false, passed: false, pendingApproval: false }) === "running" &&
+      qualityBenchmark.providerBenchmarkRunStatus({ observerDone: true, passed: true, pendingApproval: false }) === "passed" &&
+      qualityBenchmark.providerBenchmarkRunStatus({ observerDone: true, passed: false, pendingApproval: true }) === "pending_approval" &&
+      qualityBenchmark.providerBenchmarkRunStatus({ observerDone: true, passed: false, pendingApproval: false }) === "failed",
+    `clean=${cleanTrace.clean}/${cleanTrace.authorized_tools.length} bad=${badTrace.clean}/${badTrace.unauthorized_tool_events.length}/${badTrace.unobserved_claims.join(",")} completedGate=${qualityBenchmark.providerBenchmarkPassed({ ...allPassChecks, completed: false })} observerTimeout=${qualityBenchmark.providerBenchmarkRunStatus({ observerDone: false, passed: false, pendingApproval: false })}`,
   );
 }
 
@@ -519,6 +523,9 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
     modalsSource.includes("实际 token 上限、复核预留和可估算金额") &&
     modalsSource.includes("复核预算待批") &&
     modalsSource.includes("不重复生成") &&
+    modalsSource.includes("仍在后台运行，请勿重复启动") &&
+    worklineSource.includes("后台仍在运行，请勿重复启动") &&
+    routesSource.includes('runStatus === "running" ? null') &&
     modalsSource.includes("来源可追溯") &&
     modalsSource.includes("usage_summary") &&
     modalsSource.includes("billable") &&
