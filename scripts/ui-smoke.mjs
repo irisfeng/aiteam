@@ -378,6 +378,77 @@ async function runViewport(debugPort, baseUrl, label, viewport) {
     await page.screenshot(`closed-${label}`);
     await assertNoHorizontalOverflow(page, `${label} closed drawer`);
 
+    const benchmarkTitle = `真实模型质量基准：AiTeam 产品落地决策简报（UI-${label}-${Date.now()}）`;
+    const benchmarkTaskId = await page.eval(`
+      (async () => {
+        const bootstrap = await fetch('/aiteam/api/bootstrap').then((res) => res.json());
+        const [worker, reviewer] = bootstrap.agents;
+        const res = await fetch('/aiteam/api/tasks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: ${JSON.stringify(benchmarkTitle)},
+            description: '验证真实质量基准的人工审计不可被跳过。',
+            acceptance_criteria: '1. 有正式交付文档\\n2. 有独立复核结论\\n3. 完成人工质量审计',
+            assignee_agent_id: worker.id,
+            reviewer_agent_id: reviewer.id,
+            budget_billable: 20000,
+          }),
+        });
+        const task = await res.json();
+        if (!res.ok) throw new Error(task.error || 'create benchmark task failed');
+        return task.id;
+      })()
+    `, true);
+    const benchmarkReviewReady = await waitFor(() => page.eval(`
+      fetch('/aiteam/api/tasks')
+        .then((res) => res.json())
+        .then((tasks) => tasks.some((task) => task.id === ${JSON.stringify(benchmarkTaskId)} && task.status === 'review'))
+    `, true), 15000);
+    ok(`${label} benchmark task reaches human review`, Boolean(benchmarkReviewReady));
+    await page.send("Page.navigate", { url: `${baseUrl}?task=${encodeURIComponent(benchmarkTaskId)}` });
+    await page.waitText("真实质量基准 · 人工审计");
+    await page.waitText("提交人工审计并关单");
+    ok(`${label} benchmark human audit shows five explicit checks`, await page.eval(`
+      [
+        '结论足以支持继续/停止决策',
+        '关键事实、数字和能力声明都能回到任务证据',
+        '没有编造字段、事件、状态、工具、来源或用户反馈',
+        '七步工作流、负责人、退出条件和下一步可实际执行',
+        '没有重复段落、占位符或为凑篇幅写的空泛内容',
+      ].every((text) => document.body.innerText.includes(text))
+    `));
+    await page.clickText("提交人工审计并关单");
+    await page.waitText("真实质量基准不能跳过三重验收");
+    ok(`${label} benchmark UI refuses incomplete human audit instead of offering override`, await page.eval(`
+      document.body.innerText.includes('真实质量基准不能跳过三重验收') &&
+      document.body.innerText.includes('不能用人工 override 跳过')
+    `));
+    const directBenchmarkBypass = await page.eval(`
+      fetch('/aiteam/api/tasks/${benchmarkTaskId}', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          status: 'done',
+          human_audit: {
+            decision_useful: true,
+            evidence_traceable: true,
+            no_fabrication: true,
+            workflow_actionable: true,
+            no_padding: true,
+            note: '这是一条足够长但缺少独立 verdict 的绕过尝试。',
+          },
+        }),
+      }).then(async (res) => ({ status: res.status, body: await res.json() }))
+    `, true);
+    ok(
+      `${label} benchmark API refuses direct close without independent pass verdict`,
+      directBenchmarkBypass?.status === 400 && directBenchmarkBypass?.body?.code === "BENCHMARK_HUMAN_AUDIT_REQUIRED",
+      JSON.stringify(directBenchmarkBypass),
+    );
+    await page.screenshot(`benchmark-audit-${label}`);
+    await assertNoHorizontalOverflow(page, `${label} benchmark audit drawer`);
+
     const cancelTitle = `UI取消语义-${label}-${Date.now()}`;
     const cancelTaskId = await page.eval(`
       (async () => {

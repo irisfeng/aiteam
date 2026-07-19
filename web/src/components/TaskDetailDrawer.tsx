@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useWorkspace } from "../store";
-import type { Approval, Doc, Task, TaskEvent, Verdict } from "../types";
+import type { Approval, Doc, HumanQualityAudit, Task, TaskEvent, Verdict } from "../types";
 import { api, billableTokens, parseTaskUsage } from "../api";
 import { formatNetworkApprovalPayload } from "../lib/approvals";
 
@@ -33,6 +33,26 @@ const VERDICT_SOURCE_LABEL: Record<Verdict["source"], string> = {
   fallback: "兜底",
   human: "人工退回",
 };
+
+const PROVIDER_QUALITY_BENCHMARK_PREFIX = "真实模型质量基准：AiTeam 产品落地决策简报";
+const HUMAN_AUDIT_ITEMS: { key: Exclude<keyof HumanQualityAudit, "note">; label: string }[] = [
+  { key: "decision_useful", label: "结论足以支持继续/停止决策，不只是内容摘要" },
+  { key: "evidence_traceable", label: "关键事实、数字和能力声明都能回到任务证据" },
+  { key: "no_fabrication", label: "没有编造字段、事件、状态、工具、来源或用户反馈" },
+  { key: "workflow_actionable", label: "七步工作流、负责人、退出条件和下一步可实际执行" },
+  { key: "no_padding", label: "没有重复段落、占位符或为凑篇幅写的空泛内容" },
+];
+
+function parseRecordedHumanAudit(events: TaskEvent[]): (HumanQualityAudit & { version?: number }) | null {
+  for (let index = events.length - 1; index >= 0; index--) {
+    if (events[index].type !== "user_close") continue;
+    try {
+      const meta = JSON.parse(events[index].metadata_json || "{}") as { human_audit?: HumanQualityAudit & { version?: number } };
+      if (meta.human_audit) return meta.human_audit;
+    } catch { /* 损坏的历史 metadata 不影响任务详情 */ }
+  }
+  return null;
+}
 
 function fmtNum(n: number) {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -176,6 +196,14 @@ export function TaskDetailDrawer({
   const [briefAcceptance, setBriefAcceptance] = useState("");
   const [savingBrief, setSavingBrief] = useState(false);
   const [actionError, setActionError] = useState("");
+  const [humanAuditChecks, setHumanAuditChecks] = useState<Record<Exclude<keyof HumanQualityAudit, "note">, boolean>>({
+    decision_useful: false,
+    evidence_traceable: false,
+    no_fabrication: false,
+    workflow_actionable: false,
+    no_padding: false,
+  });
+  const [humanAuditNote, setHumanAuditNote] = useState("");
 
   useEffect(() => {
     let alive = true;
@@ -195,6 +223,17 @@ export function TaskDetailDrawer({
     setEditingBrief(false);
     setActionError("");
   }, [task.id, task.budget_billable, task.description, task.acceptance_criteria]);
+  useEffect(() => {
+    if (task.status === "review") return;
+    setHumanAuditChecks({
+      decision_useful: false,
+      evidence_traceable: false,
+      no_fabrication: false,
+      workflow_actionable: false,
+      no_padding: false,
+    });
+    setHumanAuditNote("");
+  }, [task.id, task.status]);
   const assignee = ws.agentById(task.assignee_agent_id);
   const reviewer = ws.agentById(task.reviewer_agent_id);
   const creator = task.created_by === "user" ? null : ws.agentById(task.created_by);
@@ -205,12 +244,16 @@ export function TaskDetailDrawer({
   const docs = ws.documents.filter((d) => d.task_id === task.id).sort((a, b) => b.created_at - a.created_at);
   const latestDoc = docs[0];
   const events = ws.taskEvents.filter((e) => e.task_id === task.id).sort((a, b) => a.created_at - b.created_at);
+  const isProviderQualityBenchmark = task.title.startsWith(PROVIDER_QUALITY_BENCHMARK_PREFIX);
+  const recordedHumanAudit = parseRecordedHumanAudit(events);
   const tools = events.filter((e) => e.type === "tool").slice(-6).reverse();
   const acceptanceItems = splitAcceptanceCriteria(task.acceptance_criteria);
   const deliveryEvidence = docs.length > 0;
   const selfCheckEvidence = docs.some((d) => hasSelfCheckEvidence(d.content));
   const latestVerdict = verdicts.at(-1);
   const verificationPassed = latestVerdict?.result === "pass";
+  const checkedHumanAuditCount = HUMAN_AUDIT_ITEMS.filter((item) => humanAuditChecks[item.key]).length;
+  const humanAuditComplete = checkedHumanAuditCount === HUMAN_AUDIT_ITEMS.length && humanAuditNote.trim().length >= 12;
   const approvals = ws.approvals
     .filter((a) => a.ref_id === task.id || a.id === task.blocked_approval_id)
     .sort((a, b) => Number(b.status === "pending") - Number(a.status === "pending") || b.created_at - a.created_at);
@@ -224,6 +267,12 @@ export function TaskDetailDrawer({
     !verificationPassed
       ? latestVerdict?.result === "revise" ? "最近一次复核要求返工" : "暂无结构化复核通过裁决"
       : "",
+    isProviderQualityBenchmark && checkedHumanAuditCount < HUMAN_AUDIT_ITEMS.length
+      ? `人工质量审计仅完成 ${checkedHumanAuditCount}/${HUMAN_AUDIT_ITEMS.length} 项`
+      : "",
+    isProviderQualityBenchmark && humanAuditNote.trim().length < 12
+      ? "人工决策说明不足 12 个字符"
+      : "",
   ].filter(Boolean);
   const captureActionError = (error: unknown) => {
     setActionError(error instanceof Error ? error.message : String(error));
@@ -234,12 +283,25 @@ export function TaskDetailDrawer({
     // 未交付评审只能取消，不能伪装成 done；只有 review → done 才表示人类验收通过。
     if (task.status !== "review" &&
       !window.confirm(`确认取消任务「${task.title}」？\n取消后会归档，但不计入交付、质量覆盖，也不会解锁下游依赖。`)) return;
+    if (task.status === "review" && isProviderQualityBenchmark && closeEvidenceGaps.length > 0) {
+      setActionError(`真实质量基准不能跳过三重验收：${closeEvidenceGaps.join("；")}`);
+      return;
+    }
     if (task.status === "review" && closeEvidenceGaps.length > 0 &&
       !window.confirm(`关单证据仍有缺口：\n- ${closeEvidenceGaps.join("\n- ")}\n\n是否基于你的人工判断，仍然验收并关闭该任务？`)) return;
+    if (task.status === "review" && isProviderQualityBenchmark &&
+      !window.confirm("确认这份真实模型交付已经通过机器契约、独立复核和你的五项人工审计，并记录为可用于产品决策的验收结果？")) return;
     setActionError("");
     setClosing(true);
     try {
-      await ws.moveTask(task, task.status === "review" ? "done" : "cancelled");
+      if (task.status === "review" && isProviderQualityBenchmark) {
+        await ws.updateTask(task.id, {
+          status: "done",
+          human_audit: { ...humanAuditChecks, note: humanAuditNote.trim() },
+        });
+      } else {
+        await ws.moveTask(task, task.status === "review" ? "done" : "cancelled");
+      }
     } catch (error) {
       captureActionError(error);
     } finally {
@@ -576,9 +638,55 @@ export function TaskDetailDrawer({
                     </div>
                   </div>
                 )}
+                {isProviderQualityBenchmark && task.status === "review" && (
+                  <div className="border-t border-line px-3 py-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[11px] font-semibold text-ink-2">真实质量基准 · 人工审计</div>
+                      <span className={`rounded px-1.5 py-px font-mono text-[10px] ${humanAuditComplete ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300" : "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-300"}`}>
+                        {checkedHumanAuditCount}/{HUMAN_AUDIT_ITEMS.length}
+                      </span>
+                    </div>
+                    <div className="mt-2 space-y-2">
+                      {HUMAN_AUDIT_ITEMS.map((item) => (
+                        <label key={item.key} className="flex cursor-pointer items-start gap-2 text-[11.5px] leading-snug text-ink-2">
+                          <input
+                            type="checkbox"
+                            checked={humanAuditChecks[item.key]}
+                            onChange={(event) => setHumanAuditChecks((current) => ({ ...current, [item.key]: event.target.checked }))}
+                            className="mt-0.5 h-3.5 w-3.5 accent-[var(--accent)]"
+                          />
+                          <span>{item.label}</span>
+                        </label>
+                      ))}
+                    </div>
+                    <label className="mt-3 block text-[11px] text-ink-3">
+                      人工决策说明（至少 12 个字符）
+                      <textarea
+                        value={humanAuditNote}
+                        onChange={(event) => setHumanAuditNote(event.target.value)}
+                        maxLength={500}
+                        rows={2}
+                        placeholder="例如：证据完整、风险与停止条件可执行，同意进入首批用户测试。"
+                        className="mt-1 w-full resize-y rounded-md border border-line bg-paper px-2 py-1.5 text-[11.5px] leading-relaxed text-ink outline-none focus:border-accent/50"
+                      />
+                    </label>
+                    <div className="mt-1 text-[10.5px] leading-relaxed text-ink-3">
+                      关单时会把五项确认、决策说明、当前文档和独立 verdict 一起写入审计事件，不能用人工 override 跳过。
+                    </div>
+                  </div>
+                )}
+                {isProviderQualityBenchmark && task.status === "done" && recordedHumanAudit && (
+                  <div className="border-t border-emerald-200 bg-emerald-50 px-3 py-2 text-[11.5px] leading-relaxed text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/20 dark:text-emerald-300">
+                    <div className="font-medium">人工质量审计已记录 · 5/5</div>
+                    <div className="mt-0.5 whitespace-pre-wrap">{recordedHumanAudit.note}</div>
+                  </div>
+                )}
                 {task.status === "review" && closeEvidenceGaps.length > 0 && (
                   <div className="border-t border-amber-200 bg-amber-50 px-3 py-2 text-[11.5px] leading-relaxed text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/20 dark:text-amber-300">
-                    关单前仍需人工确认：{closeEvidenceGaps.join("；")}。你仍可基于人工判断验收关闭，但系统会在操作时再次提醒。
+                    关单前仍需人工确认：{closeEvidenceGaps.join("；")}。
+                    {isProviderQualityBenchmark
+                      ? "真实质量基准必须补齐全部证据，不能用人工 override 跳过。"
+                      : "你仍可基于人工判断验收关闭，但系统会在操作时再次提醒。"}
                   </div>
                 )}
               </div>
@@ -868,7 +976,9 @@ export function TaskDetailDrawer({
             title={pendingApprovalCount > 0
               ? "先处理该任务的审批或输入"
               : task.status === "review"
-                ? "验收通过后由人类确认关单"
+                ? isProviderQualityBenchmark
+                  ? "补齐机器契约、独立复核与五项人工审计后关单"
+                  : "验收通过后由人类确认关单"
                 : "取消只归档，不代表验收通过"}
           >
             {task.status === "done"
@@ -877,7 +987,9 @@ export function TaskDetailDrawer({
                 ? "已取消"
                 : closing
                   ? task.status === "review" ? "关闭中…" : "取消中…"
-                  : task.status === "review" ? "确认关闭任务" : "取消任务"}
+                  : task.status === "review"
+                    ? isProviderQualityBenchmark ? "提交人工审计并关单" : "确认关闭任务"
+                    : "取消任务"}
           </button>
           <button onClick={onClose} className="rounded-lg border border-line px-3 py-1.5 text-[13px] text-ink-2 hover:bg-sel">
             返回

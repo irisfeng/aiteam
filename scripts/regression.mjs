@@ -413,6 +413,7 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
   const inboxSource = readFileSync(join(root, "web/src/components/InboxView.tsx"), "utf8");
   const modalsSource = readFileSync(join(root, "web/src/components/Modals.tsx"), "utf8");
   const worklineLibSource = readFileSync(join(root, "web/src/lib/workline.ts"), "utf8");
+  const routesSource = readFileSync(join(root, "server/src/routes.ts"), "utf8");
   const defaultWorkline = /view:\s*\{\s*kind:\s*"workline"\s*\}/.test(storeSource);
   const bootstrapKeepsView = /view:\s*keepValidView\(state\.view,\s*d\.channels\)/.test(storeSource);
   const loadDoesNotForceChannel = !/const first = data\.channels\.find[\s\S]*?openChannel\(first\.id\)/.test(storeSource);
@@ -515,6 +516,24 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
   check("UX5", "任务详情：人工复核清单把验收标准、交付证据、自查表、复核和审批状态放在同一处",
     taskReviewEvidencePanel,
     `reviewEvidencePanel=${taskReviewEvidencePanel}`);
+  const benchmarkHumanAuditGate =
+    taskDetailSource.includes("真实质量基准 · 人工审计") &&
+    taskDetailSource.includes("decision_useful") &&
+    taskDetailSource.includes("evidence_traceable") &&
+    taskDetailSource.includes("no_fabrication") &&
+    taskDetailSource.includes("workflow_actionable") &&
+    taskDetailSource.includes("no_padding") &&
+    taskDetailSource.includes("提交人工审计并关单") &&
+    taskDetailSource.includes("不能用人工 override 跳过") &&
+    routesSource.includes("BENCHMARK_HUMAN_AUDIT_REQUIRED") &&
+    routesSource.includes("machine_contract_passed") &&
+    routesSource.includes("task-level human audit before project close");
+  check(
+    "UX5B",
+    "真实质量基准人工审计：五项确认+决策说明落审计事件，任务/项目关单都不能绕过",
+    benchmarkHumanAuditGate,
+    `humanAuditGate=${benchmarkHumanAuditGate}`,
+  );
   const inboxResolutionLoop =
     inboxSource.includes("resolveInboxApproval") &&
     inboxSource.includes("setResolvingId") &&
@@ -1586,7 +1605,7 @@ const J = async (path, init = {}) => {
   const res = await fetch(`${BASE}${path}`, { ...init, headers });
   const sc = res.headers.get("set-cookie");
   if (sc) { const m = sc.match(/aiteam_session=[^;]+/); if (m) sessionCookie = m[0]; }
-  return { ok: res.ok, body: await res.json().catch(() => ({})) };
+  return { ok: res.ok, status: res.status, body: await res.json().catch(() => ({})) };
 };
 
 fakeOpenAiServer = createServer((req, res) => {
@@ -3889,6 +3908,86 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
       result.usage_summary?.estimated_cost > 0 &&
       Boolean(persistedResultEvent),
       `ok=${result.ok}/${result.run_status} benchmark=${benchmark?.id}@${benchmark?.version} rubric=${rubricItems.length} reviewer=${result.task?.reviewer_agent_id} docs=${result.docs?.length ?? 0} events=${[...eventTypes].join(",")} quality=${result.checks?.quality_contract}/${result.checks?.independent_reviewer}/${result.checks?.verdict_recorded}/${result.checks?.within_budget}/${result.checks?.source_trace_clean} isolated=${workerProbe?.tools?.join(",")}/${verifierProbe?.tools?.join(",")} usage=${result.checks?.usage_tracked} billable=${result.usage_summary?.billable} cost=${result.usage_summary?.estimated_cost} persisted=${Boolean(persistedResultEvent)}`);
+
+    const missingAudit = await J(`/tasks/${result.task.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "done" }),
+    });
+    const partialAudit = await J(`/tasks/${result.task.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        status: "done",
+        human_audit: {
+          decision_useful: true,
+          evidence_traceable: true,
+          no_fabrication: true,
+          workflow_actionable: false,
+          no_padding: true,
+          note: "证据充分，可以进入首批测试。",
+        },
+      }),
+    });
+    enterOwner(ownerFromUserId(testUser.id));
+    const newerUnreviewedDoc = db.createDocument({
+      channel_id: result.task.channel_id,
+      task_id: result.task.id,
+      agent_id: result.task.assignee_agent_id,
+      title: "AiTeam 14 天产品落地决策简报（未复核新版）",
+      content: benchmarkGoodReport,
+      kind: "report",
+    });
+    const auditNote = "证据完整且行动与停止条件明确，同意进入首批真实用户测试。";
+    const fullAuditPayload = {
+      decision_useful: true,
+      evidence_traceable: true,
+      no_fabrication: true,
+      workflow_actionable: true,
+      no_padding: true,
+      note: auditNote,
+    };
+    const staleVerdictAudit = await J(`/tasks/${result.task.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "done", human_audit: fullAuditPayload }),
+    });
+    const currentDocVerdict = db.createVerdict({
+      task_id: result.task.id,
+      project_id: result.task.project_id,
+      doc_id: newerUnreviewedDoc.id,
+      verifier_agent_id: result.task.reviewer_agent_id,
+      worker_agent_id: result.task.assignee_agent_id,
+      attempt: 1,
+      result: "pass",
+      reasons: "当前文档版本逐项复核通过",
+      source: "auto",
+    });
+    const completedAudit = await J(`/tasks/${result.task.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        status: "done",
+        human_audit: fullAuditPayload,
+      }),
+    });
+    const closeEvents = (await J(`/tasks/${result.task.id}/events`)).body.filter((event) => event.type === "user_close");
+    const closeMeta = (() => {
+      try { return JSON.parse(closeEvents.at(-1)?.metadata_json || "{}"); } catch { return {}; }
+    })();
+    check(
+      "Q6H",
+      "真实模型质量基准人工关单：禁止 override，强制五项审计+决策说明并绑定当前文档/verdict",
+      missingAudit.ok === false && missingAudit.body.code === "BENCHMARK_HUMAN_AUDIT_REQUIRED" &&
+        partialAudit.ok === false && partialAudit.body.gaps?.some((gap) => gap.includes("workflow_actionable")) &&
+        staleVerdictAudit.ok === false && staleVerdictAudit.body.gaps?.some((gap) => gap.includes("未绑定当前文档版本")) &&
+        completedAudit.ok === true && completedAudit.body.status === "done" &&
+        closeEvents.length === 1 &&
+        closeMeta.human_override === false &&
+        closeMeta.human_audit?.version === 1 &&
+        closeMeta.human_audit?.note === auditNote &&
+        closeMeta.human_audit?.machine_contract_passed === true &&
+        closeMeta.human_audit?.document_id === newerUnreviewedDoc.id &&
+        closeMeta.human_audit?.verdict_id === currentDocVerdict.id &&
+        currentDocVerdict.doc_id === newerUnreviewedDoc.id,
+      `missing=${missingAudit.status}/${missingAudit.body.code} partial=${partialAudit.status}/${partialAudit.body.gaps?.length} stale=${staleVerdictAudit.status}/${staleVerdictAudit.body.gaps?.length} completed=${completedAudit.status}/${completedAudit.body.status} close=${closeEvents.length}/${closeMeta.human_audit?.version}/${closeMeta.human_override}`,
+    );
   }
 
   {
@@ -4050,6 +4149,21 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
     } catch { /* markitdown-mcp is optional in this combined project check */ }
     const tasksBeforeClose = (await J("/tasks")).body.filter((t) => t.project_id === project.id);
     const allReview = tasksBeforeClose.length >= 2 && tasksBeforeClose.every((t) => t.status === "review");
+    const blockedProjectClose = await J(`/projects/${project.id}/close`, { method: "POST" });
+    const auditedProviderTask = await J(`/tasks/${providerResult.task.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        status: "done",
+        human_audit: {
+          decision_useful: true,
+          evidence_traceable: true,
+          no_fabrication: true,
+          workflow_actionable: true,
+          no_padding: true,
+          note: "配置链路证据完整，允许该供应商进入下一阶段验证。",
+        },
+      }),
+    });
     const closed = (await J(`/projects/${project.id}/close`, { method: "POST" })).body;
     const tasksAfterClose = (await J("/tasks")).body.filter((t) => t.project_id === project.id);
     if (mcpServer) await J(`/mcp-servers/${mcpServer.id}`, { method: "DELETE" });
@@ -4062,10 +4176,12 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
       skillResult.task?.project_id === project.id &&
       (!mcpResult || (mcpResult.ok === true && mcpResult.task?.project_id === project.id)) &&
       allReview &&
+      blockedProjectClose.ok === false && blockedProjectClose.body.code === "BENCHMARK_HUMAN_AUDIT_REQUIRED" &&
+      auditedProviderTask.ok === true && auditedProviderTask.body.status === "done" &&
       closed.project?.status === "done" &&
       tasksAfterClose.length === tasksBeforeClose.length &&
       tasksAfterClose.every((t) => t.status === "done"),
-      `project=${project?.id} tasks=${tasksBeforeClose.length} provider=${providerResult.task?.project_id === project.id} skill=${skillResult.task?.project_id === project.id} mcp=${mcpResult ? mcpResult.task?.project_id === project.id : "skip"} closed=${closed.project?.status}`);
+      `project=${project?.id} tasks=${tasksBeforeClose.length} provider=${providerResult.task?.project_id === project.id} skill=${skillResult.task?.project_id === project.id} mcp=${mcpResult ? mcpResult.task?.project_id === project.id : "skip"} blocked=${blockedProjectClose.status}/${blockedProjectClose.body.code} audited=${auditedProviderTask.status}/${auditedProviderTask.body.status} closed=${closed.project?.status}`);
   }
 
   // 用量 / 导出 / 模板幂等 / 频道管理 / 记忆 / 供应商脱敏

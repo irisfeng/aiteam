@@ -69,6 +69,18 @@ export interface Task {
   created_at: number;
   updated_at: number;
 }
+/** 真实模型质量基准的人工关单证据；五项必须全部确认，note 记录可决策理由。 */
+export interface HumanQualityAudit {
+  decision_useful: boolean;
+  evidence_traceable: boolean;
+  no_fabrication: boolean;
+  workflow_actionable: boolean;
+  no_padding: boolean;
+  note: string;
+}
+export type TaskUpdateInput = Partial<Pick<Task,
+  "title" | "description" | "acceptance_criteria" | "status" | "assignee_agent_id" | "reviewer_agent_id" | "budget_billable"
+>> & { human_audit?: HumanQualityAudit };
 /** 单次验收裁决（D1 质量闭环落表） */
 export interface Verdict {
   id: string;

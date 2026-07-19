@@ -1,4 +1,4 @@
-import type { Agent, Approval, Channel, Doc, Message, Project, Provider, QualitySummary, Task, TaskEvent, Verdict } from "./types";
+import type { Agent, Approval, Channel, Doc, Message, Project, Provider, QualitySummary, Task, TaskEvent, TaskUpdateInput, Verdict } from "./types";
 
 // 统一入口下 AiTeam 挂在 /aiteam/，BASE_URL 即 "/aiteam/"。
 // 导出供少数绕过 req() 直接 fetch 的组件（MCP/技能/用量/团队等）复用，确保都带 /aiteam 前缀。
@@ -285,7 +285,7 @@ export const api = {
   taskEvents: (id: string) => req<TaskEvent[]>(`/tasks/${id}/events`),
   taskVerdicts: (id: string) => req<Verdict[]>(`/tasks/${id}/verdicts`),
   quality: () => req<QualitySummary>("/quality"),
-  updateTask: (id: string, data: Partial<Pick<Task, "title" | "description" | "acceptance_criteria" | "status" | "assignee_agent_id" | "reviewer_agent_id" | "budget_billable">>) =>
+  updateTask: (id: string, data: TaskUpdateInput) =>
     req<Task>(`/tasks/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
   requestRevision: (id: string, reason: string) =>
     req<Task>(`/tasks/${id}/revise`, { method: "POST", body: JSON.stringify({ reason }) }),

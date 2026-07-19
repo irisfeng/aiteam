@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { api, type Bootstrap } from "./api";
-import type { Agent, AgentStatus, Approval, Channel, Doc, Message, Project, Provider, Task, TaskEvent, View } from "./types";
+import type { Agent, AgentStatus, Approval, Channel, Doc, Message, Project, Provider, Task, TaskEvent, TaskUpdateInput, View } from "./types";
 
 interface State {
   ready: boolean;
@@ -252,7 +252,7 @@ interface Store extends State {
     source_doc_ids?: string[];
     budget_billable?: number;
   }) => Promise<Task>;
-  updateTask: (id: string, data: Partial<Pick<Task, "title" | "description" | "acceptance_criteria" | "status" | "assignee_agent_id" | "reviewer_agent_id" | "budget_billable">>) => Promise<Task>;
+  updateTask: (id: string, data: TaskUpdateInput) => Promise<Task>;
   createProvider: (data: import("./api").ProviderInput) => Promise<Provider>;
   updateProvider: (id: string, data: import("./api").ProviderInput) => Promise<Provider>;
   deleteProvider: (id: string) => Promise<void>;
