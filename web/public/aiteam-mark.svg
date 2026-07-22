@@ -1,8 +1,23 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="AiTeam">
-  <rect width="64" height="64" rx="14" fill="#111827"/>
-  <path d="M14 48 32 12l18 36h-8l-3.8-8.2H25.8L22 48h-8Zm15-14.8h6L32 26l-3 7.2Z" fill="#F8FAF7"/>
-  <path d="m40 22 5.2 5.4L55 16" fill="none" stroke="#22C55E" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M18 48h28" fill="none" stroke="#475569" stroke-width="3" stroke-linecap="round"/>
-  <circle cx="18" cy="48" r="4.5" fill="#3B82F6"/>
-  <circle cx="46" cy="48" r="4.5" fill="#22C55E"/>
+  <style>
+    .surface { fill: #eaf2ff; stroke: #c7dcff; }
+    .network { stroke: #1d4ed8; }
+    .core { fill: #16a34a; stroke: #fff; }
+    @media (prefers-color-scheme: dark) {
+      .surface { fill: #173150; stroke: #31567f; }
+      .network { stroke: #d7e8ff; }
+      .core { fill: #4ade80; stroke: #173150; }
+    }
+  </style>
+  <rect class="surface" x="1" y="1" width="62" height="62" rx="18" stroke-width="2"/>
+  <g class="network" fill="none" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="32" cy="14" r="6"/>
+    <path d="m27.7 18.3-9.4 9.4"/>
+    <circle cx="14" cy="32" r="6"/>
+    <path d="M20 32h24"/>
+    <circle cx="50" cy="32" r="6"/>
+    <path d="m36.3 45.7 9.4-9.4"/>
+    <circle cx="32" cy="50" r="6"/>
+  </g>
+  <rect class="core" x="27.5" y="27.5" width="9" height="9" rx="2" stroke-width="2" transform="rotate(45 32 32)"/>
 </svg>

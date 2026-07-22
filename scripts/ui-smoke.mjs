@@ -283,6 +283,16 @@ async function runViewport(debugPort, baseUrl, label, viewport) {
     }
     await page.waitText("今天要推进什么？");
     await page.screenshot(`workline-${label}`);
+    if (label === "desktop") {
+      const lightBrand = await page.eval(`getComputedStyle(document.querySelector('.brand-mark')).backgroundColor`);
+      await page.eval(`document.documentElement.classList.add('dark')`);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      const darkBrand = await page.eval(`getComputedStyle(document.querySelector('.brand-mark')).backgroundColor`);
+      ok("desktop brand mark changes with dark mode", lightBrand !== darkBrand, `${lightBrand} -> ${darkBrand}`);
+      await page.screenshot("workline-dark-desktop");
+      await page.eval(`document.documentElement.classList.remove('dark')`);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
     ok(`${label} focus composer visible`, await page.eval(`document.body.innerText.includes('今天要推进什么？')`));
     ok(`${label} three shortcuts visible`, await page.eval(`['调研并给出决策建议','写一份可交付文档','规划并推进一个项目'].every((text) => document.body.innerText.includes(text))`));
     ok(`${label} advanced controls are progressively disclosed`, await page.eval(`!document.body.innerText.includes('启动前检查') && document.body.innerText.includes('运行与验收工具')`));

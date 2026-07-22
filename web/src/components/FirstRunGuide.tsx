@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { ArrowLeft, ArrowRight, Check, KeyRound, ShieldCheck, Sparkles, Target } from "lucide-react";
+import { BrandMark } from "./Brand";
 
 export type FirstRunAudience = "admin" | "member";
 
@@ -47,9 +48,7 @@ export function FirstRunGuide({
     <div className="flex h-full flex-1 items-center justify-center overflow-y-auto bg-paper px-4 py-10">
       <div className="w-full max-w-[760px]">
         <div className="text-center">
-          <div className="mx-auto mb-4 flex h-11 w-11 items-center justify-center rounded-2xl bg-accent text-white shadow-sm">
-            <Sparkles size={22} strokeWidth={1.8} />
-          </div>
+          <BrandMark size={44} className="mx-auto mb-4" />
           <h1 className="text-[28px] font-semibold tracking-[-0.03em] text-ink sm:text-[34px]">
             欢迎来到 AiTeam，{userName || "新同事"}
           </h1>

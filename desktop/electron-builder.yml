@@ -1,5 +1,6 @@
 appId: im.aiteam.desktop
 productName: AiTeam
+icon: assets/app-icon.svg
 directories:
   output: release
 asar: true
