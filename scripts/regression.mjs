@@ -1043,10 +1043,13 @@ check(
   const slidesBad = typeof v("slides", "这是一段没有分页符的散文，被当成 slides") === "string"; // 无 --- 应拒
   const sheetOk = v("sheet", "模型,价格\nA,1\nB,2") === null;
   const sheetBad = (v("sheet", "模型,价格,速度\nA,1") || "").includes("列"); // 列数不齐应拒并提列
+  const sheetDuplicateHeaderBad = (v("sheet", "指标,指标\nA,1") || "").includes("重复列名");
   const reportOk = v("report", "正文非空即可") === null;
+  const placeholderBad = (v("report", "# 正式方案\n\n[待补充] 后续再写") || "").includes("占位");
   const emptyBad = typeof v("report", "   ") === "string";
-  check("WD1", "write_document 契约校验：坏格式拒收+引导，合法放行",
-    slidesOk && slidesBad && sheetOk && sheetBad && reportOk && emptyBad);
+  const rubricKinds = ["report", "slides", "sheet", "html"].every((kind) => engine.deliverableQualityRubric(kind).length >= 5);
+  check("WD1", "write_document 契约校验：坏格式/占位/重复表头拒收，分类质量标准完整",
+    slidesOk && slidesBad && sheetOk && sheetBad && sheetDuplicateHeaderBad && reportOk && placeholderBad && emptyBad && rubricKinds);
 }
 
 // SK1 技能相关性：trigger 优先命中/不命中 + 无 trigger 回退 SKILL_KEYWORDS[name] + 通用始终

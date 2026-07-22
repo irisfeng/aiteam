@@ -106,6 +106,8 @@ function splitCsvLine(line: string): string[] {
 export function validateDocContent(kind: "report" | "slides" | "sheet" | "html", content: string): string | null {
   const c = content.trim();
   if (!c) return "正文为空。";
+  const placeholder = unresolvedPlaceholderHint(c);
+  if (placeholder) return placeholder;
   if (kind === "html") {
     // 格式：至少是可渲染的 HTML 片段/文档
     if (!/<(!doctype|html|div|section|svg|style|body|main|article|h[1-6]|p|ul|ol|table|canvas|header|footer|nav)\b/i.test(c))
@@ -133,6 +135,9 @@ export function validateDocContent(kind: "report" | "slides" | "sheet" | "html",
     if (lines.length < 2) return "sheet 需要表头 + 至少一行数据。";
     const headerCols = splitCsvLine(lines[0]).length;
     if (headerCols < 2) return "sheet 表头至少 2 列（标准 CSV，逗号分隔）。";
+    const headers = splitCsvLine(lines[0]).map((value) => value.trim());
+    if (headers.some((value) => !value)) return "sheet 表头存在空列名；每一列都必须有明确名称。";
+    if (new Set(headers).size !== headers.length) return "sheet 表头存在重复列名；请为每一列使用唯一、可理解的名称。";
     for (let i = 1; i < lines.length; i++) {
       const n = splitCsvLine(lines[i]).length;
       if (n !== headerCols)
@@ -141,6 +146,43 @@ export function validateDocContent(kind: "report" | "slides" | "sheet" | "html",
     return null;
   }
   return unsourcedNumbersHint(c); // report：格式无要求，但多处量化数据需有来源（防对外交付物编造数字）
+}
+
+/** 对外交付底线：明显占位符不能进入文档库。"待核实/待确认"是诚实边界，不在此拦截。 */
+function unresolvedPlaceholderHint(content: string): string | null {
+  const match = content.match(/(?:\bTODO\b|\bTBD\b|lorem\s+ipsum|\[(?:待补充|占位|此处插入[^\]]*)\]|<placeholder>)/i);
+  if (!match) return null;
+  return `检测到未清理的占位内容“${match[0]}”。请补齐真实内容或明确写成“待确认项 + 负责人 + 截止条件”，不要把模板残留作为正式交付。`;
+}
+
+export function deliverableQualityRubric(kind: string): string[] {
+  const common = [
+    "结论、建议和下一步必须可直接用于目标读者的真实场景，不得以模板话术或自我表扬代替内容",
+    "关键事实、数字和外部主张须有可追溯来源；无法核实的内容要明确标为假设或待确认",
+    "不得残留 TODO、TBD、占位文案、空章节或与任务无关的示例内容",
+  ];
+  const byKind: Record<string, string[]> = {
+    report: [
+      "报告/方案：开头给目标读者、使用场景与执行摘要；正文结构支持快速决策，结尾给责任人、风险和下一步",
+      "Word/PDF 导出后也应成立：标题层级、表格、列表和长段落清晰，不依赖聊天上下文才能理解",
+    ],
+    slides: [
+      "PPT：形成完整叙事而非报告切片；每页只有一个核心观点，标题表达结论，信息层级与留白可支撑现场讲述",
+      "数字、表格、图示、配图与讲者备注按内容需要使用；不得用装饰图掩盖空洞内容，并核对真实渲染页数与元素",
+    ],
+    sheet: [
+      "Excel/数据表：列名唯一且含义清楚，单位、统计口径、时间范围、来源和缺失值处理可理解",
+      "计算、排序与汇总应可复核；面向决策时给关键指标或配套结论，不把未经解释的原始表当成完成品",
+    ],
+    html: [
+      "设计页面：视觉方向与 brief 一致，信息层级、字体、色彩、间距和组件状态形成统一系统，不使用默认模板感或无意义装饰",
+      "在目标尺寸下无溢出、遮挡、低对比或不可读内容；关键操作与内容在脚本受限预览中仍可理解",
+    ],
+    template: [
+      "品牌模板：替换内容不得破坏原有母版、版式、配色与层级；所有文本槽位需检查溢出和错位",
+    ],
+  };
+  return [...common, ...(byKind[kind] ?? ["格式、结构和表达须符合该交付物的真实使用方式，并能独立打开和评审"])];
 }
 
 /**
@@ -1888,6 +1930,7 @@ async function runVerification(
     task.acceptance_criteria
       ? `验收标准（逐条核验）：\n${task.acceptance_criteria}`
       : `（未写明验收标准 —— 按任务标题与详情判断交付物是否完整、可直接使用、无明显错误）`,
+    `交付类型质量标准（结合任务规模判断；不适用项说明理由，不机械凑数）：\n${deliverableQualityRubric(doc.kind).map((item) => `- ${item}`).join("\n")}`,
     isProviderQualityBenchmarkTask(task)
       ? `本固定基准的可信实现口径（这是任务证据，不得要求作者改标为待验证）：\n${providerQualityBenchmarkImplementationFacts().map((fact) => `- ${fact}`).join("\n")}`
       : ``,
@@ -1899,6 +1942,7 @@ async function runVerification(
     ...extraDocs.slice(0, 3).flatMap((d) => [
       ``,
       `同任务交付物《${d.title}》（${d.kind}，一并核验，不是参考资料）：`,
+      `该交付物质量标准：\n${deliverableQualityRubric(d.kind).map((item) => `- ${item}`).join("\n")}`,
       `<deliverable>`,
       stripLoneSurrogates(d.content.slice(0, 3000)),
       `</deliverable>`,

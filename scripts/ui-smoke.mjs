@@ -229,11 +229,13 @@ async function register(page, label) {
         input.dispatchEvent(new Event('change', { bubbles: true }));
       };
       setValue(document.querySelector('input[placeholder="显示名（如 张三）"]'), ${JSON.stringify(`UI ${label}`)});
-      setValue(document.querySelector('input[placeholder="邮箱"]'), ${JSON.stringify(email)});
+      setValue(document.querySelector('input[placeholder="name@company.com"]'), ${JSON.stringify(email)});
       setValue(document.querySelector('input[placeholder="密码（至少 6 位）"]'), 'ui-smoke-pw');
-      document.querySelector('form button[type="submit"]').click();
+      setValue(document.querySelector('input[placeholder="再次输入密码"]'), 'ui-smoke-pw');
     })()
   `);
+  await waitFor(() => page.eval(`!document.querySelector('form button[type="submit"]').disabled`));
+  await page.eval(`document.querySelector('form button[type="submit"]').click()`);
 }
 
 async function assertNoHorizontalOverflow(page, label) {
@@ -272,8 +274,13 @@ async function runViewport(debugPort, baseUrl, label, viewport) {
     await page.send("Page.navigate", { url: baseUrl });
     await waitFor(() => page.eval(`document.readyState === 'complete' && !!document.body`));
     await page.screenshot(`login-${label}`);
-    const needsAuth = await page.eval(`!!document.querySelector('input[placeholder="邮箱"]')`);
+    const needsAuth = await page.eval(`!!document.querySelector('input[placeholder="name@company.com"]')`);
     if (needsAuth) await register(page, label);
+    const hasFirstRun = await waitFor(() => page.eval(`document.body.innerText.includes('先用 3 步认识工作方式') || document.body.innerText.includes('今天要推进什么？')`));
+    if (hasFirstRun && await page.eval(`document.body.innerText.includes('稍后再看')`)) {
+      await page.screenshot(`onboarding-${label}`);
+      await page.eval(`[...document.querySelectorAll('button')].find((el) => (el.innerText || '').trim() === '稍后再看')?.click()`);
+    }
     await page.waitText("今天要推进什么？");
     await page.screenshot(`workline-${label}`);
     ok(`${label} focus composer visible`, await page.eval(`document.body.innerText.includes('今天要推进什么？')`));
@@ -315,11 +322,20 @@ async function runViewport(debugPort, baseUrl, label, viewport) {
         window.__aiteamBudgetWarning = String(message);
         return false;
       };
-      const button = document.querySelector('button[title="设置"]');
+      const button = document.querySelector('button[title="账户与工作区设置"]');
       button?.click();
       Boolean(button);
     `);
     ok(`${label} settings opens for budget confirmation`, settingsOpened);
+    await page.waitText("首次使用引导");
+    const modelTabOpened = await page.eval(`
+      (() => {
+        const button = [...document.querySelectorAll('button')].find((el) => (el.innerText || '').trim() === '模型');
+        button?.click();
+        return Boolean(button);
+      })()
+    `);
+    ok(`${label} model settings are progressively disclosed from account settings`, modelTabOpened);
     await page.waitText(budgetProviderName);
     const clickedBudgetBenchmark = await page.eval(`
       (() => {
@@ -337,7 +353,7 @@ async function runViewport(debugPort, baseUrl, label, viewport) {
     ok(`${label} paid benchmark shows provider, models, token cap, reserve and cost before running`, Boolean(budgetWarningReady) && await page.eval(`
       window.__aiteamBudgetWarning.includes('ui-budget-worker') &&
       window.__aiteamBudgetWarning.includes('ui-budget-reviewer') &&
-      window.__aiteamBudgetWarning.includes('AiTeam 产品落地决策简报 · v7') &&
+      window.__aiteamBudgetWarning.includes('AiTeam 产品落地决策简报 · v8') &&
       window.__aiteamBudgetWarning.includes('2200–3800') &&
       window.__aiteamBudgetWarning.includes('20k billable tokens') &&
       window.__aiteamBudgetWarning.includes('预留复核：6k') &&

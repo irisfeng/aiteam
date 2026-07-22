@@ -150,11 +150,9 @@ export function MobileNav({ onSettings }: { onSettings: () => void }) {
         ))}
       </select>
       <span className="ml-auto flex shrink-0 items-center gap-0.5 pl-1">
-        {ws.user.role === "admin" && (
-          <button onClick={onSettings} className="rounded px-1.5 text-ink-3 hover:bg-sel hover:text-ink" title="设置">
-            <Settings size={14} strokeWidth={1.8} />
-          </button>
-        )}
+        <button onClick={onSettings} className="rounded px-1.5 text-ink-3 hover:bg-sel hover:text-ink" title="账户与工作区设置">
+          <Settings size={14} strokeWidth={1.8} />
+        </button>
         <button
           onClick={() => void ws.logout()}
           className="rounded px-1.5 text-ink-3 hover:bg-sel hover:text-red-500"
@@ -297,11 +295,9 @@ export function Sidebar({
         </span>
         <TodayUsage />
         <ThemeToggle />
-        {ws.user.role === "admin" && (
-          <button onClick={onSettings} className="rounded px-1 text-ink-3 hover:bg-sel hover:text-ink" title="模型供应商设置（仅管理员）">
-            <Settings size={14} strokeWidth={1.8} />
-          </button>
-        )}
+        <button onClick={onSettings} className="rounded px-1 text-ink-3 hover:bg-sel hover:text-ink" title="账户与工作区设置">
+          <Settings size={14} strokeWidth={1.8} />
+        </button>
         <button
           onClick={() => void ws.logout()}
           className="rounded px-1 text-ink-3 hover:bg-sel hover:text-red-500"
