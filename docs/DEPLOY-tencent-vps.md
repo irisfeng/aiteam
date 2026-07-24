@@ -441,13 +441,13 @@ sudo rm -f "$DATA_DIR/aiteam.db" "$DATA_DIR/aiteam.db-wal" "$DATA_DIR/aiteam.db-
 sudo cp "$SRC/aiteam.db" "$DATA_DIR/aiteam.db"
 [ -f "$SRC/assets.tar.gz" ] && { sudo rm -rf "$DATA_DIR/assets"; sudo tar -xzf "$SRC/assets.tar.gz" -C "$DATA_DIR"; }
 sudo chown -R aiteam:aiteam "$DATA_DIR" && sudo chmod -R 750 "$DATA_DIR"
-sudo systemctl start "$SERVICE"; sleep 2
 RESTORED_INTEGRITY="$(sqlite3 "$DATA_DIR/aiteam.db" 'PRAGMA integrity_check')"
 if [ "$RESTORED_INTEGRITY" != "ok" ]; then
   echo "[fatal] 恢复后数据库完整性校验失败：" >&2
   printf '%s\n' "$RESTORED_INTEGRITY" >&2
   exit 1
 fi
+sudo systemctl start "$SERVICE"; sleep 2
 systemctl is-active --quiet "$SERVICE"
 echo "[ok] 基础恢复完成。必须登录 UI 实测 provider、MCP、文生图凭证可读取，并抽查 /aiteam/assets/*.png。建议季度演练一次。"
 ```

@@ -758,6 +758,7 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
   );
   const testingSource = readFileSync(join(root, "docs/TESTING.md"), "utf8");
   const guideSource = readFileSync(join(root, "docs/GUIDE.md"), "utf8");
+  const deploySource = readFileSync(join(root, "docs/DEPLOY-tencent-vps.md"), "utf8");
   const manualUatPaths =
     testingSource.includes("http://localhost:8787/aiteam/") &&
     testingSource.includes("http://localhost:5173/aiteam/") &&
@@ -769,6 +770,19 @@ check("P0", `种子：4 内置同事 + ${BUILTIN_SKILLS.length} 内置技能（�
     "人工 UAT 文档：入口包含 /aiteam/，导出路径正确并明确需要登录态",
     manualUatPaths,
     `manualUatPaths=${manualUatPaths}`,
+  );
+  const restoredIntegrityStart = deploySource.indexOf('RESTORED_INTEGRITY="$(sqlite3 "$DATA_DIR/aiteam.db"');
+  const restoredIntegrityEnd = deploySource.indexOf("\nfi", restoredIntegrityStart);
+  const restoredServiceStart = deploySource.indexOf('sudo systemctl start "$SERVICE"', restoredIntegrityStart);
+  const restoredDatabaseValidatedBeforeStart =
+    restoredIntegrityStart >= 0 &&
+    restoredIntegrityEnd > restoredIntegrityStart &&
+    restoredServiceStart > restoredIntegrityEnd;
+  check(
+    "OPS1",
+    "恢复演练：恢复后的数据库必须先通过完整性校验，再允许服务启动",
+    restoredDatabaseValidatedBeforeStart,
+    `integrity=${restoredIntegrityStart} validationEnd=${restoredIntegrityEnd} serviceStart=${restoredServiceStart}`,
   );
   const taskBriefFlow =
     taskBriefSource.includes("新建任务简报") &&
