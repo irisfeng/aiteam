@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { createHash } from "node:crypto";
 import {
   clearChannelMessages,
   clearMemory,
@@ -43,7 +44,7 @@ import {
   listMessages,
   listTaskEvents,
   listTasks,
-  resolveApproval,
+  resolveApprovalOnce,
   updateApprovalPayload,
   updateTask,
   createVerdict,
@@ -77,20 +78,27 @@ import {
   sanitizeProvider,
   setImageProvider,
   updateProvider,
+  type Provider,
 } from "./db.js";
 import { slidesToPptx } from "./pptx.js";
 import { MCP_REGISTRY, SKILL_PACK_REGISTRY } from "./registry.js";
 import { DEFAULT_IMAGE_BASE_URL, generateImageBytes } from "./agents/images.js";
+import { providerBenchmarkPassed, providerBenchmarkRunStatus, providerBenchmarkSourceTrace } from "./qualityBenchmark.js";
 import {
+  assessProviderQualityBenchmarkDocument,
+  isProviderQualityBenchmarkTask,
+  PROVIDER_QUALITY_REVIEW_RESERVE_BILLABLE,
   isMock,
   onMessage,
   onBudgetResolved,
   onClarificationResolved,
+  onNetworkApprovalResolved,
   onPlanResolved,
   onTaskAssigned,
   onTaskDelivered,
   oneShotComplete,
   buildSkillIndex,
+  invalidateTaskNetworkApprovals,
   readSkillBody,
   stopChannel,
   stopTask,
@@ -116,6 +124,131 @@ async function waitForProviderTask(taskId: string, timeoutMs = 60000) {
     await sleep(500);
   }
   return { task: getTask(taskId), events: listTaskEvents(taskId), done: false };
+}
+
+const PROVIDER_QUALITY_BENCHMARK_BUDGET = Math.max(
+  4_000,
+  Math.round(Number(process.env.AITEAM_PROVIDER_BENCHMARK_BUDGET) || 20_000),
+);
+
+const PROVIDER_QUALITY_BENCHMARK = {
+  id: "executive-decision-brief-v1",
+  version: 8,
+  title: "真实模型质量基准：AiTeam 产品落地决策简报",
+  budgetBillable: PROVIDER_QUALITY_BENCHMARK_BUDGET,
+  description: [
+    "你是 AiTeam 的产品负责人，请仅依据本任务提供的上下文，为创始人写一份可直接用于决策的产品落地简报。",
+    "背景：AiTeam 借鉴 Helio 的低门槛协作体验，但核心差异是任务简报、AI 认领、过程留痕、独立复核、自动返工与人类关单。",
+    "目标：给出未来 14 天把这一核心工作流推向首批真实用户测试的最小落地方案。不得虚构市场数据、客户反馈或已经完成的事实。",
+  ].join("\n"),
+  rubric: [
+    "1. 全文必须为 2200–3800 个非空白字符（含 Markdown 标记），开头必须给出 70–100 个非空白字符的明确结论与推荐决策。",
+    "2. 必须说明目标用户、核心待办和当前产品边界；产品边界须与任务内给出的已实现能力一致，不得把已有能力写成尚未开发。",
+    "3. 必须用一张表完整映射 goal→brief→claim→work→review→revise→human close，并标明每步责任人和可验证证据。",
+    "4. 必须给出按优先级排序的 14 天计划，包含阶段目标、负责人、退出条件和可量化验收指标。",
+    "5. 必须列出至少 3 个关键风险/依赖，每项给出缓解动作和停止条件。",
+    "6. 所有外部事实、数字和能力声明必须给出可访问 URL 或任务内证据；没有来源时必须明确标注为假设或待验证，且不得声称使用过审计日志中不存在的工具。",
+    "7. 文末必须附逐条自查表，按本验收标准标注满足/不满足及正文证据位置。",
+  ],
+} as const;
+
+const PROVIDER_QUALITY_CONFIRMATION_VERSION = 2;
+const PROVIDER_HUMAN_AUDIT_KEYS = [
+  "decision_useful",
+  "evidence_traceable",
+  "no_fabrication",
+  "workflow_actionable",
+  "no_padding",
+] as const;
+
+function providerQualityBenchmarkPlan(provider: Provider) {
+  const workerModel = provider.light_model || provider.default_model;
+  const reviewerModel = provider.default_model || workerModel;
+  const highestConfiguredRate = Math.max(
+    provider.price_input_per_million || 0,
+    provider.price_output_per_million || 0,
+  );
+  return {
+    confirmation_version: PROVIDER_QUALITY_CONFIRMATION_VERSION,
+    benchmark: {
+      id: PROVIDER_QUALITY_BENCHMARK.id,
+      version: PROVIDER_QUALITY_BENCHMARK.version,
+      title: "AiTeam 产品落地决策简报",
+      output_contract: "全文 2200–3800 个非空白字符；开头结论 70–100 个非空白字符",
+    },
+    provider: { id: provider.id, name: provider.name },
+    models: { worker: workerModel, reviewer: reviewerModel },
+    budget_billable: PROVIDER_QUALITY_BENCHMARK.budgetBillable,
+    review_reserve_billable: PROVIDER_QUALITY_REVIEW_RESERVE_BILLABLE,
+    estimated_cost_ceiling: highestConfiguredRate > 0
+      ? PROVIDER_QUALITY_BENCHMARK.budgetBillable * highestConfiguredRate / 1_000_000
+      : null,
+    price_currency: provider.price_currency || "USD",
+    stages: ["轻量模型生成", "机器契约检查", "强模型独立复核", "必要时按配置自动返工", "人工审计后关单"],
+    warning: "到达计费 token 上限会暂停；单个已发出的模型请求可能造成小幅越界。",
+  };
+}
+
+function providerQualityGate(taskId: string) {
+  const task = getTask(taskId);
+  if (!task || !isProviderQualityBenchmarkTask(task)) return null;
+  const latestDocument = listDocuments()
+    .filter((document) => document.task_id === task.id && document.kind === "report")
+    .sort((a, b) => b.created_at - a.created_at)[0] ?? null;
+  const latestVerdict = listVerdictsForTask(task.id).at(-1) ?? null;
+  const machine = latestDocument
+    ? assessProviderQualityBenchmarkDocument(latestDocument.content)
+    : { pass: false, gaps: ["缺少当前交付文档"] };
+  const reviewerResultPassed = latestVerdict?.result === "pass";
+  const reviewerBoundToCurrentDocument = Boolean(
+    reviewerResultPassed && latestDocument && latestVerdict?.doc_id === latestDocument.id,
+  );
+  let recordedHumanAudit: Record<string, unknown> | null = null;
+  const closeEvents = listTaskEvents(task.id).filter((event) => event.type === "user_close").reverse();
+  for (const event of closeEvents) {
+    try {
+      const metadata = JSON.parse(event.metadata_json || "{}") as { human_audit?: unknown };
+      if (metadata.human_audit && typeof metadata.human_audit === "object") {
+        recordedHumanAudit = metadata.human_audit as Record<string, unknown>;
+        break;
+      }
+    } catch { /* 损坏的历史事件不应让质量门接口失败 */ }
+  }
+  const humanChecksCompleted = recordedHumanAudit
+    ? PROVIDER_HUMAN_AUDIT_KEYS.filter((key) => recordedHumanAudit?.[key] === true).length
+    : 0;
+  const humanNote = typeof recordedHumanAudit?.note === "string" ? recordedHumanAudit.note.trim() : "";
+  const humanCompleted = humanChecksCompleted === PROVIDER_HUMAN_AUDIT_KEYS.length && humanNote.length >= 12;
+  return {
+    task_id: task.id,
+    document: latestDocument
+      ? { id: latestDocument.id, title: latestDocument.title, kind: latestDocument.kind, created_at: latestDocument.created_at }
+      : null,
+    machine: { pass: machine.pass, gaps: machine.gaps },
+    reviewer: {
+      ready: reviewerResultPassed && reviewerBoundToCurrentDocument,
+      result_passed: reviewerResultPassed,
+      bound_to_current_document: reviewerBoundToCurrentDocument,
+      verdict_id: latestVerdict?.id ?? null,
+      document_id: latestVerdict?.doc_id ?? null,
+      result: latestVerdict?.result ?? null,
+      reasons: latestVerdict?.reasons ?? "",
+      source: latestVerdict?.source ?? null,
+    },
+    human: {
+      completed: humanCompleted,
+      checks_completed: humanChecksCompleted,
+      checks_total: PROVIDER_HUMAN_AUDIT_KEYS.length,
+      note: humanNote,
+    },
+    ready_for_human_audit: Boolean(machine.pass && reviewerResultPassed && reviewerBoundToCurrentDocument),
+    complete: Boolean(machine.pass && reviewerResultPassed && reviewerBoundToCurrentDocument && humanCompleted),
+  };
+}
+
+function providerBenchmarkAgentName(prefix: string, providerId: string, providerName: string, model: string, role: string) {
+  const suffix = createHash("sha256").update(`${providerId}\0${model}\0${role}`).digest("hex").slice(0, 8);
+  return `${`${prefix}-${providerName}`.slice(0, 31)}-${suffix}`;
 }
 
 function emitTaskEvent(input: Parameters<typeof createTaskEvent>[0]) {
@@ -370,6 +503,7 @@ api.post("/mcp-servers/:id/task-test", requireAdmin, async (req, res) => {
     }
 
     const finalTask = updateTask(task.id, { status: "review" }) ?? task;
+    invalidateTaskNetworkApprovals(task.id);
     emitTaskEvent({
       task_id: task.id,
       channel_id: task.channel_id,
@@ -514,6 +648,7 @@ api.post("/skills/:id/task-test", requireAdmin, (req, res) => {
     metadata: { skill_id: skill.id, doc_id: doc.id },
   });
   const finalTask = updateTask(task.id, { status: "review" }) ?? task;
+  invalidateTaskNetworkApprovals(task.id);
   emitTaskEvent({
     task_id: task.id,
     channel_id: task.channel_id,
@@ -700,13 +835,39 @@ api.post("/providers/:id/test", requireAdmin, async (req, res) => {
   }
 });
 
+api.get("/providers/:id/task-test/plan", requireAdmin, (req, res) => {
+  const provider = getProvider(req.params.id);
+  if (!provider) return res.status(404).json({ error: "provider not found" });
+  if (!provider.api_key) return res.status(400).json({ error: "provider api key is missing" });
+  if (!(provider.light_model || provider.default_model)) {
+    return res.status(400).json({ error: "provider default model is missing" });
+  }
+  res.json(providerQualityBenchmarkPlan(provider));
+});
+
 api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
   try {
     const provider = getProvider(req.params.id);
     if (!provider) return res.status(404).json({ error: "provider not found" });
     if (!provider.api_key) return res.status(400).json({ error: "provider api key is missing" });
-    const model = provider.default_model || provider.light_model;
-    if (!model) return res.status(400).json({ error: "provider default model is missing" });
+    const workerModel = provider.light_model || provider.default_model;
+    const reviewerModel = provider.default_model || workerModel;
+    if (!workerModel) return res.status(400).json({ error: "provider default model is missing" });
+    const benchmarkPlan = providerQualityBenchmarkPlan(provider);
+    const confirmedBudget = Number(req.body?.confirmed_budget_billable);
+    if (
+      req.body?.confirmation_version !== benchmarkPlan.confirmation_version ||
+      req.body?.confirmed_benchmark_id !== benchmarkPlan.benchmark.id ||
+      req.body?.confirmed_benchmark_version !== benchmarkPlan.benchmark.version ||
+      !Number.isFinite(confirmedBudget) ||
+      confirmedBudget !== benchmarkPlan.budget_billable
+    ) {
+      return res.status(428).json({
+        error: "请先确认本次真实模型质量基准版本与计费 token 上限",
+        code: "PROVIDER_BENCHMARK_BUDGET_CONFIRMATION_REQUIRED",
+        plan: benchmarkPlan,
+      });
+    }
 
     let channel = req.body?.channel_id ? getChannel(String(req.body.channel_id)) : undefined;
     channel = channel ?? listChannels().find((c) => c.kind === "channel");
@@ -715,22 +876,42 @@ api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
       broadcast({ type: "channel:new", payload: channel });
     }
 
-    const agentName = `模型演练-${provider.name}`.slice(0, 40);
-    let agent = listAgents().find((a) => a.provider_id === provider.id && a.name === agentName);
+    const workerRole = "真实交付物基准执行";
+    const agentName = providerBenchmarkAgentName("质量基准v3", provider.id, provider.name, workerModel, workerRole);
+    let agent = listAgents().find((a) =>
+      a.provider_id === provider.id && a.name === agentName && a.model === workerModel && a.role === workerRole,
+    );
     if (!agent) {
       agent = createAgent({
         name: agentName,
         emoji: "🧪",
-        role: "模型供应商任务演练",
+        role: workerRole,
         system_prompt:
-          "你是 AiTeam 的模型供应商任务演练同事。收到任务后必须使用 write_document 写入一份 report 交付物，内容应包含：模型通道、工具调用、验收自查。不要只在聊天里回答。",
+          "你负责完成 AiTeam 的固定质量基准。必须严格按任务简报与七项验收标准写一份可用于真实决策的 report，并使用 write_document 交付；不得只在聊天里回答，不得编造事实或省略逐条自查表。",
         provider_id: provider.id,
-        model,
+        model: workerModel,
       });
     }
 
-    if (!channel.agent_ids?.includes(agent.id)) {
-      channel = setChannelAgents(channel.id, Array.from(new Set([...(channel.agent_ids ?? []), agent.id]))) ?? channel;
+    const reviewerRole = "真实交付物独立复核";
+    const reviewerName = providerBenchmarkAgentName("质量复核v3", provider.id, provider.name, reviewerModel, reviewerRole);
+    let reviewer = listAgents().find((a) =>
+      a.provider_id === provider.id && a.name === reviewerName && a.model === reviewerModel && a.role === reviewerRole,
+    );
+    if (!reviewer) {
+      reviewer = createAgent({
+        name: reviewerName,
+        emoji: "🔎",
+        role: reviewerRole,
+        system_prompt:
+          "你是严格、独立的交付质量复核人。逐条核对任务的七项验收标准；任何缺失、空泛、无证据能力声明或伪造数字都必须 submit_verdict=revise，并给出可执行的逐项返工意见。只有全部标准均有正文证据时才允许 pass。",
+        provider_id: provider.id,
+        model: reviewerModel,
+      });
+    }
+
+    if (!channel.agent_ids?.includes(agent.id) || !channel.agent_ids?.includes(reviewer.id)) {
+      channel = setChannelAgents(channel.id, Array.from(new Set([...(channel.agent_ids ?? []), agent.id, reviewer.id]))) ?? channel;
       broadcast({ type: "channel:update", payload: channel });
     }
     const projectId = req.body?.project_id ? getProject(String(req.body.project_id))?.id ?? null : null;
@@ -738,11 +919,13 @@ api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
     const task = createTask({
       channel_id: channel.id,
       project_id: projectId,
-      title: `模型任务演练：${provider.name}`,
-      description: "验证该模型供应商能否在 AiTeam 任务运行线中完成工具调用、工具结果续写、文档交付和验收。",
-      acceptance_criteria: "必须通过 write_document 写入 report 交付物，并进入待评审；活动日志应包含 tool、delivery、verification。",
+      title: `${PROVIDER_QUALITY_BENCHMARK.title}（${provider.name}）`,
+      description: PROVIDER_QUALITY_BENCHMARK.description,
+      acceptance_criteria: PROVIDER_QUALITY_BENCHMARK.rubric.join("\n"),
       assignee_agent_id: agent.id,
-      reviewer_agent_id: null,
+      reviewer_agent_id: reviewer.id,
+      model_tier: provider.light_model ? "light" : "standard",
+      budget_billable: PROVIDER_QUALITY_BENCHMARK.budgetBillable,
       created_by: "user",
     });
     emitTaskEvent({
@@ -751,8 +934,21 @@ api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
       project_id: task.project_id,
       agent_id: agent.id,
       type: "created",
-      summary: "用户启动模型供应商任务演练",
-      metadata: { provider_id: provider.id, model, link_check: Boolean(projectId) },
+      summary: "用户启动真实模型质量基准",
+      metadata: {
+        provider_id: provider.id,
+        model: workerModel,
+        reviewer_model: reviewerModel,
+        benchmark_id: PROVIDER_QUALITY_BENCHMARK.id,
+        benchmark_version: PROVIDER_QUALITY_BENCHMARK.version,
+        rubric_count: PROVIDER_QUALITY_BENCHMARK.rubric.length,
+        budget_billable: PROVIDER_QUALITY_BENCHMARK.budgetBillable,
+        link_check: Boolean(projectId),
+        spend_confirmation: {
+          version: benchmarkPlan.confirmation_version,
+          confirmed_budget_billable: confirmedBudget,
+        },
+      },
     });
     emitTaskEvent({
       task_id: task.id,
@@ -760,28 +956,28 @@ api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
       project_id: task.project_id,
       agent_id: agent.id,
       type: "claim",
-      summary: `${agent.name} 接手模型供应商任务演练`,
-      metadata: { provider_id: provider.id, model },
+      summary: `${agent.name} 接手真实模型质量基准`,
+      metadata: { provider_id: provider.id, model: workerModel, reviewer_id: reviewer.id, reviewer_model: reviewerModel },
     });
     broadcast({ type: "task:upsert", payload: task });
 
     const startedAt = Date.now();
     onTaskAssigned(task);
-    const { task: finalTask, events, done } = await waitForProviderTask(task.id, 60000);
+    const { task: finalTask, events, done } = await waitForProviderTask(task.id, 180000);
     const docs = listDocuments().filter((d) => d.task_id === task.id);
+    const verdicts = listVerdictsForTask(task.id);
     const eventTypes = new Set(events.map((e) => e.type));
-    const delivered = finalTask?.status === "review" && docs.length > 0;
+    const pendingApproval = finalTask?.blocked_approval_id ? getApproval(finalTask.blocked_approval_id) : undefined;
+    const pendingBudgetApproval = Boolean(
+      finalTask?.status === "blocked" && pendingApproval?.kind === "budget" && pendingApproval.status === "pending",
+    );
+    const delivered = docs.length > 0 && eventTypes.has("delivery");
     const toolObserved = eventTypes.has("tool");
-    const verified = eventTypes.has("verification");
-    const usageRows = usageRecent(40).filter((r) => r.author_id === agent.id && r.model === model && r.created_at >= startedAt);
-    const usageTracked = usageRows.length > 0;
-    const usageSummary = usageRows.reduce((acc, row) => {
-      const usage = readUsage(row.usage_json);
-      acc.input += usage.promptTotal;
-      acc.output += usage.output;
-      acc.billable += usage.billable;
-      return acc;
-    }, { input: 0, output: 0, billable: 0 });
+    const verified = verdicts.length > 0;
+    // 任务累计用量是工作、返工与复核的唯一归因账本；按 agent/model/time 扫消息会把并发基准串账。
+    const taskUsage = readUsage(finalTask?.usage_json ?? task.usage_json);
+    const usageSummary = { input: taskUsage.promptTotal, output: taskUsage.output, billable: taskUsage.billable };
+    const usageTracked = usageSummary.billable > 0;
     const estimatedCost =
       provider.price_input_per_million > 0 || provider.price_output_per_million > 0
         ? (usageSummary.input * provider.price_input_per_million + usageSummary.output * provider.price_output_per_million) / 1_000_000
@@ -792,32 +988,90 @@ api.post("/providers/:id/task-test", requireAdmin, async (req, res) => {
       price_currency: provider.price_currency || "USD",
     };
     const latencyMs = Date.now() - startedAt;
+    const qualityContract = task.acceptance_criteria === PROVIDER_QUALITY_BENCHMARK.rubric.join("\n");
+    const independentReviewer = Boolean(task.reviewer_agent_id && task.reviewer_agent_id !== task.assignee_agent_id);
+    const verdictRecorded = verdicts.length > 0 && verdicts.at(-1)?.result === "pass";
+    const withinBudget = usageSummary.billable <= PROVIDER_QUALITY_BENCHMARK.budgetBillable;
+    const sourceTrace = providerBenchmarkSourceTrace(events, docs, {
+      workerAgentId: agent.id,
+      reviewerAgentId: reviewer.id,
+    });
+    const benchmarkReport = docs.find((doc) => doc.kind === "report");
+    const documentContract = benchmarkReport
+      ? assessProviderQualityBenchmarkDocument(benchmarkReport.content)
+      : { pass: false, gaps: ["没有 report 交付物"] };
     const checks = {
-      completed: done,
+      completed: done && !pendingBudgetApproval,
       delivered,
       tool_observed: toolObserved,
       verified,
       usage_tracked: usageTracked,
+      quality_contract: qualityContract,
+      independent_reviewer: independentReviewer,
+      verdict_recorded: verdictRecorded,
+      within_budget: withinBudget,
+      source_trace_clean: sourceTrace.clean,
+      document_contract: documentContract.pass,
+      pending_approval: pendingBudgetApproval,
     };
-    const ok = delivered && toolObserved && verified && usageTracked;
-    const resultEvent = emitTaskEvent({
+    const ok = providerBenchmarkPassed(checks);
+    const runStatus = providerBenchmarkRunStatus({
+      observerDone: done,
+      passed: ok,
+      pendingApproval: pendingBudgetApproval,
+    });
+    const benchmark = {
+      id: PROVIDER_QUALITY_BENCHMARK.id,
+      version: PROVIDER_QUALITY_BENCHMARK.version,
+      rubric: [...PROVIDER_QUALITY_BENCHMARK.rubric],
+      budget_billable: PROVIDER_QUALITY_BENCHMARK.budgetBillable,
+      worker_model: workerModel,
+      reviewer_model: reviewerModel,
+    };
+    // 观察窗口结束不代表后台任务失败。慢模型仍在 doing 时只返回 running，
+    // 不写 failure 事件，避免 UI、审计和后续恢复把超时误当质量裁决。
+    const resultEvent = runStatus === "running" ? null : emitTaskEvent({
       task_id: task.id,
       channel_id: task.channel_id,
       project_id: task.project_id,
       agent_id: agent.id,
-      type: ok ? "verification" : "failure",
-      summary: ok ? "模型供应商任务演练通过" : "模型供应商任务演练未通过",
-      metadata: { provider_id: provider.id, model, latency_ms: latencyMs, checks, usage_summary: usageSummaryWithCost, provider_task_test: true },
+      type: ok ? "verification" : pendingBudgetApproval ? "blocked" : "failure",
+      summary: ok
+        ? "真实模型质量基准通过"
+        : pendingBudgetApproval
+          ? "真实模型质量基准已产出初稿，等待用户决定是否追加预算完成独立复核"
+          : "真实模型质量基准未通过",
+      metadata: {
+        provider_id: provider.id,
+        model: workerModel,
+        reviewer_model: reviewerModel,
+        latency_ms: latencyMs,
+        checks,
+        usage_summary: usageSummaryWithCost,
+        provider_task_test: true,
+        run_status: runStatus,
+        source_trace: sourceTrace,
+        document_contract: documentContract,
+        quality_benchmark: benchmark,
+        verdict_summary: verdicts.at(-1)
+          ? { result: verdicts.at(-1)?.result, reasons: verdicts.at(-1)?.reasons.slice(0, 1000), attempts: verdicts.length }
+          : null,
+      },
     });
 
     res.json({
       ok,
+      run_status: runStatus,
+      pending_approval_id: pendingBudgetApproval ? pendingApproval?.id ?? null : null,
       provider: sanitizeProvider(provider),
-      model,
+      model: workerModel,
+      models: { worker: workerModel, reviewer: reviewerModel },
+      benchmark,
       latency_ms: latencyMs,
       task: finalTask ?? task,
       docs,
-      events: [...events, resultEvent],
+      verdicts,
+      events: resultEvent ? [...events, resultEvent] : events,
       checks,
       usage_summary: usageSummaryWithCost,
     });
@@ -833,6 +1087,14 @@ api.delete("/providers/:id", requireAdmin, (req, res) => {
 
 api.get("/tasks", (_req, res) => res.json(listTasks()));
 
+api.get("/tasks/:id/quality-gate", (req, res) => {
+  const task = getTask(req.params.id);
+  if (!task) return res.status(404).json({ error: "task not found" });
+  const gate = providerQualityGate(task.id);
+  if (!gate) return res.status(400).json({ error: "task is not a provider quality benchmark" });
+  res.json(gate);
+});
+
 api.get("/tasks/:id/events", (req, res) => {
   const task = getTask(req.params.id);
   if (!task) return res.status(404).json({ error: "task not found" });
@@ -847,9 +1109,32 @@ api.get("/tasks/:id/verdicts", (req, res) => {
 });
 api.get("/quality", (_req, res) => res.json(qualitySummary()));
 
+function missingTaskBriefFields(input: { description: unknown; acceptance_criteria: unknown }): string[] {
+  const missing: string[] = [];
+  if (!String(input.description ?? "").trim()) missing.push("description");
+  if (!String(input.acceptance_criteria ?? "").trim()) missing.push("acceptance_criteria");
+  return missing;
+}
+
 api.post("/tasks", (req, res) => {
   const { title, description, channel_id, assignee_agent_id, reviewer_agent_id, acceptance_criteria, source_doc_ids, budget_billable } = req.body ?? {};
   if (!title) return res.status(400).json({ error: "title required" });
+  const missing = assignee_agent_id
+    ? missingTaskBriefFields({ description, acceptance_criteria })
+    : [];
+  if (missing.length > 0) {
+    return res.status(400).json({
+      error: "task brief incomplete: assigned tasks require context and acceptance criteria before execution",
+      code: "TASK_BRIEF_INCOMPLETE",
+      missing,
+    });
+  }
+  if (assignee_agent_id && reviewer_agent_id && assignee_agent_id === reviewer_agent_id) {
+    return res.status(400).json({
+      error: "task reviewer must be independent from the assignee",
+      code: "TASK_REVIEWER_CONFLICT",
+    });
+  }
   const task = createTask({
     title: String(title),
     description: String(description ?? ""),
@@ -1160,21 +1445,45 @@ api.post("/scenarios/:id/start", (req, res) => {
 });
 
 api.patch("/tasks/:id", (req, res) => {
-  const { title, description, status, assignee_agent_id, reviewer_agent_id } = req.body ?? {};
+  const { title, description, status, assignee_agent_id, reviewer_agent_id, acceptance_criteria, human_audit } = req.body ?? {};
   const prev = getTask(req.params.id);
   if (!prev) return res.status(404).json({ error: "task not found" });
+  const nextAssignee = assignee_agent_id !== undefined ? assignee_agent_id : prev.assignee_agent_id;
+  const briefTouched = assignee_agent_id !== undefined || description !== undefined || acceptance_criteria !== undefined;
+  const missing = nextAssignee && briefTouched
+    ? missingTaskBriefFields({
+        description: description !== undefined ? description : prev.description,
+        acceptance_criteria: acceptance_criteria !== undefined ? acceptance_criteria : prev.acceptance_criteria,
+      })
+    : [];
+  if (missing.length > 0) {
+    return res.status(400).json({
+      error: "task brief incomplete: assigned tasks require context and acceptance criteria before execution",
+      code: "TASK_BRIEF_INCOMPLETE",
+      missing,
+    });
+  }
+  const nextReviewer = reviewer_agent_id !== undefined ? reviewer_agent_id : prev.reviewer_agent_id;
+  const responsibilityTouched = assignee_agent_id !== undefined || reviewer_agent_id !== undefined;
+  if (responsibilityTouched && nextAssignee && nextReviewer && nextAssignee === nextReviewer) {
+    return res.status(400).json({
+      error: "task reviewer must be independent from the assignee",
+      code: "TASK_REVIEWER_CONFLICT",
+    });
+  }
   if (status !== undefined) {
     const nextStatus = String(status);
     const allowed: Record<string, string[]> = {
-      todo: ["todo", "done"],
-      doing: ["todo", "review", "done"],
-      review: ["todo", "done"],
+      todo: ["todo", "cancelled"],
+      doing: ["cancelled"],
+      review: ["done", "cancelled"],
       // blocked→todo 是"审批已处理但未恢复"（如拒绝追加预算后想调整预算重跑）的人工恢复口；
       // 仍有 pending 阻塞审批时下方统一拦截，防止绕过待输入直接重启。
-      blocked: ["todo", "done"],
+      blocked: ["todo", "cancelled"],
       done: ["todo", "review"],
+      cancelled: ["todo"],
     };
-    if (!["todo", "doing", "review", "blocked", "done"].includes(nextStatus)) {
+    if (!["todo", "doing", "review", "blocked", "done", "cancelled"].includes(nextStatus)) {
       return res.status(400).json({ error: `invalid task status: ${nextStatus}` });
     }
     if (nextStatus === "blocked") {
@@ -1183,7 +1492,7 @@ api.patch("/tasks/:id", (req, res) => {
     if (!allowed[prev.status]?.includes(nextStatus)) {
       return res.status(400).json({ error: `invalid task transition: ${prev.status} -> ${nextStatus}` });
     }
-    if (nextStatus === "done" || (nextStatus === "todo" && prev.status === "blocked")) {
+    if (nextStatus === "done" || nextStatus === "cancelled" || (nextStatus === "todo" && prev.status === "blocked")) {
       const pendingApprovals = listApprovals().filter((approval) =>
         approval.status === "pending" &&
         (approval.ref_id === prev.id || approval.id === prev.blocked_approval_id)
@@ -1195,11 +1504,40 @@ api.patch("/tasks/:id", (req, res) => {
         });
       }
     }
+    if (nextStatus === "done" && isProviderQualityBenchmarkTask(prev)) {
+      const gate = providerQualityGate(prev.id);
+      const audit = human_audit && typeof human_audit === "object" ? human_audit as Record<string, unknown> : {};
+      const missingChecks = PROVIDER_HUMAN_AUDIT_KEYS.filter((key) => audit[key] !== true);
+      const note = typeof audit.note === "string" ? audit.note.trim() : "";
+      const auditGaps = [
+        ...(gate?.reviewer.result_passed ? [] : ["缺少独立复核 pass verdict"]),
+        ...(!gate?.document ? ["缺少当前交付文档"] : []),
+        ...(gate?.reviewer.result_passed && !gate.reviewer.bound_to_current_document
+          ? ["独立复核 pass verdict 未绑定当前文档版本"]
+          : []),
+        ...(!gate?.machine.pass ? [`当前文档未通过机器契约：${gate?.machine.gaps.join("；") || "质量门不可用"}`] : []),
+        ...(missingChecks.length > 0 ? [`人工审计未确认：${missingChecks.join("、")}`] : []),
+        ...(note.length < 12 ? ["人工决策说明至少需要 12 个字符"] : []),
+        ...(note.length > 500 ? ["人工决策说明不能超过 500 个字符"] : []),
+      ];
+      if (auditGaps.length > 0) {
+        return res.status(400).json({
+          error: "provider quality benchmark requires completed human audit",
+          code: "BENCHMARK_HUMAN_AUDIT_REQUIRED",
+          gaps: auditGaps,
+        });
+      }
+    }
   }
   const { budget_billable } = req.body ?? {};
+  if (budget_billable !== undefined && (prev.status === "done" || prev.status === "cancelled")) {
+    return res.status(400).json({ error: "terminal task budget is immutable; restore the task before editing budget" });
+  }
+  if (status === "cancelled" && prev.status === "doing") stopTask(prev.id);
   const task = updateTask(req.params.id, {
     ...(title !== undefined ? { title } : {}),
     ...(description !== undefined ? { description } : {}),
+    ...(acceptance_criteria !== undefined ? { acceptance_criteria } : {}),
     ...(status !== undefined ? { status } : {}),
     ...(status === "todo" && prev.status === "blocked" ? { blocked_approval_id: null } : {}),
     ...(assignee_agent_id !== undefined ? { assignee_agent_id } : {}),
@@ -1207,7 +1545,11 @@ api.patch("/tasks/:id", (req, res) => {
     ...(budget_billable !== undefined ? { budget_billable: Number(budget_billable) > 0 ? Math.round(Number(budget_billable)) : 0 } : {}),
   });
   if (!task) return res.status(404).json({ error: "task not found" });
-  if (task.assignee_agent_id !== prev?.assignee_agent_id) {
+  const assigneeChanged = task.assignee_agent_id !== prev.assignee_agent_id;
+  const statusChanged = task.status !== prev.status;
+  const contextRevoked = assigneeChanged || statusChanged;
+  if (contextRevoked) invalidateTaskNetworkApprovals(task.id);
+  if (assigneeChanged) {
     emitTaskEvent({
       task_id: task.id,
       channel_id: task.channel_id,
@@ -1241,6 +1583,16 @@ api.patch("/tasks/:id", (req, res) => {
         type: "blocked",
         summary: "任务进入等待用户输入状态",
       });
+    } else if (task.status === "todo" && prev.status === "blocked") {
+      emitTaskEvent({
+        task_id: task.id,
+        channel_id: task.channel_id,
+        project_id: task.project_id,
+        agent_id: task.assignee_agent_id,
+        type: "handoff",
+        summary: "用户调整后恢复任务并重新尝试",
+        metadata: { previous_approval_id: prev.blocked_approval_id },
+      });
     } else if (task.status === "review") {
       emitTaskEvent({
         task_id: task.id,
@@ -1251,19 +1603,61 @@ api.patch("/tasks/:id", (req, res) => {
         summary: "任务提交到人工评审",
       });
     } else if (task.status === "done") {
+      const closeDocs = listDocuments().filter((document) => document.task_id === task.id);
+      const closeVerdicts = listVerdictsForTask(task.id);
+      const latestVerdict = closeVerdicts.at(-1);
+      const humanOverride = latestVerdict?.result !== "pass";
+      const benchmarkGateAtClose = isProviderQualityBenchmarkTask(task) ? providerQualityGate(task.id) : null;
+      const benchmarkAudit = benchmarkGateAtClose
+        ? {
+            version: 1,
+            decision_useful: human_audit.decision_useful === true,
+            evidence_traceable: human_audit.evidence_traceable === true,
+            no_fabrication: human_audit.no_fabrication === true,
+            workflow_actionable: human_audit.workflow_actionable === true,
+            no_padding: human_audit.no_padding === true,
+            note: String(human_audit.note).trim(),
+            document_id: benchmarkGateAtClose.document?.id ?? null,
+            verdict_id: latestVerdict?.id ?? null,
+            machine_contract_passed: benchmarkGateAtClose.machine.pass,
+          }
+        : null;
       emitTaskEvent({
         task_id: task.id,
         channel_id: task.channel_id,
         project_id: task.project_id,
         agent_id: task.assignee_agent_id,
         type: "user_close",
-        summary: "用户关闭了任务",
+        summary: benchmarkAudit
+          ? "用户完成五项质量确认并关闭真实模型质量基准任务"
+          : humanOverride
+            ? "用户在缺少结构化复核通过裁决时，基于人工判断验收并关闭任务"
+            : "用户验收并关闭了任务",
+        metadata: {
+          document_count: closeDocs.length,
+          verdict_count: closeVerdicts.length,
+          latest_verdict: latestVerdict?.result ?? null,
+          human_override: humanOverride,
+          ...(benchmarkAudit ? { human_audit: benchmarkAudit } : {}),
+        },
+      });
+    } else if (task.status === "cancelled") {
+      emitTaskEvent({
+        task_id: task.id,
+        channel_id: task.channel_id,
+        project_id: task.project_id,
+        agent_id: task.assignee_agent_id,
+        type: "cancelled",
+        summary: "用户取消并归档了任务",
       });
     }
   }
   broadcast({ type: "task:upsert", payload: task });
   // 用户把任务指派给了新的 AI 同事 → 对方自动开工
-  if (task.assignee_agent_id && task.assignee_agent_id !== prev?.assignee_agent_id) onTaskAssigned(task);
+  if (
+    task.assignee_agent_id &&
+    (assigneeChanged || (prev.status === "blocked" && task.status === "todo"))
+  ) onTaskAssigned(task);
   // 人工把任务推进到交付态 → 解锁依赖它的任务 / 触发项目汇总
   const delivered = task.status === "review" || task.status === "done";
   const wasDelivered = prev?.status === "review" || prev?.status === "done";
@@ -1272,7 +1666,9 @@ api.patch("/tasks/:id", (req, res) => {
 });
 
 api.post("/tasks/:id/stop", (req, res) => {
-  stopTask(req.params.id);
+  const task = getTask(req.params.id);
+  if (!task) return res.status(404).json({ error: "task not found" });
+  stopTask(task.id);
   res.json({ ok: true });
 });
 
@@ -1285,6 +1681,7 @@ api.post("/tasks/:id/revise", (req, res) => {
   const revisions = (prev.revision_count ?? 0) + 1;
   const task = updateTask(prev.id, { status: "todo", revision_count: revisions, blocked_approval_id: null });
   if (!task) return res.status(404).json({ error: "task not found" });
+  invalidateTaskNetworkApprovals(task.id);
   // D1：人工退回同样入 verdicts 表——质量度量要能区分"机器验收退回"与"人不满意退回"
   createVerdict({
     task_id: task.id,
@@ -1332,11 +1729,23 @@ api.post("/projects/:id/close", (req, res) => {
   const project = getProject(req.params.id);
   if (!project) return res.status(404).json({ error: "project not found" });
   const projectTasks = listTasks().filter((t) => t.project_id === project.id);
-  const notDelivered = projectTasks.filter((t) => t.status !== "review" && t.status !== "done");
+  const notDelivered = projectTasks.filter(
+    (t) => t.status !== "review" && t.status !== "done" && t.status !== "cancelled",
+  );
   if (notDelivered.length > 0) {
     return res.status(400).json({
       error: "project has unfinished tasks",
       task_ids: notDelivered.map((t) => t.id),
+    });
+  }
+  const benchmarkTasksNeedingAudit = projectTasks.filter(
+    (task) => task.status === "review" && isProviderQualityBenchmarkTask(task),
+  );
+  if (benchmarkTasksNeedingAudit.length > 0) {
+    return res.status(400).json({
+      error: "provider quality benchmark tasks require task-level human audit before project close",
+      code: "BENCHMARK_HUMAN_AUDIT_REQUIRED",
+      task_ids: benchmarkTasksNeedingAudit.map((task) => task.id),
     });
   }
   const projectTaskIds = new Set(projectTasks.map((t) => t.id));
@@ -1351,6 +1760,7 @@ api.post("/projects/:id/close", (req, res) => {
       approval_ids: pendingApprovals.map((a) => a.id),
     });
   }
+  for (const task of projectTasks) invalidateTaskNetworkApprovals(task.id);
   const { project: closedProject, tasks } = closeProject(req.params.id);
   if (!closedProject) return res.status(404).json({ error: "project not found" });
   for (const t of tasks) {
@@ -1655,31 +2065,36 @@ function mergeClarificationResponse(payload: string, response: string): string {
 }
 
 api.post("/approvals/:id/resolve", (req, res) => {
-  const approve = Boolean(req.body?.approve);
+  if (typeof req.body?.approve !== "boolean") {
+    return res.status(400).json({ error: "approve must be boolean" });
+  }
+  const approve = req.body.approve;
   const before = getApproval(req.params.id);
   if (before?.status === "pending" && before.kind === "clarification" && approve) {
     const response = typeof req.body?.response === "string" ? req.body.response : "";
     updateApprovalPayload(before.id, mergeClarificationResponse(before.payload, response));
   }
-  const approval = resolveApproval(req.params.id, approve);
-  if (!approval) return res.status(404).json({ error: "approval not found" });
-  const changed = before?.status === "pending" && approval.status !== "pending";
+  const resolved = resolveApprovalOnce(req.params.id, approve);
+  if (!resolved) return res.status(404).json({ error: "approval not found" });
+  const { approval, changed } = resolved;
+  const wasApproved = approval.status === "approved";
+  if (changed && approval.kind === "network") onNetworkApprovalResolved(approval);
   if (changed) broadcast({ type: "approval:upsert", payload: approval });
   if (changed && approval.channel_id) {
     const agent = getAgent(approval.agent_id);
     const sys = insertMessage({
       channel_id: approval.channel_id,
       author_type: "system",
-      content: `${approve ? "✅ 用户批准了" : "❌ 用户拒绝了"} ${agent?.name ?? "AI"} 的审批请求「${approval.title}」`,
+      content: `${wasApproved ? "✅ 用户批准了" : "❌ 用户拒绝了"} ${agent?.name ?? "AI"} 的审批请求「${approval.title}」`,
     });
     broadcast({ type: "message:new", payload: sys });
     if (approval.kind === "plan" && approval.ref_id) {
-      onPlanResolved(approval.ref_id, approve); // 计划把关：批准开工 / 退回唤起 Lead
-    } else if (approval.kind !== "clarification" && approval.kind !== "budget") {
+      onPlanResolved(approval.ref_id, wasApproved); // 计划把关：批准开工 / 退回唤起 Lead
+    } else if (approval.kind === "action") {
       triggerAgent(approval.agent_id, approval.channel_id);
     }
   }
-  if (changed && approval.kind === "clarification") onClarificationResolved(approval, approve);
-  if (changed && approval.kind === "budget") onBudgetResolved(approval, approve); // 预算追加：批准恢复执行/拒绝保持暂停
+  if (changed && approval.kind === "clarification") onClarificationResolved(approval, wasApproved);
+  if (changed && approval.kind === "budget") onBudgetResolved(approval, wasApproved); // 预算追加：批准恢复执行/拒绝保持暂停
   res.json(approval);
 });

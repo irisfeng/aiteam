@@ -8,8 +8,9 @@ import { TasksBoard } from "./components/TasksBoard";
 import { WorklineView } from "./components/WorklineView";
 import { InboxView } from "./components/InboxView";
 import { ChannelSettingsModal, NewAgentModal, NewChannelModal, SettingsModal, type SettingsTab } from "./components/Modals";
-import { MockBanner, WelcomeOverlay } from "./components/Onboarding";
+import { MockBanner } from "./components/Onboarding";
 import { LoginView } from "./components/LoginView";
+import { FirstRunGuide, clearQueuedFirstRun, readQueuedFirstRun, type FirstRunAudience } from "./components/FirstRunGuide";
 
 const DocsView = lazy(() => import("./components/DocsView").then((m) => ({ default: m.DocsView })));
 const TeamView = lazy(() => import("./components/TeamView").then((m) => ({ default: m.TeamView })));
@@ -22,15 +23,12 @@ function ViewLoading() {
 export default function App() {
   const ws = useWorkspace();
   const [modal, setModal] = useState<"channel" | "agent" | "settings" | null>(null);
-  const [settingsTab, setSettingsTab] = useState<SettingsTab>("providers");
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("account");
+  const [firstRunAudience, setFirstRunAudience] = useState<FirstRunAudience | null>(null);
   const [configChannel, setConfigChannel] = useState<Channel | null>(null);
   const [profileAgent, setProfileAgent] = useState<Agent | null>(null);
   const [deepTaskId, setDeepTaskId] = useState<string | null>(null);
   const [deepApprovalId, setDeepApprovalId] = useState<string | null>(null);
-  const [suppressWelcome, setSuppressWelcome] = useState(() => {
-    const params = new URLSearchParams(window.location.search);
-    return ["channel", "view", "task", "approval"].some((key) => params.has(key));
-  });
 
   useEffect(() => {
     if (!ws.ready) return;
@@ -40,7 +38,6 @@ export default function App() {
     const taskId = params.get("task");
     const approvalId = params.get("approval");
     const hasDeepTarget = Boolean(channelId || view || taskId || approvalId);
-    if (hasDeepTarget) setSuppressWelcome(true);
     if (channelId && ws.channels.some((c) => c.id === channelId)) ws.openChannel(channelId);
     else if (taskId || view === "tasks") ws.setView({ kind: "tasks" });
     else if (approvalId || view === "inbox") ws.setView({ kind: "inbox" });
@@ -50,12 +47,18 @@ export default function App() {
     if (hasDeepTarget) window.history.replaceState(null, "", import.meta.env.BASE_URL);
   }, [ws.ready]);
 
+  useEffect(() => {
+    if (!ws.ready) return;
+    const queued = readQueuedFirstRun();
+    if (queued) setFirstRunAudience(queued);
+  }, [ws.ready, ws.user.id]);
+
   if (ws.authed === false) return <LoginView />;
   if (!ws.ready) {
     return <div className="flex h-full items-center justify-center text-ink-3">加载中…</div>;
   }
 
-  const openSettings = (tab: SettingsTab = "providers") => {
+  const openSettings = (tab: SettingsTab = "account") => {
     setSettingsTab(tab);
     setModal("settings");
   };
@@ -66,22 +69,51 @@ export default function App() {
     setModal(null);
   };
 
-  const openTasks = () => {
-    ws.setView({ kind: "tasks" });
-    setModal(null);
+  const finishFirstRun = () => {
+    clearQueuedFirstRun();
+    setFirstRunAudience(null);
+    ws.setView({ kind: "workline" });
   };
+
+  const replayFirstRun = () => {
+    setModal(null);
+    setFirstRunAudience(ws.user.role === "admin" ? "admin" : "member");
+  };
+
+  if (firstRunAudience) {
+    return (
+      <div className="flex h-full">
+        <FirstRunGuide
+          audience={firstRunAudience}
+          userName={ws.user.name}
+          hasProvider={ws.providers.length > 0}
+          onConnectModel={() => openSettings("providers")}
+          onStart={finishFirstRun}
+          onLater={finishFirstRun}
+        />
+        {modal === "settings" && (
+          <SettingsModal
+            initialTab={settingsTab}
+            onClose={() => setModal(null)}
+            onOpenTask={openTaskFromModal}
+            onReplayOnboarding={replayFirstRun}
+          />
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full">
       <Sidebar
         onNewChannel={() => setModal("channel")}
         onNewAgent={() => setModal("agent")}
-        onSettings={() => openSettings("providers")}
+        onSettings={() => openSettings("account")}
         onConfigChannel={setConfigChannel}
         onOpenProfile={setProfileAgent}
       />
       <main className="flex h-full min-w-0 flex-1 flex-col">
-        <MobileNav onSettings={() => openSettings("providers")} />
+        <MobileNav onSettings={() => openSettings("account")} />
         <MockBanner onSettings={() => openSettings("providers")} />
         <div className="flex min-h-0 flex-1">
           {ws.view.kind === "channel" && <ChannelView channelId={ws.view.id} />}
@@ -119,14 +151,15 @@ export default function App() {
         />
       )}
       {modal === "agent" && <NewAgentModal onClose={() => setModal(null)} />}
-      {modal === "settings" && <SettingsModal initialTab={settingsTab} onClose={() => setModal(null)} onOpenTask={openTaskFromModal} />}
+      {modal === "settings" && (
+        <SettingsModal
+          initialTab={settingsTab}
+          onClose={() => setModal(null)}
+          onOpenTask={openTaskFromModal}
+          onReplayOnboarding={replayFirstRun}
+        />
+      )}
       {profileAgent && <AgentProfileModal agent={profileAgent} onClose={() => setProfileAgent(null)} />}
-      <WelcomeOverlay
-        suppress={suppressWelcome}
-        onSettings={() => openSettings("providers")}
-        onNewChannel={() => setModal("channel")}
-        onOpenTasks={openTasks}
-      />
     </div>
   );
 }

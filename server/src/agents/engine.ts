@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
   Agent,
@@ -17,6 +18,8 @@ import {
   listSkills,
   markRoutineRun,
   createApproval,
+  createBlockingNetworkApproval,
+  consumeApproval,
   createDocument,
   createProject,
   createTask,
@@ -30,6 +33,7 @@ import {
   getProject,
   getSkill,
   getTask,
+  invalidateNetworkApprovalsForTask as invalidateNetworkApprovalsForTaskInDb,
   insertMessage,
   listAgents,
   listApprovals,
@@ -37,6 +41,7 @@ import {
   listDocuments,
   listMessages,
   listTaskEvents,
+  listVerdictsForTask,
   listInFlightTasksAllOwners,
   listRoutinesAllOwners,
   listTasks,
@@ -63,7 +68,7 @@ const TRANSCRIPT_WINDOW = 30;
 /** 每次运行的 MCP 插件调用上限（外部检索按次计费，防烧爆） */
 const MCP_CALLS_PER_RUN = Number(process.env.AITEAM_MCP_CALLS_PER_RUN ?? 5);
 /** 每次运行的图片生成上限（文生图按张计费） */
-const IMAGES_PER_RUN = Number(process.env.AITEAM_IMAGES_PER_RUN ?? 3);
+const IMAGES_PER_RUN = Number(process.env.AITEAM_IMAGES_PER_RUN ?? 2);
 const MAX_WORK_ITERATIONS = 8;
 const MAX_CONCURRENT_WORK = 8;
 
@@ -101,6 +106,8 @@ function splitCsvLine(line: string): string[] {
 export function validateDocContent(kind: "report" | "slides" | "sheet" | "html", content: string): string | null {
   const c = content.trim();
   if (!c) return "正文为空。";
+  const placeholder = unresolvedPlaceholderHint(c);
+  if (placeholder) return placeholder;
   if (kind === "html") {
     // 格式：至少是可渲染的 HTML 片段/文档
     if (!/<(!doctype|html|div|section|svg|style|body|main|article|h[1-6]|p|ul|ol|table|canvas|header|footer|nav)\b/i.test(c))
@@ -128,6 +135,9 @@ export function validateDocContent(kind: "report" | "slides" | "sheet" | "html",
     if (lines.length < 2) return "sheet 需要表头 + 至少一行数据。";
     const headerCols = splitCsvLine(lines[0]).length;
     if (headerCols < 2) return "sheet 表头至少 2 列（标准 CSV，逗号分隔）。";
+    const headers = splitCsvLine(lines[0]).map((value) => value.trim());
+    if (headers.some((value) => !value)) return "sheet 表头存在空列名；每一列都必须有明确名称。";
+    if (new Set(headers).size !== headers.length) return "sheet 表头存在重复列名；请为每一列使用唯一、可理解的名称。";
     for (let i = 1; i < lines.length; i++) {
       const n = splitCsvLine(lines[i]).length;
       if (n !== headerCols)
@@ -136,6 +146,43 @@ export function validateDocContent(kind: "report" | "slides" | "sheet" | "html",
     return null;
   }
   return unsourcedNumbersHint(c); // report：格式无要求，但多处量化数据需有来源（防对外交付物编造数字）
+}
+
+/** 对外交付底线：明显占位符不能进入文档库。"待核实/待确认"是诚实边界，不在此拦截。 */
+function unresolvedPlaceholderHint(content: string): string | null {
+  const match = content.match(/(?:\bTODO\b|\bTBD\b|lorem\s+ipsum|\[(?:待补充|占位|此处插入[^\]]*)\]|<placeholder>)/i);
+  if (!match) return null;
+  return `检测到未清理的占位内容“${match[0]}”。请补齐真实内容或明确写成“待确认项 + 负责人 + 截止条件”，不要把模板残留作为正式交付。`;
+}
+
+export function deliverableQualityRubric(kind: string): string[] {
+  const common = [
+    "结论、建议和下一步必须可直接用于目标读者的真实场景，不得以模板话术或自我表扬代替内容",
+    "关键事实、数字和外部主张须有可追溯来源；无法核实的内容要明确标为假设或待确认",
+    "不得残留 TODO、TBD、占位文案、空章节或与任务无关的示例内容",
+  ];
+  const byKind: Record<string, string[]> = {
+    report: [
+      "报告/方案：开头给目标读者、使用场景与执行摘要；正文结构支持快速决策，结尾给责任人、风险和下一步",
+      "Word/PDF 导出后也应成立：标题层级、表格、列表和长段落清晰，不依赖聊天上下文才能理解",
+    ],
+    slides: [
+      "PPT：形成完整叙事而非报告切片；每页只有一个核心观点，标题表达结论，信息层级与留白可支撑现场讲述",
+      "数字、表格、图示、配图与讲者备注按内容需要使用；不得用装饰图掩盖空洞内容，并核对真实渲染页数与元素",
+    ],
+    sheet: [
+      "Excel/数据表：列名唯一且含义清楚，单位、统计口径、时间范围、来源和缺失值处理可理解",
+      "计算、排序与汇总应可复核；面向决策时给关键指标或配套结论，不把未经解释的原始表当成完成品",
+    ],
+    html: [
+      "设计页面：视觉方向与 brief 一致，信息层级、字体、色彩、间距和组件状态形成统一系统，不使用默认模板感或无意义装饰",
+      "在目标尺寸下无溢出、遮挡、低对比或不可读内容；关键操作与内容在脚本受限预览中仍可理解",
+    ],
+    template: [
+      "品牌模板：替换内容不得破坏原有母版、版式、配色与层级；所有文本槽位需检查溢出和错位",
+    ],
+  };
+  return [...common, ...(byKind[kind] ?? ["格式、结构和表达须符合该交付物的真实使用方式，并能独立打开和评审"])];
 }
 
 /**
@@ -476,6 +523,16 @@ interface RuntimeOpts {
   tier?: "light" | "standard";
 }
 
+export function preferredStrongProviderId(
+  agentProviderId: string | null | undefined,
+  providers: Array<{ id: string; api_key: string; is_strong: number | boolean }>,
+) {
+  const boundStrong = agentProviderId
+    ? providers.find((provider) => provider.id === agentProviderId && provider.api_key && provider.is_strong)
+    : undefined;
+  return boundStrong?.id ?? providers.find((provider) => provider.api_key && provider.is_strong)?.id ?? null;
+}
+
 /**
  * 模型分级路由（choose model wisely）：
  * - preferStrong：验收/汇总是质量闭环的下限，官方通道可用时强制最强模型
@@ -499,7 +556,11 @@ function resolveRuntime(agent: Agent, opts: RuntimeOpts = {}): Runtime {
       };
     }
     // 无官方 key：用户标记了「强通道」的供应商承担验收/汇总（用其 default_model 全力档）
-    const strong = listProviders().find((p) => p.api_key && p.is_strong);
+    // 显式复核者的供应商若也被标为强通道，必须尊重其模型绑定；否则多个强通道并存时，
+    // listProviders 的插入顺序会把 SiliconFlow GLM 复核悄悄路由到更早创建的 DeepSeek。
+    const providers = listProviders();
+    const strongId = preferredStrongProviderId(agent.provider_id, providers);
+    const strong = strongId ? providers.find((provider) => provider.id === strongId) : undefined;
     if (strong) return fromProvider(strong, strong.default_model || agent.model);
   }
   if (agent.provider_id) {
@@ -535,7 +596,7 @@ interface RunCtx {
   taskId: string | null;
   createdDocIds: string[];
   verdict: { result: "pass" | "revise"; reasons: string } | null;
-  halted: "blocked" | null;
+  halted: "blocked" | "stopped" | null;
 }
 
 function newCtx(agent: Agent, channel: Channel, kind: RunCtx["kind"], taskId: string | null = null): RunCtx {
@@ -614,6 +675,7 @@ async function runChat(agent: Agent, channel: Channel, depth: number, extraSyste
 
 const runningTasks = new Set<string>();
 const agentQueues = new Map<string, Promise<void>>();
+const resumeAfterRun = new Set<string>();
 const currentWork = new Map<string, string>(); // agentId -> 正在执行的 taskId
 const queuedCount = new Map<string, number>(); // agentId -> 排队中的任务数
 const cancelledTasks = new Set<string>(); // 用户按下停止开关的任务
@@ -634,6 +696,23 @@ function registerStream(channelId: string, stream: { abort(): void }): () => voi
 /** 停止开关（kill switch）：运行中的任务在下一个迭代边界停下；排队中的任务直接不再开工。 */
 export function stopTask(taskId: string) {
   cancelledTasks.add(taskId);
+  invalidateTaskNetworkApprovals(taskId);
+}
+
+/**
+ * 关闭任务上下文绑定的 network 审批并把最终状态推送给前端。
+ * DB 更新是单语句原子操作；广播只负责让当前连接立即收敛到数据库真相。
+ */
+export function invalidateTaskNetworkApprovals(taskId: string): number {
+  const changed = invalidateNetworkApprovalsForTaskInDb(taskId);
+  if (changed > 0) {
+    for (const approval of listApprovals()) {
+      if (approval.kind === "network" && approval.ref_id === taskId) {
+        broadcast({ type: "approval:upsert", payload: approval });
+      }
+    }
+  }
+  return changed;
 }
 
 /**
@@ -684,16 +763,218 @@ export function mcpRequiresApprovalForTask(task: Pick<Task, "source_doc_ids"> | 
   return Boolean(task && taskHasSourceDocs(task));
 }
 
-/** 任务级网络外发授权：本任务下已有用户批准的 action 审批 → 二级审批门放行（授权范围限本任务）。 */
-export function taskHasApprovedNetworkGrant(taskId: string | null | undefined): boolean {
-  if (!taskId) return false;
-  return listApprovals().some((a) => a.ref_id === taskId && a.status === "approved" && a.kind === "action");
+function canonicalJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .filter(([, child]) => child !== undefined)
+        .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+        .map(([key, child]) => [key, canonicalJson(child)]),
+    );
+  }
+  return value;
+}
+
+interface NetworkGrantV1 {
+  v: 1;
+  server_id: string;
+  server_name: string;
+  server_target: string;
+  server_fingerprint: string;
+  tool: string;
+  input: unknown;
+  call_fingerprint: string;
+}
+
+function sha256(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(canonicalJson(value))).digest("hex");
+}
+
+function networkServerFingerprint(server: NonNullable<ReturnType<typeof mcpServerForTool>>): string {
+  return sha256({
+    id: server.id,
+    name: server.name,
+    kind: server.kind,
+    url: server.url,
+    auth_token: server.auth_token,
+    command: server.command,
+    args_json: server.args_json,
+    env_json: server.env_json,
+    safety: server.safety,
+  });
+}
+
+function createNetworkGrant(toolName: string, input: unknown): NetworkGrantV1 | null {
+  const server = mcpServerForTool(toolName);
+  if (!server || server.safety !== "network") return null;
+  const normalizedInput = canonicalJson(input);
+  const serverFingerprint = networkServerFingerprint(server);
+  return {
+    v: 1,
+    server_id: server.id,
+    server_name: server.name,
+    server_target: server.kind === "http" ? server.url : `stdio:${server.command}`,
+    server_fingerprint: serverFingerprint,
+    tool: toolName,
+    input: normalizedInput,
+    call_fingerprint: sha256({
+      server_fingerprint: serverFingerprint,
+      tool: toolName,
+      input: normalizedInput,
+    }),
+  };
+}
+
+function approvalContainsNetworkGrant(approval: Approval): boolean {
+  if (approval.kind !== "network") return false;
+  try {
+    const payload = JSON.parse(approval.payload || "{}") as { network_grant?: unknown };
+    return Boolean(payload.network_grant && typeof payload.network_grant === "object");
+  } catch {
+    return false;
+  }
+}
+
+function networkGrantFromApproval(approval: Approval, requireApproved = true): NetworkGrantV1 | null {
+  if (
+    approval.kind !== "network" ||
+    (requireApproved && approval.status !== "approved") ||
+    approval.consumed_at
+  ) return null;
+  try {
+    const payload = JSON.parse(approval.payload || "{}") as {
+      network_grant?: Partial<NetworkGrantV1>;
+    };
+    const grant = payload.network_grant;
+    if (
+      grant?.v !== 1 ||
+      typeof grant.server_id !== "string" ||
+      typeof grant.server_name !== "string" ||
+      typeof grant.server_target !== "string" ||
+      typeof grant.server_fingerprint !== "string" ||
+      typeof grant.tool !== "string" ||
+      typeof grant.call_fingerprint !== "string"
+    ) return null;
+    const current = createNetworkGrant(grant.tool, grant.input);
+    if (
+      !current ||
+      current.server_id !== grant.server_id ||
+      current.server_name !== grant.server_name ||
+      current.server_target !== grant.server_target ||
+      current.server_fingerprint !== grant.server_fingerprint ||
+      current.call_fingerprint !== grant.call_fingerprint
+    ) return null;
+    return current;
+  } catch {
+    return null;
+  }
+}
+
+function matchingApprovedNetworkGrant(
+  taskId: string | null | undefined,
+  toolName: string,
+  input: unknown,
+  agentId?: string,
+): Approval | null {
+  if (!taskId || !isMcpTool(toolName)) return null;
+  const expected = createNetworkGrant(toolName, input);
+  if (!expected) return null;
+  for (const approval of listApprovals()) {
+    if (approval.ref_id !== taskId || (agentId && approval.agent_id !== agentId)) continue;
+    const grant = networkGrantFromApproval(approval);
+    if (
+      !grant ||
+      grant.server_id !== expected.server_id ||
+      grant.tool !== expected.tool ||
+      grant.call_fingerprint !== expected.call_fingerprint
+    ) continue;
+    return approval;
+  }
+  return null;
+}
+
+/**
+ * 任务级网络外发授权必须绑定具体 MCP 工具和完整参数。
+ * 任意 action 批准、不同工具或不同查询都不能复用成网络外发通行证。
+ */
+export function taskHasApprovedNetworkGrant(
+  taskId: string | null | undefined,
+  toolName: string,
+  input: unknown,
+  agentId?: string,
+): boolean {
+  return Boolean(matchingApprovedNetworkGrant(taskId, toolName, input, agentId));
+}
+
+function taskExecutionIsCurrent(taskId: string, agentId: string): boolean {
+  if (cancelledTasks.has(taskId)) return false;
+  const task = getTask(taskId);
+  return Boolean(
+    task &&
+    task.status === "doing" &&
+    task.assignee_agent_id === agentId &&
+    task.blocked_approval_id === null
+  );
+}
+
+/** 在真正网络外呼前同步消费一次性授权；失败调用也必须重新审批。 */
+export function consumeApprovedNetworkGrant(
+  taskId: string | null | undefined,
+  toolName: string,
+  input: unknown,
+  agentId?: string,
+): boolean {
+  if (!taskId || !agentId || !taskExecutionIsCurrent(taskId, agentId)) return false;
+  const match = matchingApprovedNetworkGrant(taskId, toolName, input, agentId);
+  if (!match) return false;
+  return consumeApproval(match.id);
+}
+
+/** 由实际被拦截的 network MCP 调用生成审批范围，并暂停任务等待用户决定。 */
+export function requestNetworkApprovalForTask(
+  agent: Agent,
+  task: Task,
+  toolName: string,
+  input: unknown,
+  title: string,
+  details: string,
+): { approvalId: string; task: Task } | null {
+  const grant = createNetworkGrant(toolName, input);
+  if (!grant) throw new Error("network approval requires an enabled safety=network MCP tool");
+  if (cancelledTasks.has(task.id)) return null;
+  const created = createBlockingNetworkApproval({
+    task_id: task.id,
+    agent_id: agent.id,
+    title: title.slice(0, 200),
+    payload: JSON.stringify({ details, network_grant: grant }, null, 2),
+  });
+  if (!created) return null;
+  const { approval, task: next } = created;
+  broadcast({ type: "approval:upsert", payload: approval });
+  broadcast({ type: "task:upsert", payload: next });
+  emitTaskEvent(
+    next,
+    "blocked",
+    `${agent.name} 请求批准一次网络外发调用`,
+    { approval_id: approval.id, tool: toolName, call_fingerprint: grant.call_fingerprint },
+    agent.id,
+  );
+  emitTaskEvent(
+    next,
+    "approval",
+    `已创建单次 network MCP 审批「${approval.title}」`,
+    { approval_id: approval.id, tool: toolName, call_fingerprint: grant.call_fingerprint },
+    agent.id,
+  );
+  if (next.channel_id) audit(next.channel_id, `⏸️ 任务「${next.title}」暂停，等待批准网络调用 ${toolName}`);
+  return { approvalId: approval.id, task: next };
 }
 
 /** 任务被指派（或创建时即带负责人）后调用。依赖未满足的任务会等依赖交付后自动开工。 */
 export function onTaskAssigned(task: Task) {
   if (!task.assignee_agent_id) return;
-  if (task.status === "review" || task.status === "done" || task.status === "blocked") return;
+  if (task.status === "review" || task.status === "done" || task.status === "blocked" || task.status === "cancelled") return;
   if (runningTasks.has(task.id)) return;
   if (!depsSatisfied(task)) return; // 依赖交付时由 onTaskDelivered 解锁
   const agent = getAgent(task.assignee_agent_id);
@@ -730,10 +1011,31 @@ export function onTaskAssigned(task: Task) {
         audit(t.channel_id, `⚠️ ${agent.name} 处理任务「${task.title}」失败：${err?.message ?? err}。任务已退回待办，重新指派负责人即可重试。`);
     }))
     .finally(() => {
+      const stoppedBeforeResume = cancelledTasks.delete(task.id);
+      const shouldResume = resumeAfterRun.delete(task.id);
       runningTasks.delete(task.id);
       if (currentWork.get(agent.id) === task.id) currentWork.delete(agent.id);
+      if (!stoppedBeforeResume && shouldResume) {
+        void withOwner(ownerId, () => {
+          const latest = getTask(task.id);
+          if (latest?.status === "todo" && latest.blocked_approval_id === null) onTaskAssigned(latest);
+        });
+      }
     });
   agentQueues.set(agent.id, next);
+}
+
+/**
+ * 审批恢复可能发生在原任务 runTaskWork 刚写入 blocked、但 finally 尚未清掉 runningTasks 的窗口。
+ * 直接调用 onTaskAssigned 会被去重后永久丢失，因此必须等当前队列收尾后再按最新任务状态重试。
+ */
+function resumeAssignedTask(task: Task) {
+  if (!task.assignee_agent_id) return;
+  if (runningTasks.has(task.id)) {
+    resumeAfterRun.add(task.id);
+    return;
+  }
+  onTaskAssigned(task);
 }
 
 /** 团队视图：每位 AI 同事的实时工作状态与今日产出。 */
@@ -769,6 +1071,8 @@ export function recoverInFlightTasks() {
 
 /** 任务交付（review/done）后调用：解锁依赖它的任务，并检查项目是否可汇总。 */
 export function onTaskDelivered(task: Task) {
+  // delivery/review 已结束本次执行尝试；未使用的单次网络授权不能带入返工或重新打开后的下一次运行。
+  invalidateTaskNetworkApprovals(task.id);
   for (const t of listTasks()) {
     if (t.status !== "todo" || !t.assignee_agent_id) continue;
     if (!taskDependsOn(t).includes(task.id)) continue;
@@ -781,7 +1085,11 @@ export function onTaskDelivered(task: Task) {
 }
 
 function setTaskStatus(taskId: string, statusValue: Task["status"]): Task | undefined {
+  const previous = getTask(taskId);
   const t = updateTask(taskId, { status: statusValue });
+  if (t && previous?.status === "doing" && statusValue !== "doing") {
+    invalidateTaskNetworkApprovals(taskId);
+  }
   if (t) broadcast({ type: "task:upsert", payload: t });
   return t;
 }
@@ -800,10 +1108,455 @@ function emitTaskEvent(task: Task, type: Parameters<typeof createTaskEvent>[0]["
   return event;
 }
 
+/** 消费一次任务停止标记并统一收尾；返回 true 表示当前 worker 必须立即退出。 */
+function finishStoppedTask(task: Task, channel: Channel, agent: Agent): boolean {
+  if (!cancelledTasks.delete(task.id)) return false;
+  // stop 必须压过审批/输入落定触发的延迟恢复；否则这里消费 stop 后，
+  // finally 仍可能看到 resumeAfterRun 并把刚退回待办的任务重新启动。
+  resumeAfterRun.delete(task.id);
+  const latest = getTask(task.id);
+  if (latest?.status === "cancelled") {
+    audit(channel.id, `⏹ 任务「${task.title}」已取消并归档`);
+    return true;
+  }
+  const todo = setTaskStatus(task.id, "todo") ?? latest ?? task;
+  emitTaskEvent(todo, "handoff", "用户停止了运行，任务退回待办", undefined, agent.id);
+  audit(channel.id, `⏹ 任务「${task.title}」已被用户停止，退回待办`);
+  return true;
+}
+
+/**
+ * 模型 await 返回后重新核验执行权。无工具最终响应期间也可能发生取消、关单或改派，
+ * 旧 worker 只能在任务仍 doing 且负责人未变时继续验收/交付。
+ */
+function finishRevokedTaskExecution(task: Task, channel: Channel, agent: Agent): boolean {
+  const latest = getTask(task.id);
+  if (latest?.status === "doing" && latest.assignee_agent_id === agent.id) return false;
+  if (latest?.status === "doing" && latest.assignee_agent_id !== agent.id) {
+    const reassigned = setTaskStatus(task.id, "todo") ?? latest;
+    emitTaskEvent(
+      reassigned,
+      "handoff",
+      "任务负责人已变化，旧运行停止并交给新负责人",
+      undefined,
+      agent.id,
+    );
+    if (reassigned.assignee_agent_id) resumeAssignedTask(reassigned);
+  }
+  return true;
+}
+
+const PROVIDER_QUALITY_BENCHMARK_PREFIX = "真实模型质量基准：AiTeam 产品落地决策简报";
+export const PROVIDER_QUALITY_REVIEW_RESERVE_BILLABLE = Math.max(
+  1_000,
+  Math.round(Number(process.env.AITEAM_PROVIDER_BENCHMARK_REVIEW_RESERVE) || 6_000),
+);
+const configuredProviderQualityMaxRevisions = process.env.AITEAM_PROVIDER_BENCHMARK_MAX_REVISIONS;
+const parsedProviderQualityMaxRevisions = Number(configuredProviderQualityMaxRevisions);
+const PROVIDER_QUALITY_MAX_REVISIONS = Math.max(
+  0,
+  Math.round(configuredProviderQualityMaxRevisions === undefined
+    ? MAX_REVISIONS
+    : Number.isFinite(parsedProviderQualityMaxRevisions)
+      ? parsedProviderQualityMaxRevisions
+      : MAX_REVISIONS),
+);
+
+export function isProviderQualityBenchmarkTask(task: Task): boolean {
+  return task.title.startsWith(PROVIDER_QUALITY_BENCHMARK_PREFIX);
+}
+
+export type ProviderQualityDocumentAssessment = { pass: boolean; gaps: string[] };
+
+const BENCHMARK_SCHEMA_FIELDS: Record<string, ReadonlySet<string>> = {
+  tasks: new Set([
+    "id", "owner_id", "channel_id", "title", "description", "status", "assignee_agent_id", "reviewer_agent_id",
+    "blocked_approval_id", "created_by", "acceptance_criteria", "depends_on", "model_tier", "source_doc_ids",
+    "project_id", "revision_count", "usage_json", "budget_billable", "estimate_billable", "created_at", "updated_at",
+  ]),
+  task_events: new Set(["id", "owner_id", "task_id", "channel_id", "project_id", "agent_id", "type", "summary", "metadata_json", "created_at"]),
+  documents: new Set(["id", "owner_id", "channel_id", "task_id", "agent_id", "title", "content", "kind", "version", "superseded_by", "binary_format", "original_blob_path", "template_meta", "created_at", "updated_at"]),
+  approvals: new Set(["id", "owner_id", "channel_id", "agent_id", "title", "payload", "status", "kind", "ref_id", "resolved_at", "consumed_at", "created_at"]),
+  verdicts: new Set(["id", "owner_id", "task_id", "project_id", "doc_id", "verifier_agent_id", "worker_agent_id", "attempt", "result", "reasons", "source", "created_at"]),
+  providers: new Set(["id", "name", "base_url", "api_key", "default_model", "light_model", "max_tokens", "is_official", "web_tools", "is_strong", "price_input_per_million", "price_output_per_million", "price_currency", "created_at"]),
+  users: new Set(["id", "email", "password_hash", "display_name", "role", "created_at"]),
+  app_settings: new Set(["key", "value"]),
+};
+const BENCHMARK_TASK_EVENT_TYPES = new Set([
+  "created", "claim", "start", "tool", "blocked", "handoff", "delivery", "verification", "approval", "user_close", "cancelled", "failure",
+]);
+const BENCHMARK_TASK_STATUSES = new Set(["todo", "doing", "review", "blocked", "done", "cancelled"]);
+
+function unsupportedImplementationClaims(text: string): string[] {
+  const found = new Set<string>();
+  for (const match of text.matchAll(/\b([a-z][a-z0-9_]*)\.([a-z][a-z0-9_]*)\b/gi)) {
+    const table = match[1].toLowerCase();
+    const field = match[2].toLowerCase();
+    if (BENCHMARK_SCHEMA_FIELDS[table] && !BENCHMARK_SCHEMA_FIELDS[table].has(field)) found.add(`${table}.${field}`);
+  }
+  for (const match of text.matchAll(/(?:数据库|sqlite|sql|存入|写入|保存(?:在|至)?|落入|查询|新增|创建)[^。\n|]{0,40}\b([a-z][a-z0-9_]*)\b\s*(?:数据)?表/gi)) {
+    const table = match[1].toLowerCase();
+    if (!BENCHMARK_SCHEMA_FIELDS[table]) found.add(`${table} 表`);
+  }
+  for (const match of text.matchAll(/`?([a-z][a-z0-9_]*)`?\s*事件/gi)) {
+    const eventType = match[1].toLowerCase();
+    if (eventType !== "task_events" && !BENCHMARK_TASK_EVENT_TYPES.has(eventType)) found.add(`${eventType} 事件`);
+  }
+  if (/(?:`?verification`?\s*事件)[^。\n|]{0,80}\bverdict\b|\bverdict\b[^。\n|]{0,80}(?:`?verification`?\s*事件)/i.test(text)) {
+    found.add("verification.verdict");
+  }
+  if (/(?:`?created`?\s*事件)[^。\n|]{0,80}(?:包含|含有)[^。\n|]{0,50}`?(?:goal|brief)`?/i.test(text)) {
+    found.add("created.goal/brief");
+  }
+  if (/(?:`?tool`?\s*事件)[^。\n|]{0,80}(?:非空)?数组/i.test(text)) found.add("tool 事件数组");
+  for (const context of text.matchAll(/(?:event\.type\s*字段判断|任务生命周期事件)[^。\n|]{0,220}/gi)) {
+    for (const identifier of context[0].matchAll(/`?\b([a-z][a-z0-9_]*)\b`?/gi)) {
+      const value = identifier[1].toLowerCase();
+      if (["event", "type", "task_events"].includes(value)) continue;
+      if (!BENCHMARK_TASK_EVENT_TYPES.has(value)) found.add(`${value} 事件`);
+    }
+  }
+  for (const match of text.matchAll(/\bstatus\s*=\s*([a-z][a-z0-9_]*)\b/gi)) {
+    const status = match[1].toLowerCase();
+    if (!BENCHMARK_TASK_STATUSES.has(status)) found.add(`status=${status}`);
+  }
+  for (const identifier of ["brief_generated", "final_close", "task_owner", "vendor_configs"]) {
+    if (new RegExp(`\\b${identifier}\\b`, "i").test(text)) found.add(identifier);
+  }
+  return [...found].slice(0, 8);
+}
+
+function providerQualityBenchmarkImplementationFacts(): string[] {
+  return [
+    "任务目标、简报和验收信息来自 tasks 的 title、description、acceptance_criteria；created 只是事件类型，禁止声称 created 事件含 goal/brief 字段。",
+    "返工没有 revise 事件类型；返工证据是新文档版本、verification 事件、tasks.revision_count 和 verdicts 裁决。",
+    "独立裁决保存在 verdicts 表；verification 事件本身没有 verdict 字段。",
+    "每次工具调用是一条 type=tool 的 task_events 记录，不是 tool 事件数组。",
+    `本固定基准当前最多自动返工 ${PROVIDER_QUALITY_MAX_REVISIONS} 次；其他次数、时限、人数、比例和停止条件只能标为建议阈值，不能写成已实现系统规则。`,
+  ];
+}
+
+function markdownSection(text: string, titlePattern: RegExp): string {
+  const lines = text.split("\n");
+  for (let index = 0; index < lines.length; index++) {
+    const heading = lines[index].match(/^(#{1,6})\s+(.+?)\s*$/);
+    if (!heading) continue;
+    const title = heading[2].replace(
+      /^(?:(?:第\s*)?[一二三四五六七八九十百]+(?:\s*章)?[、.．):：]?|\d+(?:\.\d+)*[.、)]?)\s*/,
+      "",
+    );
+    if (!titlePattern.test(title)) continue;
+    const level = heading[1].length;
+    let end = lines.length;
+    for (let cursor = index + 1; cursor < lines.length; cursor++) {
+      const next = lines[cursor].match(/^(#{1,6})\s+/);
+      if (next && next[1].length <= level) {
+        end = cursor;
+        break;
+      }
+    }
+    return lines.slice(index + 1, end).join("\n").trim();
+  }
+  return "";
+}
+
+/**
+ * 固定质量基准的确定性下限。它不替代独立模型复核，只先拦截“篇幅像报告、证据仍为空”的交付，
+ * 避免为明显缺项的文档消耗强模型额度。规则只覆盖七项 rubric 中可机器核验的结构与声明边界。
+ */
+export function assessProviderQualityBenchmarkDocument(content: string): ProviderQualityDocumentAssessment {
+  const text = content.replace(/\r/g, "").trim();
+  const gaps: string[] = [];
+  const nonWhitespaceLength = Array.from(text.replace(/\s+/g, "")).length;
+  if (nonWhitespaceLength < 2_200 || nonWhitespaceLength > 3_800) {
+    gaps.push(`全文必须控制在 2200–3800 个非空白字符（含 Markdown 标记），当前 ${nonWhitespaceLength}`);
+  }
+
+  const conclusion = markdownSection(text, /^(?:结论|推荐决策|核心决策)/i)
+    ?.replace(/\|[^\n]*/g, "")
+    .replace(/[`*_#>-]/g, "")
+    .replace(/\s+/g, "") ?? "";
+  if (!conclusion) gaps.push("缺少结论/推荐决策章节及明确正文");
+  else if (Array.from(conclusion).length < 70 || Array.from(conclusion).length > 100) {
+    gaps.push(`开头结论必须为 70–100 个非空白字符，当前 ${Array.from(conclusion).length}`);
+  }
+
+  for (const label of ["目标用户", "核心待办", "产品边界"]) {
+    if (!text.includes(label)) gaps.push(`缺少“${label}”的明确说明`);
+  }
+
+  const workflowSection = markdownSection(text, /工作流.*证据|核心工作流/);
+  const workflowSteps = ["goal", "brief", "claim", "work", "review", "revise", "human close"];
+  const missingSteps = workflowSteps.filter((step) =>
+    !new RegExp(`^\\|\\s*${step.replace(" ", "\\s+")}\\s*\\|`, "im").test(workflowSection),
+  );
+  if (missingSteps.length > 0) gaps.push(`七步工作流表缺少独立行：${missingSteps.join("、")}`);
+  if (!workflowSection || !/(?:责任人|负责人)/.test(workflowSection) || !/(?:可验证证据|证据)/.test(workflowSection)) {
+    gaps.push("七步工作流必须用表格同时标明责任人和可验证证据");
+  }
+
+  const planSection = markdownSection(text, /(?:14\s*天.*计划|计划.*14\s*天)/i);
+  if (!planSection) gaps.push("缺少 14 天落地计划");
+  for (const label of ["优先级", "负责人", "退出条件", "建议阈值"]) {
+    if (!planSection.includes(label)) gaps.push(`14 天计划缺少“${label}”`);
+  }
+  const planRows = planSection.split("\n").filter((line) => {
+    const trimmed = line.trim();
+    return trimmed.startsWith("|") &&
+      !/^\|?\s*:?-{3}/.test(trimmed) &&
+      !/(?:优先级).*(?:阶段目标)/.test(trimmed);
+  });
+  if (planSection && planRows.length < 3) {
+    gaps.push("14 天计划至少需要 3 个按优先级/时间拆分的执行阶段");
+  }
+
+  const riskSection = markdownSection(text, /风险/);
+  const riskRows = riskSection.split("\n").filter((line) => {
+    const trimmed = line.trim();
+    return trimmed.startsWith("|") && !/^-?\|?\s*:?-{3}/.test(trimmed) && !/(?:风险).*(?:缓解动作)/.test(trimmed);
+  });
+  const nestedRisks = [...riskSection.matchAll(/^#{2,6}\s*(?:风险|依赖)\s*\d+/gmi)].length;
+  const riskCount = nestedRisks > 0 ? nestedRisks : riskRows.length;
+  if (!riskSection || riskCount < 3 || !riskSection.includes("缓解动作") || !riskSection.includes("停止条件")) {
+    gaps.push("关键风险不足 3 项，或缺少逐项缓解动作/停止条件");
+  }
+
+  const sourceSection = markdownSection(text, /^(?:来源与假设|来源和假设)/);
+  if (!sourceSection) gaps.push("缺少“来源与假设”章节");
+  if (!sourceSection.split("\n").some((line) => line.trim() === "本次未使用外部资料。")) {
+    gaps.push("“来源与假设”必须用独立一行逐字声明：本次未使用外部资料。");
+  }
+  if (!/(?:任务简报|运行事件)/.test(text)) gaps.push("未说明内部事实来自任务简报或运行事件");
+  const unqualifiedExternalClaim = text.split(/[。！？\n]/).find((sentence) =>
+    /(?:数据显示|调研表明|市场规模|客户反馈(?:显示|表明)|根据[^，。]{0,30}报告)/.test(sentence) &&
+    !/(?:https?:\/\/|假设|待验证|待核实|建议阈值|不得虚构)/.test(sentence),
+  );
+  if (unqualifiedExternalClaim) gaps.push("存在未给 URL、也未标为假设/待验证的外部事实声明");
+
+  const unsupportedClaims = unsupportedImplementationClaims(text);
+  if (unsupportedClaims.length > 0) {
+    gaps.push(`存在与当前实现不符或任务未提供的精确字段/事件/状态声明：${unsupportedClaims.join("、")}`);
+  }
+
+  const substantiveLines = text.split("\n")
+    .map((line) => line.replace(/^#{1,6}\s*/, "").trim())
+    .filter((line) => line.length >= 80 && !line.startsWith("|"));
+  const normalizedLineCounts = new Map<string, number>();
+  for (const line of substantiveLines) {
+    const normalized = line.replace(/[\s，。；：、！？,.!?:;（）()“”"'`*_#>-]/g, "").toLowerCase();
+    normalizedLineCounts.set(normalized, (normalizedLineCounts.get(normalized) ?? 0) + 1);
+  }
+  if ([...normalizedLineCounts.values()].some((count) => count >= 3)) {
+    gaps.push("存在同一大段内容重复 3 次以上的填充，必须改为各阶段独立、可执行的信息");
+  }
+  if (/\[(?:仅一个|分别明确|说明如何|至少三项|另起一段)[^\]]*\]|\|\s*\.\.\.\s*\|/.test(text)) {
+    gaps.push("交付物仍包含固定骨架占位符，必须替换为真实内容");
+  }
+
+  const selfCheck = markdownSection(text, /自查/);
+  if (!selfCheck) gaps.push("缺少文末逐条自查表");
+  else {
+    const missingItems = Array.from({ length: 7 }, (_, index) => index + 1).filter((item) =>
+      !new RegExp(`(?:^|\\n)\\s*(?:[-*]\\s*)?\\|?\\s*(?:\\*{1,2}|_{1,2})?\\s*${item}\\s*(?:[.、）)]|\\|)`, "m").test(selfCheck),
+    );
+    if (missingItems.length > 0) gaps.push(`自查表缺少验收项：${missingItems.join("、")}`);
+    if (!/(?:正文证据位置|证据位置|章节)/.test(selfCheck)) gaps.push("自查表没有给出正文证据位置");
+  }
+
+  return { pass: gaps.length === 0, gaps };
+}
+
+const PROVIDER_QUALITY_EVIDENCE_NORMALIZATIONS: Array<[RegExp, string, string]> = [
+  [/\btasks\.goal\b/gi, "任务目标", "tasks.goal→任务目标"],
+  [/\bgoal_created\b/gi, "created", "goal_created→created"],
+  [/\bbrief_generated\b/gi, "created", "brief_generated→created"],
+  [/\bclaim_started\b/gi, "claim", "claim_started→claim"],
+  [/\bwork_in_progress\b/gi, "tool", "work_in_progress→tool"],
+  [/\breview_started\b/gi, "verification", "review_started→verification"],
+  [/\brevise_started\b/gi, "verification", "revise_started→verification"],
+  [/\bfinal_closed\b/gi, "user_close", "final_closed→user_close"],
+  [/\bfinal_close\b/gi, "user_close", "final_close→user_close"],
+  [/\brevise\b(\s*)事件/gi, "verification$1事件", "revise 事件→verification 事件"],
+  [/\bclose\b(\s*)事件/gi, "user_close$1事件", "close 事件→user_close 事件"],
+  [/\bstatus\s*=\s*closed\b/gi, "status=done", "status=closed→status=done"],
+  [/\btask_owner\b/gi, "当前负责人", "task_owner→当前负责人"],
+  [/\bvendor_configs\b/gi, "providers", "vendor_configs→providers"],
+];
+
+/**
+ * 固定基准只对已知旧别名做窄范围、可审计的词汇校准；未知声明仍由机器契约 fail-closed。
+ * 这不是润色器，也不会补写缺失章节、来源或质量内容。
+ */
+export function normalizeProviderQualityBenchmarkDocument(content: string) {
+  let normalized = content;
+  const replacements: string[] = [];
+  for (const [pattern, replacement, label] of PROVIDER_QUALITY_EVIDENCE_NORMALIZATIONS) {
+    const count = normalized.match(pattern)?.length ?? 0;
+    if (count === 0) continue;
+    normalized = normalized.replace(pattern, replacement);
+    replacements.push(`${label}×${count}`);
+  }
+  return { content: normalized, replacements };
+}
+
+function providerQualityBenchmarkTools(): Anthropic.ToolUnion[] {
+  const writeDocument = TOOLS.find((tool) => "name" in tool && tool.name === "write_document");
+  return writeDocument ? [writeDocument] : [];
+}
+
+export function providerQualityBenchmarkScaffold(): string {
+  return [
+    "请严格使用以下 Markdown 骨架；保留全部章节、表头、固定结论和七个英文步骤名。七步表中的责任人与证据词汇已经按当前实现校准，只能解释其业务意义，不得替换成自行猜测的字段或事件名。可在其他章节扩写，但不要新增一段开头摘要：",
+    "# AiTeam 14 天产品落地决策简报",
+    "## 结论与推荐决策",
+    "建议立即以“任务简报→AI认领→过程留痕→独立复核→自动返工→人工关单”为唯一首测主线，用14天验证真实用户能否稳定获得可审计、可返工、可交付的决策成果；未达三重验收即停止扩展功能。",
+    "## 目标用户、核心待办与产品边界",
+    "[分别明确写出：目标用户、核心待办、产品边界]",
+    "## 核心工作流与证据",
+    "| 步骤 | 责任人 | 可验证证据 | 失败处理 |",
+    "|---|---|---|---|",
+    "| goal | 人类发起人 | 任务标题、目标与 created 事件 | 缺少目标则不进入执行 |",
+    "| brief | 人类发起人 | 任务描述、预期交付物与验收标准 | 信息不全则退回补充 |",
+    "| claim | AI 执行者 | claim 事件与当前负责人 | 未认领不得执行 |",
+    "| work | AI 执行者 | tool 事件与 documents 当前版交付物 | 阻塞则等待输入 |",
+    "| review | 独立复核人 | verification 事件与 verdicts 结构化裁决 | 未通过则进入 revise |",
+    "| revise | AI 执行者 | 新文档版本、verification 事件与返工计数 | 达上限转人工复核 |",
+    "| human close | 人类发起人 | 人工确认清单与 user_close 事件 | 三重验收未完成不得关单 |",
+    "## 按优先级排序的 14 天计划",
+    "| 优先级/时间 | 阶段目标 | 负责人 | 退出条件 | 可量化验收指标（建议阈值） |",
+    "|---|---|---|---|---|",
+    "| P0 / 第 1–3 天 | ... | ... | ... | ... |",
+    "| P0 / 第 4–7 天 | ... | ... | ... | ... |",
+    "| P1 / 第 8–14 天 | ... | ... | ... | ... |",
+    "## 执行与验证细则",
+    "[说明如何采集证据、判断失败并处理最早断点，确保全文达到要求的信息量]",
+    "## 关键风险、缓解动作与停止条件",
+    "| 风险/依赖 | 缓解动作 | 停止条件 |",
+    "|---|---|---|",
+    "| ... | ... | ... |",
+    "[至少三项]",
+    "## 来源与假设",
+    "本次未使用外部资料。",
+    "[另起一段说明内部事实边界、未调用的外部工具，以及所有数字均为建议阈值]",
+    "## 交付自查表",
+    "| 标准 | 状态 | 正文证据位置 |",
+    "|---|---|---|",
+    "| 1 | 满足/不满足 | ... |",
+    "| 2 | 满足/不满足 | ... |",
+    "| 3 | 满足/不满足 | ... |",
+    "| 4 | 满足/不满足 | ... |",
+    "| 5 | 满足/不满足 | ... |",
+    "| 6 | 满足/不满足 | ... |",
+    "| 7 | 满足/不满足 | ... |",
+  ].join("\n");
+}
+
+export function buildProviderQualityBenchmarkBrief(task: Task): string {
+  return [
+    "你正在完成 AiTeam 的固定、隔离质量基准。以下内容就是全部可信输入，不需要也不允许读取工作区其他文档、技能、记忆或联网资料。",
+    "",
+    `任务：${task.title}`,
+    `详情：${task.description || "（无）"}`,
+    task.acceptance_criteria ? `验收标准：\n${task.acceptance_criteria}` : "",
+    "",
+    "可作为事实使用的内部证据仅限：",
+    "- 本任务由人类发起并带有结构化简报与验收标准；",
+    "- 执行者已通过 claim 事件认领，过程工具调用会写入 task_events；",
+    "- 任务显式指定独立 reviewer，未通过会由引擎触发返工；",
+    "- 最终关单由人类确认；",
+    "- 当前产品已经有 Electron 桌面客户端和 `/aiteam/` 响应式 Web 工作区，不是 CLI 原型；",
+    "- 工作区已经包含目标输入、任务看板、收件箱、文档、团队和用量界面；",
+    "- 当前已经使用 SQLite 持久化任务、文档、task_events、审批、用户与供应商配置；",
+    "- 当前已经有 standalone 登录、admin/member 角色门控、任务负责人、独立复核人、返工、审批和人工关单；",
+    "- 当前已经支持模型供应商、Skills、MCP 和可选 Seedream 生图；网络 MCP 受单次审批约束。",
+    "- Helio 只作为交互机制的灵感来源；本基准没有提供任何 Helio 或市场事实，禁止写竞品能力、融资、用户、市场规模等外部主张。",
+    "- 精确实现口径（写工作流证据时必须逐条遵守）：",
+    ...providerQualityBenchmarkImplementationFacts().map((fact) => `  - ${fact}`),
+    "",
+    "输出约束：",
+    "1. 写成 2200–3800 个非空白字符（含 Markdown 标记）的中文创始人决策简报，结论先行、信息密度高，拒绝堆篇幅；开头“结论与推荐决策”章节只能放一个 70–100 个非空白字符的纯文本段落，不加引用、注释、第二段或“共 X 字”自报计数。",
+    "2. 计划和指标可以作为待验证的决策阈值，但必须明确标为“建议阈值”，不能伪装成已有数据。",
+    "3. 产品边界必须以上述已实现能力为起点，禁止把已有桌面/Web UI、SQLite、登录权限或任务闭环写成尚未开发。",
+    "4. 只可复述上方提供的能力，不得自行编造数据库字段名、事件类型、状态值、生产部署状态或用户反馈；例如不要写 tasks.goal、brief_generated、final_close、status=closed 等未提供细节。",
+    "4a. 上方逐条列出的产品能力与精确实现口径本身就是本任务可信证据；不要反过来把它们标成‘未在任务上下文中提供’或‘待验证’。",
+    "5. “来源与假设”章节必须逐字包含独立句子“本次未使用外部资料。”，并说明内部事实来自任务简报与运行事件；不得声称调用过 web_search、web_fetch、MCP 或任何未提供工具。",
+    "6. 只调用一次 write_document，kind=report，把完整正文放入文档；不要在工具调用前后输出长篇正文。",
+    "7. 文末逐条自查七项验收标准，不能用“已满足”代替正文证据位置，也不要声称未实际计算的字数。",
+    "8. 七步工作流必须各占表格一行，14 天计划至少拆成三个阶段；不得保留骨架占位符，也不得复制同一大段内容来凑篇幅。",
+    "",
+    providerQualityBenchmarkScaffold(),
+  ].filter(Boolean).join("\n");
+}
+
+export function buildProviderQualityBenchmarkReworkBrief(task: Task, feedback: string): string {
+  const current = listDocuments().find((doc) => doc.task_id === task.id && doc.kind === "report");
+  return [
+    buildProviderQualityBenchmarkBrief(task),
+    "",
+    "返工说明：固定质量基准的上一版未通过复核。你处于隔离上下文，上方可信输入、输出约束和固定骨架仍须全部遵守；请依据下方意见重写完整报告，并再次只调用一次 write_document 交付。",
+    `复核意见：\n${feedback}`,
+    current ? `上一版全文（只用于修订，不代表其中事实可信）：\n<previous>\n${current.content.slice(0, 12000)}\n</previous>` : "",
+    "返工时先删除上一版中所有复核指出的内容，再按固定骨架从头生成；不得因复用上一版而保留未经上方可信输入支持的精确实现声明。",
+  ].filter(Boolean).join("\n\n");
+}
+
+function pauseTaskAfterWorkIfBudgetReached(agent: Agent, taskId: string, reserveForVerification = 0): boolean {
+  const live = getTask(taskId);
+  if (!live || live.status !== "doing") return live?.status === "blocked";
+  const budget = live.budget_billable > 0 ? live.budget_billable : Number(process.env.AITEAM_TASK_TOKEN_BUDGET ?? 0);
+  if (budget <= 0) return false;
+  const spent = taskSpentBillable(live);
+  if (spent < budget && spent + reserveForVerification <= budget) return false;
+  requestBudgetPauseForTask(agent, live, spent, budget, reserveForVerification > 0
+    ? { resumePhase: "verification", reviewReserveBillable: reserveForVerification }
+    : undefined);
+  return true;
+}
+
+export function shouldResumeAtVerification(taskId: string): boolean {
+  const approval = listApprovals()
+    .filter((item) => item.kind === "budget" && item.ref_id === taskId && item.status === "approved" && item.resolved_at)
+    .sort((a, b) => (b.resolved_at ?? 0) - (a.resolved_at ?? 0))[0];
+  if (approval?.resolved_at) {
+    let resumePhase = "";
+    try {
+      const payload = JSON.parse(approval.payload || "{}") as { resume_phase?: unknown };
+      resumePhase = typeof payload.resume_phase === "string" ? payload.resume_phase : "";
+    } catch {
+      resumePhase = "";
+    }
+    if (resumePhase === "verification") {
+      const docs = listDocuments().filter((doc) => doc.task_id === taskId);
+      if (docs.length > 0 && !listVerdictsForTask(taskId).some((verdict) => verdict.created_at >= approval.resolved_at!)) return true;
+    }
+  }
+
+  // Electron / 服务端若在强模型复核期间退出，当前版文档已经通过机器预检；重启后只能重跑复核，
+  // 不能把 doing 误当成尚未生成并再次调用执行模型。用“当前版之后开始复核、但尚无裁决”识别该断点。
+  const task = getTask(taskId);
+  if (!task || task.status !== "doing" || !isProviderQualityBenchmarkTask(task)) return false;
+  const latestDoc = listDocuments()
+    .filter((doc) => doc.task_id === taskId)
+    .sort((a, b) => b.created_at - a.created_at)[0];
+  if (!latestDoc) return false;
+  const interruptedReview = listTaskEvents(taskId)
+    .filter((event) => event.type === "verification" && event.created_at >= latestDoc.created_at && event.summary.includes("开始验收交付物"))
+    .sort((a, b) => b.created_at - a.created_at)[0];
+  if (!interruptedReview) return false;
+  return !listVerdictsForTask(taskId).some((verdict) => verdict.created_at >= interruptedReview.created_at);
+}
+
 async function runTaskWork(agent: Agent, taskId: string) {
   let task = getTask(taskId);
-  if (!task || task.status === "done" || task.status === "review" || task.status === "blocked") return;
+  if (!task) return;
+  if (task.status === "cancelled") {
+    cancelledTasks.delete(taskId);
+    resumeAfterRun.delete(taskId);
+    return;
+  }
+  if (task.status === "done" || task.status === "review" || task.status === "blocked") return;
   if (cancelledTasks.delete(taskId)) {
+    resumeAfterRun.delete(taskId);
     if (task.channel_id) audit(task.channel_id, `⏹ 任务「${task.title}」已被用户停止（未开工）`);
     return;
   }
@@ -829,32 +1582,61 @@ async function runTaskWork(agent: Agent, taskId: string) {
     estimate = estimateTaskBillable(task.model_tier);
     if (estimate > 0) task = updateTask(task.id, { estimate_billable: estimate }) ?? task;
   }
+  const resumeAtVerification = shouldResumeAtVerification(task.id);
   audit(
     channel.id,
-    `🚀 ${agent.name} 开始处理任务「${task.title}」${task.model_tier === "light" ? "（⚡ 轻量通道）" : ""}${estimate > 0 ? `（按历史同档任务预计 ~${estimate.toLocaleString()} 计费 token）` : ""}`
+    resumeAtVerification
+      ? `🔎 ${agent.name} 恢复任务「${task.title}」，从已生成交付物的独立复核继续，不重复生成初稿`
+      : `🚀 ${agent.name} 开始处理任务「${task.title}」${task.model_tier === "light" ? "（⚡ 轻量通道）" : ""}${estimate > 0 ? `（按历史同档任务预计 ~${estimate.toLocaleString()} 计费 token）` : ""}`
   );
-  emitTaskEvent(task, "start", `${agent.name} 开始处理任务`, { model_tier: task.model_tier, estimate_billable: estimate || undefined }, agent.id);
+  emitTaskEvent(
+    task,
+    "start",
+    resumeAtVerification ? `${agent.name} 从独立复核继续任务` : `${agent.name} 开始处理任务`,
+    { model_tier: task.model_tier, estimate_billable: estimate || undefined, ...(resumeAtVerification ? { resume_phase: "verification" } : {}) },
+    agent.id,
+  );
   setTaskStatus(task.id, "doing");
 
   let feedback: string | null = null; // 上一轮验收意见（返工时注入）
-  let lastDocIds: string[] = [];
+  let lastDocIds: string[] = resumeAtVerification
+    ? listDocuments().filter((doc) => doc.task_id === task.id).map((doc) => doc.id)
+    : [];
+  const qualityBenchmark = isProviderQualityBenchmarkTask(task);
+  const revisionLimit = qualityBenchmark ? PROVIDER_QUALITY_MAX_REVISIONS : MAX_REVISIONS;
+  let skipWorkOnce = resumeAtVerification;
+  const initialAttempt = resumeAtVerification ? Math.min(task.revision_count, revisionLimit) : 0;
 
-  for (let attempt = 0; attempt <= MAX_REVISIONS; attempt++) {
-    const ctx = newCtx(agent, channel, "work", task.id);
-    const prompt = feedback ? buildReworkBrief(task, channel, feedback) : buildWorkBrief(task, channel);
-    await streamRun(ctx, prompt, MAX_WORK_ITERATIONS, 0, { tier: task.model_tier === "light" ? "light" : "standard" });
-    lastDocIds = ctx.createdDocIds.length > 0 ? ctx.createdDocIds : lastDocIds;
-    const afterRun = getTask(task.id);
-    if (ctx.halted === "blocked" || afterRun?.status === "blocked") return;
-
-    if (cancelledTasks.delete(task.id)) {
-      setTaskStatus(task.id, "todo");
-      emitTaskEvent(task, "handoff", "用户停止了运行，任务退回待办", undefined, agent.id);
-      audit(channel.id, `⏹ 任务「${task.title}」已被用户停止，退回待办`);
-      return;
+  for (let attempt = initialAttempt; attempt <= revisionLimit; attempt++) {
+    if (!skipWorkOnce) {
+      const ctx = newCtx(agent, channel, "work", task.id);
+      const prompt = qualityBenchmark
+        ? feedback
+          ? buildProviderQualityBenchmarkReworkBrief(task, feedback)
+          : buildProviderQualityBenchmarkBrief(task)
+        : feedback
+          ? buildReworkBrief(task, channel, feedback)
+          : buildWorkBrief(task, channel);
+      await streamRun(ctx, prompt, qualityBenchmark ? 1 : MAX_WORK_ITERATIONS, 0, {
+        tier: task.model_tier === "light" ? "light" : "standard",
+        ...(qualityBenchmark
+          ? { toolsOverride: providerQualityBenchmarkTools(), contextMode: "isolated" as const, maxTokens: 6000 }
+          : {}),
+      });
+      lastDocIds = ctx.createdDocIds.length > 0 ? ctx.createdDocIds : lastDocIds;
+      const afterRun = getTask(task.id);
+      if (ctx.halted === "blocked" || afterRun?.status === "blocked") return;
+      if (finishStoppedTask(task, channel, agent)) return;
+      if (finishRevokedTaskExecution(task, channel, agent) || ctx.halted === "stopped") return;
+    } else {
+      skipWorkOnce = false;
     }
 
     const verdict = await runVerification(agent, channel, task.id, lastDocIds, attempt);
+    // 验收也是可耗时的模型运行；stop 可能在 await 期间到达，必须在处理 pass/revise 前再检查一次。
+    if (verdict.result === "paused") return;
+    if (finishStoppedTask(task, channel, agent)) return;
+    if (finishRevokedTaskExecution(task, channel, agent)) return;
     if (verdict.result === "pass") {
       if (verdict.reasons) audit(channel.id, `✅ 验收通过：任务「${task.title}」`);
       break;
@@ -863,12 +1645,12 @@ async function runTaskWork(agent: Agent, taskId: string) {
     const fresh = getTask(task.id);
     const revisions = (fresh?.revision_count ?? 0) + 1;
     updateTask(task.id, { revision_count: revisions });
-    if (attempt >= MAX_REVISIONS) {
+    if (attempt >= revisionLimit) {
       // D1 返工差距结构化：达上限不再只说"请人工把关"——把最后一轮未解决的差距原样带给人，
       // 人工复核不用回频道翻验收长文（差距全文在事件 metadata，audit 只给首行摘要）。
       const gapBrief = feedback.replace(/\s+/g, " ").slice(0, 120);
-      emitTaskEvent(task, "verification", `已达返工上限（${MAX_REVISIONS} 次），转待评审。未解决差距见 metadata`, { result: "gap", reasons: feedback.slice(0, 2000), revision_count: revisions }, agent.id);
-      audit(channel.id, `⚠️ 任务「${task.title}」已达返工上限（${MAX_REVISIONS} 次），转入待评审请人工把关。未解决差距：${gapBrief}…`);
+      emitTaskEvent(task, "verification", `已达返工上限（${revisionLimit} 次），转待评审。未解决差距见 metadata`, { result: "gap", reasons: feedback.slice(0, 2000), revision_count: revisions }, agent.id);
+      audit(channel.id, `⚠️ 任务「${task.title}」已达返工上限（${revisionLimit} 次），转入待评审请人工把关。未解决差距：${gapBrief}…`);
       break;
     }
     audit(channel.id, `↩️ 验收未通过，任务「${task.title}」退回 ${agent.name} 修订（第 ${revisions} 次）`);
@@ -908,6 +1690,22 @@ export function buildWorkBrief(task: Task, channel: Channel): string {
     ? `\n## 来源文档（本任务是对以下内容做【有目标、限定范围的润色/改写】，grounding 在此——不得发明、不得越界）\n` +
       sourceDocs.map((d) => `### 来源《${d.title}》（id: ${d.id}）\n${d.content.slice(0, 8000)}`).join("\n\n")
     : "";
+  const approvedNetworkGrants = listApprovals()
+    .filter(
+      (approval) =>
+        approval.ref_id === task.id &&
+        approval.agent_id === task.assignee_agent_id &&
+        approval.status === "approved" &&
+        !approval.consumed_at,
+    )
+    .map((approval) => networkGrantFromApproval(approval))
+    .filter((grant): grant is NetworkGrantV1 => Boolean(grant));
+  const networkGrantSection = approvedNetworkGrants.length > 0
+    ? `\n## 用户刚批准的单次网络调用\n` +
+      approvedNetworkGrants
+        .map((grant) => `- 工具：${grant.tool}\n  参数：${JSON.stringify(grant.input)}\n  要求：优先原样执行；授权只可使用一次，改工具或改参数必须重新审批。`)
+        .join("\n")
+    : "";
   const transcript = buildTranscript(channel.id, 20);
   // 目标链（借鉴 Paperclip）：让任务知道自己服务于什么目标
   const project = task.project_id ? getProject(task.project_id) : undefined;
@@ -930,6 +1728,7 @@ export function buildWorkBrief(task: Task, channel: Channel): string {
     recentEvents ? `最近任务活动：\n${recentEvents}` : "",
     depSection,
     sourceSection,
+    networkGrantSection,
     polishMode
       ? `⚠️ 本任务是【定向润色 / 受限改写】：产出是对上面"来源文档"的修订，不是另写一篇。① 通读来源，严格按"详情/验收标准"限定的目标与范围改，范围外原样保留；② 新增事实/数据须来自来源或显式调研并标来源，禁凭空补全；③ 交付物开头给「改动清单」：逐条 [改了哪段]→[怎么改]→[依据来源何处]，并列「刻意未改动」部分。如已启用「定向润色/受限改写法」技能，按其方法执行。`
       : "",
@@ -1026,7 +1825,7 @@ async function runVerification(
   taskId: string,
   docIds: string[],
   attempt = 0
-): Promise<{ result: "pass" | "revise"; reasons: string }> {
+): Promise<{ result: "pass" | "revise" | "paused"; reasons: string }> {
   const task = getTask(taskId);
   if (!task) return { result: "pass", reasons: "" };
   if (isMock()) return { result: "pass", reasons: "" }; // 全局 Mock 跳过验收
@@ -1062,9 +1861,49 @@ async function runVerification(
     recordVerdict("revise", reasons, "fallback", null, null);
     return { result: "revise", reasons };
   }
+
+  if (isProviderQualityBenchmarkTask(task)) {
+    const assessment = assessProviderQualityBenchmarkDocument(doc.content);
+    if (!assessment.pass) {
+      // 已经实际触线时先暂停，避免机器预检失败后又直接发起一轮付费返工。
+      if (pauseTaskAfterWorkIfBudgetReached(worker, task.id)) return { result: "paused", reasons: "等待预算审批" };
+      const reasons = `机器契约预检未通过：\n${assessment.gaps.map((gap, index) => `${index + 1}. ${gap}`).join("\n")}`;
+      emitTaskEvent(
+        task,
+        "verification",
+        `机器契约预检要求返工（${assessment.gaps.length} 项差距）`,
+        { result: "revise", stage: "document_contract", gaps: assessment.gaps, doc_id: doc.id },
+        null,
+      );
+      recordVerdict("revise", reasons, "fallback", null, doc.id);
+      return { result: "revise", reasons };
+    }
+    emitTaskEvent(
+      task,
+      "verification",
+      "机器契约预检通过，进入独立强模型复核",
+      { result: "pass", stage: "document_contract", gaps: [], doc_id: doc.id },
+      null,
+    );
+    // 只有机器可核验的下限已满足，才为强模型语义复核预留额度并发起付费调用。
+    if (pauseTaskAfterWorkIfBudgetReached(worker, task.id, PROVIDER_QUALITY_REVIEW_RESERVE_BILLABLE)) {
+      return { result: "paused", reasons: "等待独立复核预算审批" };
+    }
+  }
   // 多交付物全核验（D1）：report+slides+sheet 组合交付时，其余当前版一并注入（此前只核主文档，
   // 副交付物是免检通道）。主文档给大头预算，其余按剩余预算截断注入。
   const extraDocs = taskDocs.filter((d) => d.id !== doc.id);
+  const observedTools = Array.from(new Set(listTaskEvents(task.id)
+    .filter((event) => event.type === "tool")
+    .map((event) => {
+      try {
+        const meta = JSON.parse(event.metadata_json || "{}") as { tool?: unknown };
+        return typeof meta.tool === "string" ? meta.tool : "";
+      } catch {
+        return "";
+      }
+    })
+    .filter(Boolean)));
 
   // 显式 reviewer 优先；未指定时按交付物类型选对口校验者。
   const verifier = resolveTaskReviewer(task, others, doc.kind, worker);
@@ -1091,6 +1930,10 @@ async function runVerification(
     task.acceptance_criteria
       ? `验收标准（逐条核验）：\n${task.acceptance_criteria}`
       : `（未写明验收标准 —— 按任务标题与详情判断交付物是否完整、可直接使用、无明显错误）`,
+    `交付类型质量标准（结合任务规模判断；不适用项说明理由，不机械凑数）：\n${deliverableQualityRubric(doc.kind).map((item) => `- ${item}`).join("\n")}`,
+    isProviderQualityBenchmarkTask(task)
+      ? `本固定基准的可信实现口径（这是任务证据，不得要求作者改标为待验证）：\n${providerQualityBenchmarkImplementationFacts().map((fact) => `- ${fact}`).join("\n")}`
+      : ``,
     ``,
     `交付物《${doc.title}》（${doc.kind}）全文：`,
     `<deliverable>`,
@@ -1099,11 +1942,13 @@ async function runVerification(
     ...extraDocs.slice(0, 3).flatMap((d) => [
       ``,
       `同任务交付物《${d.title}》（${d.kind}，一并核验，不是参考资料）：`,
+      `该交付物质量标准：\n${deliverableQualityRubric(d.kind).map((item) => `- ${item}`).join("\n")}`,
       `<deliverable>`,
       stripLoneSurrogates(d.content.slice(0, 3000)),
       `</deliverable>`,
     ]),
     renderInfo,
+    `本任务真实工具事件：${observedTools.length > 0 ? observedTools.join(", ") : "无"}。这是审计账本；交付物若声称使用了清单外的检索、插件或工具，必须判 revise。`,
     ``,
     `核验时另须执行（不可放水）：`,
     `· 量化主张须有来源：正文中市场规模 / 占比 / 金额 / ROI 等关键数字，若无来源标注且未标"示意值/待核实"，判 revise 并逐条点名（C3）；`,
@@ -1131,12 +1976,16 @@ async function runVerification(
         required: ["result", "reasons"],
       },
     },
-    TOOLS.find((t) => "name" in t && t.name === "read_document")!,
   ];
 
   const ctx = newCtx(verifier, channel, "verify", task.id);
   // 验收是质量闭环的下限：官方通道可用时强制走最强模型
-  await streamRun(ctx, prompt, 3, 0, { toolsOverride: verifierTools, preferStrong: true });
+  await streamRun(ctx, prompt, 1, 0, {
+    toolsOverride: verifierTools,
+    preferStrong: true,
+    contextMode: "isolated",
+    maxTokens: 2000,
+  });
   if (!ctx.verdict) {
     // 不结构化裁决不能默认通过——强约束重试一轮，明确要求只能用 submit_verdict 收尾
     const retryPrompt = [
@@ -1151,7 +2000,12 @@ async function runVerification(
       `</deliverable>`,
       `逐条核验后立即调用 submit_verdict（result: pass 或 revise，reasons 给理由 / 修订意见）。`,
     ].join("\n");
-    await streamRun(ctx, retryPrompt, 3, 0, { toolsOverride: verifierTools, preferStrong: true });
+    await streamRun(ctx, retryPrompt, 1, 0, {
+      toolsOverride: verifierTools,
+      preferStrong: true,
+      contextMode: "isolated",
+      maxTokens: 2000,
+    });
   }
   if (!ctx.verdict) {
     // 两轮仍无结构化裁决：fail-closed，退回返工兜住，绝不放水（质量下限关键修复）
@@ -1200,20 +2054,37 @@ function clarificationResponse(approval: Approval): string {
  * D2 预算护栏：任务累计消耗触线 → 暂停任务并开 budget 审批（复用 clarification 的 blocked/恢复通道）。
  * 语义：批准 = 在当前消耗之上追加一个预算周期继续跑；拒绝 = 保持暂停（人工在看板改预算或收尾）。
  */
-export function requestBudgetPauseForTask(agent: Agent, task: Task, spent: number, budget: number): { approvalId: string; task: Task } {
+export function requestBudgetPauseForTask(
+  agent: Agent,
+  task: Task,
+  spent: number,
+  budget: number,
+  options?: { resumePhase?: "work" | "verification"; reviewReserveBillable?: number },
+): { approvalId: string; task: Task } {
   if (task.status === "blocked" && task.blocked_approval_id) {
     const active = getApproval(task.blocked_approval_id);
     if (active?.kind === "budget" && active.status === "pending") return { approvalId: active.id, task };
   }
+  // 预算触线意味着当前执行上下文已暂停；此前批准但尚未消费的 network grant
+  // 不得跨越新的预算决策继续生效。
+  invalidateTaskNetworkApprovals(task.id);
+  const reviewReserve = Math.max(0, Math.round(options?.reviewReserveBillable ?? 0));
+  const resumeAtVerification = options?.resumePhase === "verification" && reviewReserve > 0;
+  const remaining = Math.max(0, budget - spent);
   const approval = createApproval({
     channel_id: task.channel_id,
     agent_id: agent.id,
-    title: `超预算暂停：「${task.title.slice(0, 100)}」`,
+    title: `${resumeAtVerification ? "独立复核预算不足" : "超预算暂停"}：「${task.title.slice(0, 100)}」`,
     payload: JSON.stringify(
       {
         spent_billable: spent,
         budget_billable: budget,
-        note: "批准 = 追加同额预算并继续执行；拒绝 = 保持暂停（可在看板调整预算或直接转人工收尾）。",
+        ...(resumeAtVerification
+          ? { resume_phase: "verification", review_reserve_billable: reviewReserve, remaining_billable: remaining }
+          : {}),
+        note: resumeAtVerification
+          ? "初稿已保留；批准 = 追加同额预算并直接进入独立复核，不重复生成初稿；拒绝 = 保持暂停。"
+          : "批准 = 追加同额预算并继续执行；拒绝 = 保持暂停（可在看板调整预算或直接转人工收尾）。",
       },
       null,
       2
@@ -1224,9 +2095,16 @@ export function requestBudgetPauseForTask(agent: Agent, task: Task, spent: numbe
   const next = updateTask(task.id, { status: "blocked", blocked_approval_id: approval.id }) ?? task;
   broadcast({ type: "approval:upsert", payload: approval });
   broadcast({ type: "task:upsert", payload: next });
-  emitTaskEvent(next, "blocked", `累计消耗 ${spent.toLocaleString()} 已达预算 ${budget.toLocaleString()}（计费 token），暂停待批`, { approval_id: approval.id, spent_billable: spent, budget_billable: budget }, agent.id);
-  if (next.channel_id)
-    audit(next.channel_id, `⏸️ 任务「${next.title}」累计消耗 ${spent.toLocaleString()} 已达预算 ${budget.toLocaleString()}（计费 token），暂停等待批准追加`);
+  const pauseSummary = resumeAtVerification
+    ? `已生成初稿；剩余 ${remaining.toLocaleString()} 不足独立复核预留 ${reviewReserve.toLocaleString()}（计费 token），暂停待批`
+    : `累计消耗 ${spent.toLocaleString()} 已达预算 ${budget.toLocaleString()}（计费 token），暂停待批`;
+  emitTaskEvent(next, "blocked", pauseSummary, {
+    approval_id: approval.id,
+    spent_billable: spent,
+    budget_billable: budget,
+    ...(resumeAtVerification ? { resume_phase: "verification", review_reserve_billable: reviewReserve } : {}),
+  }, agent.id);
+  if (next.channel_id) audit(next.channel_id, `⏸️ 任务「${next.title}」${pauseSummary}`);
   return { approvalId: approval.id, task: next };
 }
 
@@ -1235,19 +2113,103 @@ export function onBudgetResolved(approval: Approval, approved: boolean) {
   const task = getTask(approval.ref_id);
   if (!task) return;
   if (task.status !== "blocked" || task.blocked_approval_id !== approval.id) return;
+  let resumePhase: "work" | "verification" = "work";
+  try {
+    const payload = JSON.parse(approval.payload || "{}") as { resume_phase?: unknown };
+    if (payload.resume_phase === "verification") resumePhase = "verification";
+  } catch { /* malformed legacy payload resumes from work */ }
   if (approved) {
     const spent = taskSpentBillable(task);
     const grant = task.budget_billable > 0 ? task.budget_billable : Number(process.env.AITEAM_TASK_TOKEN_BUDGET ?? 0);
     // 新预算 = 当前消耗 + 一个周期：既不会立刻再触线，也保留护栏（而不是一批准就变无限）
     const next = updateTask(task.id, { status: "todo", blocked_approval_id: null, budget_billable: spent + Math.max(grant, 1) }) ?? task;
     broadcast({ type: "task:upsert", payload: next });
-    emitTaskEvent(next, "approval", `用户批准追加预算，任务恢复（新预算 ${next.budget_billable.toLocaleString()} 计费 token）`, { approval_id: approval.id, status: "approved", budget_billable: next.budget_billable }, approval.agent_id);
-    if (next.channel_id) audit(next.channel_id, `▶️ 用户批准追加预算，任务「${next.title}」恢复执行（新预算 ${next.budget_billable.toLocaleString()}）`);
-    if (next.assignee_agent_id) onTaskAssigned(next);
+    const summary = resumePhase === "verification"
+      ? `用户批准追加预算，任务从独立复核继续（新预算 ${next.budget_billable.toLocaleString()} 计费 token）`
+      : `用户批准追加预算，任务恢复（新预算 ${next.budget_billable.toLocaleString()} 计费 token）`;
+    emitTaskEvent(next, "approval", summary, {
+      approval_id: approval.id,
+      status: "approved",
+      budget_billable: next.budget_billable,
+      resume_phase: resumePhase,
+    }, approval.agent_id);
+    if (next.channel_id) {
+      audit(
+        next.channel_id,
+        resumePhase === "verification"
+          ? `▶️ 用户批准追加预算，任务「${next.title}」从独立复核继续（新预算 ${next.budget_billable.toLocaleString()} 计费 token）`
+          : `▶️ 用户批准追加预算，任务「${next.title}」恢复执行（新预算 ${next.budget_billable.toLocaleString()} 计费 token）`,
+      );
+    }
+    resumeAssignedTask(next);
   } else {
     emitTaskEvent(task, "approval", "用户拒绝追加预算，任务保持暂停", { approval_id: approval.id, status: "rejected" }, approval.agent_id);
     if (task.channel_id) audit(task.channel_id, `⏸️ 用户拒绝追加预算，任务「${task.title}」保持暂停——可在看板调整预算或转人工收尾`);
   }
+}
+
+/**
+ * 单次 network MCP 审批恢复原任务，不进入无 taskId 的普通 chat。
+ * 返回 true 表示该 action 是结构化网络审批，路由层不应再走 generic triggerAgent。
+ */
+export function onNetworkApprovalResolved(approval: Approval): boolean {
+  if (!approvalContainsNetworkGrant(approval)) return false;
+  if (!approval.ref_id) {
+    if (approval.status === "approved") consumeApproval(approval.id);
+    return true;
+  }
+  const task = getTask(approval.ref_id);
+  if (!task || task.status !== "blocked" || task.blocked_approval_id !== approval.id) {
+    if (approval.status === "approved") consumeApproval(approval.id);
+    return true;
+  }
+  const approved = approval.status === "approved";
+  const grant = networkGrantFromApproval(approval, false);
+  const sameAgent = task.assignee_agent_id === approval.agent_id;
+  const stopped = cancelledTasks.has(task.id);
+  if (approved && grant && sameAgent && !stopped) {
+    const next = updateTask(task.id, { status: "todo", blocked_approval_id: null }) ?? task;
+    broadcast({ type: "task:upsert", payload: next });
+    emitTaskEvent(
+      next,
+      "approval",
+      `用户批准单次网络调用，任务恢复：${grant.tool}`,
+      { approval_id: approval.id, status: "approved", tool: grant.tool, call_fingerprint: grant.call_fingerprint },
+      approval.agent_id,
+    );
+    if (next.channel_id) audit(next.channel_id, `▶️ 用户批准一次网络调用，任务「${next.title}」恢复执行`);
+    resumeAssignedTask(next);
+  } else {
+    // 已批准但因停止、改派或 server 配置变化而失效时也必须原子关闭；
+    // 否则恢复旧负责人/旧配置后，这张历史批准会“复活”。
+    if (approved) consumeApproval(approval.id);
+    emitTaskEvent(
+      task,
+      "approval",
+      approved
+        ? stopped
+          ? "任务已被停止，原网络调用授权失效并保持阻塞"
+          : sameAgent
+          ? "网络调用授权已失效，任务保持阻塞"
+          : "任务负责人已变化，原网络调用授权失效并保持阻塞"
+        : "用户拒绝网络调用，任务保持阻塞",
+      { approval_id: approval.id, status: approved ? "invalid" : "rejected", same_agent: sameAgent, stopped },
+      approval.agent_id,
+    );
+    if (task.channel_id) {
+      audit(
+        task.channel_id,
+        approved
+          ? stopped
+            ? `⏸️ 任务「${task.title}」已停止，原网络批准不再有效`
+            : sameAgent
+            ? `⏸️ 网络插件配置已变化，原批准不再有效；任务「${task.title}」保持阻塞`
+            : `⏸️ 任务负责人已变化，原网络批准不再有效；任务「${task.title}」保持阻塞`
+          : `⏸️ 用户拒绝网络调用，任务「${task.title}」保持阻塞`,
+      );
+    }
+  }
+  return true;
 }
 
 export function onClarificationResolved(approval: Approval, approved: boolean) {
@@ -1261,7 +2223,7 @@ export function onClarificationResolved(approval: Approval, approved: boolean) {
     broadcast({ type: "task:upsert", payload: next });
     emitTaskEvent(next, "approval", response ? `用户补充输入后任务恢复：${response}` : "用户批准了 clarification，任务恢复待办并准备继续", { approval_id: approval.id, status: "approved", response }, approval.agent_id);
     if (next.channel_id) audit(next.channel_id, response ? `▶️ 用户已补充输入，任务「${next.title}」恢复执行：${response}` : `▶️ 用户已确认，任务「${next.title}」恢复执行`);
-    if (next.assignee_agent_id) onTaskAssigned(next);
+    resumeAssignedTask(next);
   } else {
     emitTaskEvent(task, "approval", "用户拒绝了 clarification，任务保持阻塞", { approval_id: approval.id, status: "rejected" }, approval.agent_id);
     if (task.channel_id) audit(task.channel_id, `⏸️ 用户拒绝了确认请求，任务「${task.title}」保持阻塞，等待进一步输入`);
@@ -1725,7 +2687,7 @@ const TOOLS: Anthropic.ToolUnion[] = [
   {
     name: "request_approval",
     description:
-      "向用户发起审批请求。任何对外或高风险动作（发邮件、对外发布、部署、产生费用）必须先调用本工具，等待用户批准，不要直接宣称已完成。",
+      "向用户发起审批请求。任何对外或高风险动作（发邮件、对外发布、部署、产生费用）必须先调用本工具，等待用户批准，不要直接宣称已完成。network MCP 的外发审批由引擎在拦截真实调用时自动创建，不要手工伪造工具范围。",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -1768,6 +2730,9 @@ function findAgentByName(name?: string): Agent | undefined {
 export function claimTaskForAgent(agent: Agent, taskId: string, reason = ""): { ok: true; task: Task } | { ok: false; error: string } {
   const task = getTask(taskId);
   if (!task) return { ok: false, error: `找不到任务 ${taskId}` };
+  if (task.status === "done" || task.status === "cancelled") {
+    return { ok: false, error: `任务已${task.status === "done" ? "关闭" : "取消"}，请先恢复到待办再认领。` };
+  }
   if (task.assignee_agent_id && task.assignee_agent_id !== agent.id) {
     const owner = getAgent(task.assignee_agent_id);
     return { ok: false, error: `任务已由 ${owner?.name ?? "其他 AI 同事"} 负责，不能重复认领。` };
@@ -1793,6 +2758,9 @@ export function requestClarificationForTask(
       return { approvalId: active.id, task };
     }
   }
+  // 用户补充输入可能改变任务语义；旧执行上下文中的一次性外发授权必须先关闭，
+  // 即使进程在随后创建 clarification 审批前退出也只会过度收紧，不会放宽权限。
+  invalidateTaskNetworkApprovals(task.id);
   const approval = createApproval({
     channel_id: task.channel_id,
     agent_id: agent.id,
@@ -1911,7 +2879,7 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
       if (!taskId) return "错误：task_id 不能为空。";
       const task = getTask(taskId);
       if (!task) return `错误：找不到任务 ${taskId}`;
-      if (task.status === "review" || task.status === "done") return "错误：任务已交付或已关闭，不能再请求 clarification。";
+      if (task.status === "review" || task.status === "done" || task.status === "cancelled") return "错误：任务已交付、关闭或取消，不能再请求 clarification。";
       const question = String(input.question ?? "").trim();
       if (!question) return "错误：question 不能为空。";
       const { approvalId } = requestClarificationForTask(
@@ -1931,6 +2899,18 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
       if (!prev) return `错误：找不到任务 ${input.task_id}`;
       const assignee = findAgentByName(input.assignee);
       const reviewer = findAgentByName(input.reviewer);
+      const requestedAssignee = input.assignee !== undefined ? assignee?.id ?? null : prev.assignee_agent_id;
+      const statusChanged = input.status !== undefined && input.status !== prev.status;
+      const assigneeChanged = input.assignee !== undefined && requestedAssignee !== prev.assignee_agent_id;
+      const contextChanged = statusChanged || assigneeChanged;
+      const hasPendingApproval = listApprovals().some(
+        (approval) =>
+          approval.status === "pending" &&
+          (approval.ref_id === prev.id || approval.id === prev.blocked_approval_id),
+      );
+      if (contextChanged && (prev.status === "blocked" || hasPendingApproval)) {
+        return "错误：任务有待处理审批或正处于 blocked；只有用户可以先处理审批，再调整负责人或恢复任务。";
+      }
       const task = updateTask(prev.id, {
         ...(input.status ? { status: input.status } : {}),
         ...(input.title ? { title: String(input.title) } : {}),
@@ -1940,6 +2920,7 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
         ...(input.reviewer !== undefined ? { reviewer_agent_id: reviewer?.id ?? null } : {}),
       });
       if (!task) return `错误：找不到任务 ${input.task_id}`;
+      if (contextChanged) invalidateTaskNetworkApprovals(task.id);
       if (task.assignee_agent_id !== prev.assignee_agent_id) {
         emitTaskEvent(task, task.assignee_agent_id ? "claim" : "handoff", task.assignee_agent_id ? `${agent.name} 指派任务给 ${getAgent(task.assignee_agent_id)?.name ?? "AI 同事"}` : `${agent.name} 取消了任务指派`, undefined, task.assignee_agent_id ?? agent.id);
       }
@@ -1955,7 +2936,12 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
     }
     case "write_document": {
       const kind = ["report", "slides", "sheet", "html"].includes(input.kind) ? input.kind : "report";
-      const content = String(input.content ?? "");
+      let content = String(input.content ?? "");
+      const benchmarkTask = ctx.taskId ? getTask(ctx.taskId) : undefined;
+      const evidenceNormalization = benchmarkTask && kind === "report" && isProviderQualityBenchmarkTask(benchmarkTask)
+        ? normalizeProviderQualityBenchmarkDocument(content)
+        : { content, replacements: [] as string[] };
+      content = evidenceNormalization.content;
       // 契约校验：坏格式不落库，作为 tool_result 返回引导自纠（不计入交付物，不广播）
       const formatErr = validateDocContent(kind, content);
       if (formatErr) {
@@ -1974,10 +2960,21 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
       const kindLabel = kind === "slides" ? "演示文稿" : kind === "sheet" ? "数据表" : "文档";
       if (ctx.taskId) {
         const task = getTask(ctx.taskId);
-        if (task) emitTaskEvent(task, "delivery", `${agent.name} 写入交付物《${doc.title}》`, { doc_id: doc.id, kind }, agent.id);
+        if (task) {
+          if (evidenceNormalization.replacements.length > 0) {
+            emitTaskEvent(
+              task,
+              "verification",
+              `机器校准 ${evidenceNormalization.replacements.length} 类证据词汇`,
+              { stage: "evidence_normalization", replacements: evidenceNormalization.replacements, doc_id: doc.id },
+              null,
+            );
+          }
+          emitTaskEvent(task, "delivery", `${agent.name} 写入交付物《${doc.title}》`, { doc_id: doc.id, kind, evidence_normalizations: evidenceNormalization.replacements }, agent.id);
+        }
       }
       audit(channel.id, `${kind === "slides" ? "🖥️" : kind === "sheet" ? "📊" : "📄"} ${agent.name} 写好了${kindLabel}《${doc.title}》（${doc.content.length} 字）`);
-      return `${kindLabel}已保存（id: ${doc.id}，kind: ${kind}）。`;
+      return `${kindLabel}已保存（id: ${doc.id}，kind: ${kind}）${evidenceNormalization.replacements.length > 0 ? `；已按当前实现校准 ${evidenceNormalization.replacements.length} 类证据词汇并写入审计事件` : ""}。`;
     }
     case "read_document": {
       const doc = getDocument(String(input.doc_id));
@@ -2007,7 +3004,6 @@ function execTool(ctx: RunCtx, name: string, input: any): string {
         agent_id: agent.id,
         title: String(input.title ?? "").slice(0, 200),
         payload: String(input.details ?? ""),
-        // 关联任务：批准后 taskHasApprovedNetworkGrant 才查得到，网络插件二级审批门才能打开。
         ref_id: ctx.taskId ?? null,
       });
       broadcast({ type: "approval:upsert", payload: approval });
@@ -2135,6 +3131,10 @@ function status(agent: Agent, channelId: string, state: "thinking" | "tool" | "r
 interface StreamRunOpts extends RuntimeOpts {
   extraSystem?: string;
   toolsOverride?: Anthropic.ToolUnion[];
+  /** fixed benchmark / verification runs must not inherit workspace chatter, docs or skill indexes */
+  contextMode?: "full" | "isolated";
+  /** clamp a single response so a small task budget cannot be overshot by a 16k completion */
+  maxTokens?: number;
 }
 
 async function streamRun(
@@ -2164,11 +3164,14 @@ async function streamRun(
 
   try {
     let usage = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 };
-    const rt = resolveRuntime(agent, opts);
+    const resolvedRuntime = resolveRuntime(agent, opts);
+    const rt = opts.maxTokens
+      ? { ...resolvedRuntime, maxTokens: Math.min(resolvedRuntime.maxTokens, Math.max(1, Math.round(opts.maxTokens))) }
+      : resolvedRuntime;
     if (!rt.client) {
       await mockRun(ctx, emit);
     } else {
-      usage = await llmLoop(ctx, rt, userPrompt, maxIterations, emit, opts.extraSystem, opts.toolsOverride);
+      usage = await llmLoop(ctx, rt, userPrompt, maxIterations, emit, opts.extraSystem, opts.toolsOverride, opts.contextMode);
     }
     const usageJson = JSON.stringify(usage);
     updateMessage(row.id, { content, status: "complete", usage_json: usageJson, model: rt.client ? rt.model : "mock" });
@@ -2198,7 +3201,8 @@ async function llmLoop(
   maxIterations: number,
   emit: (delta: string) => void,
   extraSystem?: string,
-  toolsOverride?: Anthropic.ToolUnion[]
+  toolsOverride?: Anthropic.ToolUnion[],
+  contextMode: "full" | "isolated" = "full"
 ): Promise<{ input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_creation_tokens: number }> {
   const client = rt.client;
   if (!client) throw new Error("no client");
@@ -2206,7 +3210,14 @@ async function llmLoop(
 
   // 能力门控：服务端 web 工具按通道可用性；提示缓存仅官方 Anthropic API 启用
   // 用本次工作焦点（任务简报 / 用户消息）做技能相关性筛选——只注入相关专项方法
-  let dynamicCtx = buildDynamicContext(agent, channel, userPrompt);
+  const isolated = contextMode === "isolated" || ctx.kind === "verify";
+  let dynamicCtx = isolated
+    ? [
+        "## 隔离运行",
+        "本次只允许依据用户提示中明确给出的任务、验收标准、交付物与运行证据判断；不要读取或借用工作区闲聊、其他文档、长期记忆或技能索引。",
+        "不得声称调用过未实际提供的工具，不得把模型常识包装成已检索事实；缺少来源时明确写为假设或不使用该主张。",
+      ].join("\n")
+    : buildDynamicContext(agent, channel, userPrompt);
   if (!rt.webTools) dynamicCtx += `\n\n注意：当前模型通道不支持 web_search/web_fetch 联网调研，依据已有上下文与常识工作，不确定的事实要明确说明未经核实。`;
   // 验收去人设：verify 运行用固定校验者指令替换同事人设（选人仍对口路由，判准统一不漂移）
   const personaPrompt = ctx.kind === "verify" ? VERIFIER_SYSTEM_PROMPT : agent.system_prompt;
@@ -2361,6 +3372,23 @@ async function llmLoop(
         results.push({ type: "tool_result", tool_use_id: tu.id, content: "任务已暂停等待用户输入，后续工具未执行。" });
         continue;
       }
+      if (ctx.kind === "work" && ctx.taskId) {
+        const liveTask = getTask(ctx.taskId);
+        const executionRevoked =
+          cancelledTasks.has(ctx.taskId) ||
+          !liveTask ||
+          liveTask.status !== "doing" ||
+          liveTask.assignee_agent_id !== agent.id;
+        if (executionRevoked) {
+          ctx.halted = "stopped";
+          results.push({
+            type: "tool_result",
+            tool_use_id: tu.id,
+            content: "⏹ 任务已停止、取消或改派；本次工具调用未执行。",
+          });
+          continue;
+        }
+      }
       status(agent, channel.id, "tool", toolLabel(tu.name));
       if (ctx.taskId) {
         const task = getTask(ctx.taskId);
@@ -2376,11 +3404,30 @@ async function llmLoop(
             audit(channel.id, `⛔ ${agent.name} 试图直接调用高危插件「${gated.name}」(${gated.safety})，已拦截——须走审批门`);
           } else if (
             mcpRequiresApprovalForTask(ctx.taskId ? getTask(ctx.taskId) : undefined, tu.name) &&
-            !taskHasApprovedNetworkGrant(ctx.taskId)
+            !consumeApprovedNetworkGrant(ctx.taskId, tu.name, tu.input, agent.id)
           ) {
             const server = mcpServerForTool(tu.name);
-            result = `⛔ 插件「${server?.name ?? tu.name}」会向外部网络发送数据；当前任务绑定了来源文档或启用了严格网络审批，必须先用 request_approval 说明要外发的查询/内容和目的，经用户批准后再执行。`;
-            audit(channel.id, `⛔ ${agent.name} 试图在带来源文档的任务中调用网络插件「${server?.name ?? tu.name}」，已拦截——须走审批门`);
+            const task = ctx.taskId ? getTask(ctx.taskId) : undefined;
+            if (!task) {
+              result = `⛔ 插件「${server?.name ?? tu.name}」需要网络外发审批，但当前调用不在任务上下文中。请先创建并认领任务，再从任务内发起该调用。`;
+            } else {
+              const requested = requestNetworkApprovalForTask(
+                agent,
+                task,
+                tu.name,
+                tu.input,
+                `批准一次网络调用：${server?.name ?? tu.name}`,
+                `该任务请求调用 ${tu.name}，完整参数见 network_grant.input。批准仅对这一工具、目标配置和参数生效一次。`,
+              );
+              if (!requested) {
+                ctx.halted = "stopped";
+                result = "⏹ 任务状态或负责人已变化，本次网络调用未执行，也未创建审批。";
+              } else {
+                ctx.halted = "blocked";
+                result = `⏸️ 已自动创建单次网络调用审批（id: ${requested.approvalId}）并暂停任务。用户批准后任务会恢复，并仅执行这一次已列明的调用。`;
+                audit(channel.id, `⛔ ${agent.name} 在来源/严格任务中调用网络插件「${server?.name ?? tu.name}」，已生成单次审批并暂停任务`);
+              }
+            }
           } else {
             const rawSig = SEARCH_DEDUP ? searchQuerySignature(tu.input) : null;
             // memo 键带 owner 前缀：searchMemo 现在是 run 级私有（天然单租户），但键规则与
@@ -2397,11 +3444,21 @@ async function llmLoop(
               result = `⚠️ 本次运行的外部插件调用已达上限（${MCP_CALLS_PER_RUN} 次）。外部检索按次计费，请基于已获得的信息完成工作，不要再尝试调用插件。`;
             } else {
               mcpCalls++;
-              result = await callMcpTool(tu.name, tu.input);
+              let dispatchRevoked = false;
+              result = await callMcpTool(tu.name, tu.input, {
+                canDispatch: () => {
+                  const allowed = !ctx.taskId || taskExecutionIsCurrent(ctx.taskId, agent.id);
+                  if (!allowed) dispatchRevoked = true;
+                  return allowed;
+                },
+              });
+              if (dispatchRevoked) ctx.halted = "stopped";
               // 持久化审计：插件调用此前只发瞬态 status，事后无法从时间线/账本判断用没用某插件。
               // 仿配图那条落一行可核查的 system 消息——只记 server:tool 名，绝不写参数/密钥/返回内容。
               const mcp = tu.name.match(/^mcp__(.+?)__(.+)$/);
-              audit(channel.id, `🔌 ${agent.name} 调用了插件 ${mcp ? `${mcp[1]}:${mcp[2]}` : tu.name}`);
+              if (!dispatchRevoked) {
+                audit(channel.id, `🔌 ${agent.name} 调用了插件 ${mcp ? `${mcp[1]}:${mcp[2]}` : tu.name}`);
+              }
               // 仅缓存成功结果（失败不入 memo → 允许换插件用同查询兜底，不破坏降级链）
               const failed = result.startsWith("MCP 工具执行失败") || result.startsWith("工具返回错误") || result.startsWith("错误：");
               if (sig && !failed) searchMemo.set(sig, result);
@@ -2449,6 +3506,46 @@ async function llmLoop(
 // Mock 模式
 // ---------------------------------------------------------------------------
 
+export function mockTaskDocument(task: Pick<Task, "title" | "description" | "acceptance_criteria">, agentName: string): string {
+  const acceptance = task.acceptance_criteria
+    .split(/\n|；|;/)
+    .map((item) => item.replace(/^[-*•\d.、)\s]+/, "").trim())
+    .filter(Boolean)
+    .slice(0, 6);
+  const checklist = acceptance.length > 0
+    ? acceptance.map((item, index) => `| ${index + 1} | 待人工核对 | ${item} |`).join("\n")
+    : "| 1 | 待人工核对 | 目标、范围与下一步是否清楚 |";
+  return [
+    `# ${task.title}`,
+    "",
+    "> **Mock 演示交付**：以下内容只用于体验任务、证据和人工关单流程，不代表真实调研结论。接入模型后才会生成正式内容。",
+    "",
+    "## 结论先行",
+    `建议先由 ${agentName} 按任务简报补齐正式内容，再由独立复核人逐条核验；当前演示稿不可作为真实业务决策依据。`,
+    "",
+    "## 目标与边界",
+    task.description || "以任务标题为目标；Mock 模式不访问外部资料，也不虚构事实、客户反馈或实施结果。",
+    "",
+    "## 建议执行步骤",
+    "1. 核对目标、交付物、验收标准和责任人是否完整。",
+    "2. 执行者产出当前版本，并把工具调用与交付事件写入活动日志。",
+    "3. 独立复核人给出通过或返工裁决；存在缺口时生成新版本。",
+    "4. 人类逐条核对证据后决定关闭或退回，不把流程完成等同于质量通过。",
+    "",
+    "## 风险与停止条件",
+    "- 如果缺少真实来源、结构化复核裁决或可核对证据，应停止关单并退回补充。",
+    "- 如果模型预算不足或需要外部网络工具，应先暂停并等待人工批准。",
+    "",
+    "## 来源与假设",
+    "本次未使用外部资料。内容仅来自任务简报与 Mock 流程规则，所有业务判断均待真实执行验证。",
+    "",
+    "## 交付自查表",
+    "| 序号 | 状态 | 验收标准 / 证据位置 |",
+    "|---|---|---|",
+    checklist,
+  ].join("\n");
+}
+
 async function mockRun(ctx: RunCtx, emit: (delta: string) => void) {
   const { agent } = ctx;
   let text: string;
@@ -2459,7 +3556,9 @@ async function mockRun(ctx: RunCtx, emit: (delta: string) => void) {
       task_id: ctx.taskId,
       agent_id: agent.id,
       title: `（Mock）${task?.title ?? "交付物"}`,
-      content: `# ${task?.title ?? "交付物"}\n\n这是 Mock 模式生成的演示交付物。配置 \`ANTHROPIC_API_KEY\` 后，${agent.name} 会真实调研并撰写完整文档。`,
+      content: task
+        ? mockTaskDocument(task, agent.name)
+        : `# 交付物\n\n这是 Mock 模式生成的演示交付物。接入模型后才会生成正式内容。`,
     });
     ctx.createdDocIds.push(doc.id);
     broadcast({ type: "doc:upsert", payload: doc });

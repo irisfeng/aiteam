@@ -13,6 +13,12 @@
   --t-accent-soft: #eaf2ff;
   --t-code-bg: #111827;
   --t-code-ink: #f8fafc;
+  --brand-mark-bg: #eaf2ff;
+  --brand-mark-border: #c7dcff;
+  --brand-mark-ink: #1d4ed8;
+  --brand-mark-core: #16a34a;
+  --brand-mark-core-ring: #ffffff;
+  --brand-mark-shadow: 0 2px 7px rgb(37 99 235 / 0.14);
 }
 .dark {
   --t-bg: #0f141b;
@@ -26,6 +32,12 @@
   --t-accent-soft: #13243a;
   --t-code-bg: #0b1020;
   --t-code-ink: #e6edf6;
+  --brand-mark-bg: #173150;
+  --brand-mark-border: #31567f;
+  --brand-mark-ink: #d7e8ff;
+  --brand-mark-core: #4ade80;
+  --brand-mark-core-ring: #173150;
+  --brand-mark-shadow: 0 2px 8px rgb(0 0 0 / 0.28);
 }
 
 @theme {
@@ -48,6 +60,32 @@ html, body, #root {
 body {
   @apply bg-paper text-ink font-sans antialiased;
   font-size: 14px;
+}
+
+/* 品牌标：四个 AI 同事节点围绕任务核心，随主题反转明暗层级。 */
+.brand-mark {
+  border: 1px solid var(--brand-mark-border);
+  border-radius: 30%;
+  background: var(--brand-mark-bg);
+  color: var(--brand-mark-ink);
+  box-shadow: var(--brand-mark-shadow);
+}
+.brand-mark-network {
+  width: 74%;
+  height: 74%;
+}
+.brand-mark-core {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 17%;
+  height: 17%;
+  min-width: 4px;
+  min-height: 4px;
+  transform: translate(-50%, -50%) rotate(45deg);
+  border: 1px solid var(--brand-mark-core-ring);
+  border-radius: 28%;
+  background: var(--brand-mark-core);
 }
 
 /* 主题切换丝滑过渡（只对颜色属性，不影响布局性能） */

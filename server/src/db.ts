@@ -1,17 +1,104 @@
 import Database from "better-sqlite3";
-import { mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { nanoid } from "nanoid";
 import { currentOwner } from "./ownerScope.js";
-import { decryptSecret, encryptSecret } from "./secrets.js";
+import { assertCredentialKeyReady, canonicalizeSecret, decryptSecret, encryptSecret } from "./secrets.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // AITEAM_DATA_DIR：测试/多实例可指向隔离目录；不设则用默认 server/data
 const dataDir = process.env.AITEAM_DATA_DIR || join(__dirname, "..", "data");
 mkdirSync(dataDir, { recursive: true });
+const dbPath = join(dataDir, "aiteam.db");
 
-export const db = new Database(join(dataDir, "aiteam.db"));
+type StoredImageProvider = Record<string, unknown> & { api_key?: string | null };
+
+function parseStoredImageProvider(value: string): StoredImageProvider {
+  const parsed = JSON.parse(value) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("image_provider 配置格式损坏，拒绝迁移");
+  }
+  const provider = parsed as StoredImageProvider;
+  if (provider.api_key != null && typeof provider.api_key !== "string") {
+    throw new Error("image_provider api_key 必须是字符串或空值，拒绝迁移");
+  }
+  return provider;
+}
+
+/**
+ * Production copy-only 门禁必须早于 journal_mode、CREATE/ALTER 等任何数据库写入。
+ * 把现有 db/WAL/SHM 镜像到临时目录后扫描凭证列，避免 SQLite 在源目录补建 -shm；
+ * plaintext/enc:v1/坏 enc1 会直接抛错。
+ */
+function preflightProductionCredentials(path: string): void {
+  if (process.env.NODE_ENV !== "production" || !existsSync(path)) return;
+  const probeDir = mkdtempSync(join(tmpdir(), "aiteam-credential-preflight-"));
+  const probePath = join(probeDir, "aiteam.db");
+  try {
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const source = `${path}${suffix}`;
+      if (existsSync(source)) copyFileSync(source, `${probePath}${suffix}`);
+    }
+    const probe = new Database(probePath, { readonly: true, fileMustExist: true });
+    const tableColumns = (table: string): Set<string> => {
+      const exists = probe.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?"
+      ).get(table);
+      if (!exists) return new Set();
+      return new Set(
+        (probe.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[])
+          .map((column) => column.name)
+      );
+    };
+    const validate = (value: unknown, emptyValues = new Set([""])) => {
+      if (typeof value !== "string") throw new Error("凭证字段格式损坏，必须是字符串");
+      if (!emptyValues.has(value)) canonicalizeSecret(value);
+    };
+    try {
+      probe.pragma("query_only = ON");
+      const providerColumns = tableColumns("providers");
+      if (providerColumns.has("api_key")) {
+        for (const row of probe.prepare("SELECT api_key FROM providers").all() as { api_key: unknown }[]) {
+          validate(row.api_key);
+        }
+      }
+      const mcpColumns = tableColumns("mcp_servers");
+      if (mcpColumns.has("auth_token")) {
+        for (const row of probe.prepare("SELECT auth_token FROM mcp_servers").all() as { auth_token: unknown }[]) {
+          validate(row.auth_token);
+        }
+      }
+      if (mcpColumns.has("env_json")) {
+        for (const row of probe.prepare("SELECT env_json FROM mcp_servers").all() as { env_json: unknown }[]) {
+          validate(row.env_json, new Set(["", "{}"]));
+        }
+      }
+      const settingColumns = tableColumns("app_settings");
+      if (settingColumns.has("key") && settingColumns.has("value")) {
+        const row = probe.prepare(
+          "SELECT value FROM app_settings WHERE key = 'image_provider'"
+        ).get() as { value: unknown } | undefined;
+        if (row?.value != null) {
+          if (typeof row.value !== "string") throw new Error("image_provider 配置格式损坏，拒绝迁移");
+          const parsed = parseStoredImageProvider(row.value);
+          validate(parsed.api_key ?? "");
+        }
+      }
+    } finally {
+      probe.close();
+    }
+  } finally {
+    rmSync(probeDir, { recursive: true, force: true });
+  }
+}
+
+// 生产缺密钥或含旧格式时，在创建/修改数据库文件前失败。
+assertCredentialKeyReady();
+preflightProductionCredentials(dbPath);
+
+export const db = new Database(dbPath);
 db.pragma("journal_mode = WAL");
 
 db.exec(`
@@ -85,7 +172,8 @@ CREATE TABLE IF NOT EXISTS approvals (
   payload TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'pending',
   created_at INTEGER NOT NULL,
-  resolved_at INTEGER
+  resolved_at INTEGER,
+  consumed_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS agent_memory (
   agent_id TEXT PRIMARY KEY,
@@ -177,6 +265,7 @@ addColumnIfMissing("providers", "web_tools", "web_tools INTEGER NOT NULL DEFAULT
 addColumnIfMissing("projects", "autonomy", "autonomy TEXT NOT NULL DEFAULT 'auto'");
 addColumnIfMissing("approvals", "kind", "kind TEXT NOT NULL DEFAULT 'action'");
 addColumnIfMissing("approvals", "ref_id", "ref_id TEXT");
+addColumnIfMissing("approvals", "consumed_at", "consumed_at INTEGER");
 addColumnIfMissing("documents", "kind", "kind TEXT NOT NULL DEFAULT 'report'");
 addColumnIfMissing("messages", "model", "model TEXT NOT NULL DEFAULT ''");
 addColumnIfMissing("messages", "reply_to", "reply_to TEXT");
@@ -260,19 +349,44 @@ addColumnIfMissing("skills", "version", "version INTEGER NOT NULL DEFAULT 1");  
 addColumnIfMissing("mcp_servers", "safety", "safety TEXT NOT NULL DEFAULT 'local'");  // local | network | exec
 addColumnIfMissing("mcp_servers", "env_json", "env_json TEXT NOT NULL DEFAULT '{}'"); // stdio 子进程环境变量（如 BOCHA_API_KEY），值含密钥→sanitize 只暴露 key 名
 db.exec(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '')`);
-// 存量明文凭证迁移（幂等）：auth_token / env_json 落库一律密文，库文件单独泄漏不再等于凭证泄漏。
-// 读取侧统一走 decryptSecret（兼容前缀判断），此处只负责把老行重写为密文。
-for (const row of db.prepare("SELECT id, auth_token, env_json FROM mcp_servers").all() as {
-  id: string;
-  auth_token: string;
-  env_json: string;
-}[]) {
-  const token = encryptSecret(row.auth_token);
-  const env = row.env_json && row.env_json !== "{}" ? encryptSecret(row.env_json) : row.env_json;
-  if (token !== row.auth_token || env !== row.env_json) {
-    db.prepare("UPDATE mcp_servers SET auth_token = ?, env_json = ? WHERE id = ?").run(token, env, row.id);
-  }
-}
+// 启动凭证门禁：生产只认证已有 enc1，遇到 plaintext/enc:v1 直接拒启并指向 copy-only migrate-copy；
+// 仅开发/测试允许在事务内把旧格式原地规范化。任一错误均整体回滚，禁止部分迁移。
+(function migrateStoredSecrets() {
+  assertCredentialKeyReady();
+  db.transaction(() => {
+    const providers = db.prepare("SELECT id, api_key FROM providers").all() as { id: string; api_key: string }[];
+    const updateProvider = db.prepare("UPDATE providers SET api_key = ? WHERE id = ?");
+    for (const row of providers) {
+      const next = canonicalizeSecret(row.api_key);
+      if (next !== row.api_key) updateProvider.run(next, row.id);
+    }
+
+    const servers = db.prepare("SELECT id, auth_token, env_json FROM mcp_servers").all() as {
+      id: string;
+      auth_token: string;
+      env_json: string;
+    }[];
+    const updateMcp = db.prepare("UPDATE mcp_servers SET auth_token = ?, env_json = ? WHERE id = ?");
+    for (const row of servers) {
+      const authToken = canonicalizeSecret(row.auth_token);
+      const envJson = row.env_json && row.env_json !== "{}" ? canonicalizeSecret(row.env_json) : "{}";
+      if (authToken !== row.auth_token || envJson !== row.env_json) updateMcp.run(authToken, envJson, row.id);
+    }
+
+    const imageRow = db.prepare("SELECT value FROM app_settings WHERE key = 'image_provider'").get() as
+      | { value: string }
+      | undefined;
+    if (imageRow?.value) {
+      const parsed = parseStoredImageProvider(imageRow.value);
+      const apiKey = parsed.api_key ?? "";
+      const next = canonicalizeSecret(apiKey);
+      if (next !== apiKey) {
+        db.prepare("UPDATE app_settings SET value = ? WHERE key = 'image_provider'")
+          .run(JSON.stringify({ ...parsed, api_key: next }));
+      }
+    }
+  })();
+})();
 // 用户表（standalone 多用户登录）：全局表，不带 owner_id（owner = user:<id> 由此派生）
 db.exec(`CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
@@ -386,7 +500,7 @@ export interface Task {
   channel_id: string | null;
   title: string;
   description: string;
-  status: "todo" | "doing" | "review" | "blocked" | "done";
+  status: "todo" | "doing" | "review" | "blocked" | "done" | "cancelled";
   assignee_agent_id: string | null;
   reviewer_agent_id: string | null;
   blocked_approval_id: string | null;
@@ -431,13 +545,15 @@ export interface Approval {
   agent_id: string;
   title: string;
   payload: string;
-  /** action = 高风险动作审批；plan = 项目计划把关；clarification = 任务阻塞后向用户要输入；budget = 任务超预算暂停，批准即追加预算继续 */
-  kind: "action" | "plan" | "clarification" | "budget";
-  /** plan 关联 project id；clarification/budget 关联 task id；action 可关联工具/任务 id */
+  /** action = 普通高风险动作；network = 引擎签发的单次 MCP 外发；plan = 项目计划；clarification = 阻塞输入；budget = 超预算暂停 */
+  kind: "action" | "network" | "plan" | "clarification" | "budget";
+  /** plan 关联 project id；network/clarification/budget 关联 task id；action 可关联普通动作/任务 id */
   ref_id: string | null;
   status: "pending" | "approved" | "rejected";
   created_at: number;
   resolved_at: number | null;
+  /** 一次性 network 授权的关闭时间；真实调用前消费，停止/改派/取消时也会失效关闭 */
+  consumed_at: number | null;
 }
 
 export interface TaskEvent {
@@ -458,6 +574,7 @@ export interface TaskEvent {
     | "verification"
     | "approval"
     | "user_close"
+    | "cancelled"
     | "failure";
   summary: string;
   metadata_json: string;
@@ -499,11 +616,17 @@ export function createAgent(a: {
 }
 
 // ---- providers（模型供应商 / BYOM）—— 全局共享（管理员配一套 key，所有用户共用）----
+function decryptProvider(p: Provider | undefined): Provider | undefined {
+  if (!p) return p;
+  return { ...p, api_key: decryptSecret(p.api_key) };
+}
+
 export function listProviders(): Provider[] {
-  return db.prepare("SELECT * FROM providers ORDER BY created_at").all() as Provider[];
+  return (db.prepare("SELECT * FROM providers ORDER BY created_at").all() as Provider[])
+    .map((p) => decryptProvider(p)!);
 }
 export function getProvider(id: string): Provider | undefined {
-  return db.prepare("SELECT * FROM providers WHERE id = ?").get(id) as Provider | undefined;
+  return decryptProvider(db.prepare("SELECT * FROM providers WHERE id = ?").get(id) as Provider | undefined);
 }
 export function createProvider(p: {
   name: string;
@@ -522,7 +645,7 @@ export function createProvider(p: {
     id: nanoid(10),
     name: p.name,
     base_url: p.base_url ?? "",
-    api_key: p.api_key ?? "",
+    api_key: encryptSecret(p.api_key ?? ""),
     default_model: p.default_model ?? "",
     light_model: p.light_model ?? "",
     max_tokens: p.max_tokens && p.max_tokens > 0 ? p.max_tokens : 16000,
@@ -537,7 +660,7 @@ export function createProvider(p: {
   db.prepare(
     "INSERT INTO providers (id, name, base_url, api_key, default_model, light_model, max_tokens, web_tools, is_strong, price_input_per_million, price_output_per_million, price_currency, is_official, created_at) VALUES (@id, @name, @base_url, @api_key, @default_model, @light_model, @max_tokens, @web_tools, @is_strong, @price_input_per_million, @price_output_per_million, @price_currency, @is_official, @created_at)"
   ).run(provider);
-  return provider;
+  return { ...provider, api_key: p.api_key ?? "" };
 }
 export function updateProvider(
   id: string,
@@ -555,7 +678,7 @@ export function updateProvider(
   };
   db.prepare(
     "UPDATE providers SET name = @name, base_url = @base_url, api_key = @api_key, default_model = @default_model, light_model = @light_model, max_tokens = @max_tokens, web_tools = @web_tools, is_strong = @is_strong, price_input_per_million = @price_input_per_million, price_output_per_million = @price_output_per_million, price_currency = @price_currency WHERE id = @id"
-  ).run(next);
+  ).run({ ...next, api_key: encryptSecret(next.api_key) });
   return next;
 }
 export function deleteProvider(id: string) {
@@ -599,16 +722,23 @@ export interface ImageProvider {
   model: string;
 }
 export function getImageProvider(): ImageProvider {
+  const stored = getSetting("image_provider");
+  if (!stored) return { base_url: "", api_key: "", model: "" };
+  let raw: Record<string, unknown>;
   try {
-    const raw = JSON.parse(getSetting("image_provider") || "{}");
-    return {
-      base_url: String(raw.base_url ?? ""),
-      api_key: String(raw.api_key ?? ""),
-      model: String(raw.model ?? ""),
-    };
+    const parsed = JSON.parse(stored) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { base_url: "", api_key: "", model: "" };
+    }
+    raw = parsed as Record<string, unknown>;
   } catch {
     return { base_url: "", api_key: "", model: "" };
   }
+  return {
+    base_url: String(raw.base_url ?? ""),
+    api_key: decryptSecret(String(raw.api_key ?? "")),
+    model: String(raw.model ?? ""),
+  };
 }
 export function setImageProvider(p: { base_url?: string; api_key?: string; model?: string }): ImageProvider {
   const cur = getImageProvider();
@@ -618,7 +748,7 @@ export function setImageProvider(p: { base_url?: string; api_key?: string; model
     api_key: p.api_key === "-" ? "" : p.api_key ? p.api_key.trim() : cur.api_key,
     model: (p.model ?? cur.model).trim(),
   };
-  setSetting("image_provider", JSON.stringify(next));
+  setSetting("image_provider", JSON.stringify({ ...next, api_key: encryptSecret(next.api_key) }));
   return next;
 }
 /** 给前端的脱敏视图：永不下发 api_key */
@@ -1295,20 +1425,25 @@ export function updateProject(
 }
 /**
  * 项目级批量关单（human-only 的关闭动作，一次决策关掉整个项目）：
- * 把该项目所有"待评审/进行中/待办"的任务一次性置 done，并把项目本身置 done。
+ * 只把该项目的"待评审"任务置 done；已取消任务保持 cancelled，避免伪装成交付验收。
+ * 路由层负责阻止仍含待办/进行中/阻塞任务的项目进入本函数。
  * 返回被改动的任务（供前端/SSE 增量更新）与项目。
  */
 export function closeProject(projectId: string): { project: Project | undefined; tasks: Task[] } {
-  const project = getProject(projectId);
-  if (!project) return { project: undefined, tasks: [] };
-  const open = (db.prepare("SELECT * FROM tasks WHERE owner_id = ? AND project_id = ? AND status != 'done'").all(currentOwner(), projectId) as Task[]);
-  const updated: Task[] = [];
-  for (const t of open) {
-    const next = updateTask(t.id, { status: "done" });
-    if (next) updated.push(next);
-  }
-  const nextProject = updateProject(projectId, { status: "done" });
-  return { project: nextProject, tasks: updated };
+  return db.transaction(() => {
+    const project = getProject(projectId);
+    if (!project) return { project: undefined, tasks: [] };
+    const open = db
+      .prepare("SELECT * FROM tasks WHERE owner_id = ? AND project_id = ? AND status = 'review'")
+      .all(currentOwner(), projectId) as Task[];
+    const updated: Task[] = [];
+    for (const t of open) {
+      const next = updateTask(t.id, { status: "done" });
+      if (next) updated.push(next);
+    }
+    const nextProject = updateProject(projectId, { status: "done" });
+    return { project: nextProject, tasks: updated };
+  })();
 }
 
 // ---- approvals（每用户私有）----
@@ -1338,18 +1473,33 @@ export function createApproval(a: {
     status: "pending",
     created_at: now(),
     resolved_at: null,
+    consumed_at: null,
   };
   db.prepare(
-    "INSERT INTO approvals (id, owner_id, channel_id, agent_id, title, payload, kind, ref_id, status, created_at, resolved_at) VALUES (@id, @owner_id, @channel_id, @agent_id, @title, @payload, @kind, @ref_id, @status, @created_at, @resolved_at)"
+    "INSERT INTO approvals (id, owner_id, channel_id, agent_id, title, payload, kind, ref_id, status, created_at, resolved_at, consumed_at) VALUES (@id, @owner_id, @channel_id, @agent_id, @title, @payload, @kind, @ref_id, @status, @created_at, @resolved_at, @consumed_at)"
   ).run(approval);
   return approval;
 }
 export function resolveApproval(id: string, approve: boolean): Approval | undefined {
-  const cur = getApproval(id);
-  if (!cur || cur.status !== "pending") return cur;
-  const next: Approval = { ...cur, status: approve ? "approved" : "rejected", resolved_at: now() };
-  db.prepare("UPDATE approvals SET status = ?, resolved_at = ? WHERE id = ?").run(next.status, next.resolved_at, id);
-  return next;
+  return resolveApprovalOnce(id, approve)?.approval;
+}
+
+/**
+ * 原子落定审批。只有第一个 pending→final 的请求 changed=true；
+ * 并发/重复请求只能读到最终状态，不会再次触发恢复、外呼或消息副作用。
+ */
+export function resolveApprovalOnce(
+  id: string,
+  approve: boolean,
+): { approval: Approval; changed: boolean } | undefined {
+  const resolvedAt = now();
+  const status: Approval["status"] = approve ? "approved" : "rejected";
+  const result = db.prepare(
+    "UPDATE approvals SET status = ?, resolved_at = ? WHERE id = ? AND owner_id = ? AND status = 'pending'"
+  ).run(status, resolvedAt, id, currentOwner());
+  const approval = getApproval(id);
+  if (!approval) return undefined;
+  return { approval, changed: result.changes === 1 };
 }
 
 export function updateApprovalPayload(id: string, payload: string): Approval | undefined {
@@ -1358,6 +1508,90 @@ export function updateApprovalPayload(id: string, payload: string): Approval | u
   const next: Approval = { ...cur, payload };
   db.prepare("UPDATE approvals SET payload = ? WHERE id = ? AND owner_id = ?").run(payload, id, currentOwner());
   return next;
+}
+
+/** 原子关闭一次性授权；多进程/重复调用下只有第一个 approved+未关闭请求能成功。 */
+export function consumeApproval(id: string): boolean {
+  const consumedAt = now();
+  const result = db.prepare(
+    "UPDATE approvals SET consumed_at = ? WHERE id = ? AND owner_id = ? AND status = 'approved' AND consumed_at IS NULL"
+  ).run(consumedAt, id, currentOwner());
+  return result.changes === 1;
+}
+
+/**
+ * 停止/取消/改派任务时原子关闭全部尚未结束的 network 审批：
+ * pending → rejected，approved+未消费 → consumed，避免旧审批或旧授权稍后复活。
+ */
+export function invalidateNetworkApprovalsForTask(taskId: string): number {
+  const closedAt = now();
+  const result = db.prepare(`
+    UPDATE approvals
+    SET
+      status = CASE WHEN status = 'pending' THEN 'rejected' ELSE status END,
+      resolved_at = CASE WHEN status = 'pending' THEN ? ELSE resolved_at END,
+      consumed_at = CASE
+        WHEN status = 'approved' AND consumed_at IS NULL THEN ?
+        ELSE consumed_at
+      END
+    WHERE owner_id = ?
+      AND ref_id = ?
+      AND kind = 'network'
+      AND (
+        status = 'pending'
+        OR (status = 'approved' AND consumed_at IS NULL)
+      )
+  `).run(closedAt, closedAt, currentOwner(), taskId);
+  return result.changes;
+}
+
+/**
+ * network MCP 审批的服务端签发点：审批插入和 doing→blocked 必须同一事务完成。
+ * 任务已停止、改派、重复阻塞或状态已变化时不创建孤立审批。
+ */
+export function createBlockingNetworkApproval(a: {
+  task_id: string;
+  agent_id: string;
+  channel_id?: string | null;
+  title: string;
+  payload: string;
+}): { approval: Approval; task: Task } | undefined {
+  const owner = currentOwner();
+  const run = db.transaction(() => {
+    const task = db.prepare(
+      "SELECT * FROM tasks WHERE id = ? AND owner_id = ?"
+    ).get(a.task_id, owner) as Task | undefined;
+    if (
+      !task ||
+      task.status !== "doing" ||
+      task.assignee_agent_id !== a.agent_id ||
+      task.blocked_approval_id !== null
+    ) return undefined;
+
+    const approval = createApproval({
+      channel_id: a.channel_id ?? task.channel_id,
+      agent_id: a.agent_id,
+      title: a.title,
+      payload: a.payload,
+      kind: "network",
+      ref_id: task.id,
+    });
+    const updatedAt = now();
+    const changed = db.prepare(
+      "UPDATE tasks SET status = 'blocked', blocked_approval_id = ?, updated_at = ? WHERE id = ? AND owner_id = ? AND status = 'doing' AND assignee_agent_id = ? AND blocked_approval_id IS NULL"
+    ).run(approval.id, updatedAt, task.id, owner, a.agent_id);
+    if (changed.changes !== 1) throw new Error("network approval task state changed");
+    return {
+      approval,
+      task: { ...task, status: "blocked" as const, blocked_approval_id: approval.id, updated_at: updatedAt },
+    };
+  });
+  try {
+    return run();
+  } catch (err) {
+    if (err instanceof Error && err.message === "network approval task state changed") return undefined;
+    throw err;
+  }
 }
 
 // ---- documents（每用户私有）----

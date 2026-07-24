@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Notification, Tray, dialog, ipcMain, nativeImage, shell } = require("electron");
+const { app, BrowserWindow, Menu, Notification, Tray, dialog, ipcMain, nativeImage, nativeTheme, shell } = require("electron");
 const { spawn } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -30,18 +30,47 @@ const bundledNode = process.platform === "win32"
   ? path.join(process.resourcesPath, "node", "node.exe")
   : path.join(process.resourcesPath, "node", "bin", "node");
 
-function iconImage() {
+function iconImage(dark = nativeTheme.shouldUseDarkColors) {
+  const palette = dark
+    ? { surface: "#173150", border: "#31567F", network: "#D7E8FF", core: "#4ADE80", ring: "#173150" }
+    : { surface: "#EAF2FF", border: "#C7DCFF", network: "#1D4ED8", core: "#16A34A", ring: "#FFFFFF" };
   const svg = encodeURIComponent(`
     <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
-      <rect width="64" height="64" rx="14" fill="#111827"/>
-      <path d="M14 48 32 12l18 36h-8l-3.8-8.2H25.8L22 48h-8Zm15-14.8h6L32 26l-3 7.2Z" fill="#F8FAF7"/>
-      <path d="m40 22 5.2 5.4L55 16" fill="none" stroke="#22C55E" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
-      <path d="M18 48h28" fill="none" stroke="#475569" stroke-width="3" stroke-linecap="round"/>
-      <circle cx="18" cy="48" r="4.5" fill="#3B82F6"/>
-      <circle cx="46" cy="48" r="4.5" fill="#22C55E"/>
+      <rect x="1" y="1" width="62" height="62" rx="18" fill="${palette.surface}" stroke="${palette.border}" stroke-width="2"/>
+      <g fill="none" stroke="${palette.network}" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="32" cy="14" r="6"/><path d="m27.7 18.3-9.4 9.4"/>
+        <circle cx="14" cy="32" r="6"/><path d="M20 32h24"/>
+        <circle cx="50" cy="32" r="6"/><path d="m36.3 45.7 9.4-9.4"/>
+        <circle cx="32" cy="50" r="6"/>
+      </g>
+      <rect x="27.5" y="27.5" width="9" height="9" rx="2" fill="${palette.core}" stroke="${palette.ring}" stroke-width="2" transform="rotate(45 32 32)"/>
     </svg>
   `);
   return nativeImage.createFromDataURL(`data:image/svg+xml;charset=utf-8,${svg}`);
+}
+
+function trayIconImage() {
+  const svg = encodeURIComponent(`
+    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 64 64">
+      <g fill="none" stroke="#000" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="32" cy="14" r="6"/><path d="m27.7 18.3-9.4 9.4"/>
+        <circle cx="14" cy="32" r="6"/><path d="M20 32h24"/>
+        <circle cx="50" cy="32" r="6"/><path d="m36.3 45.7 9.4-9.4"/>
+        <circle cx="32" cy="50" r="6"/>
+      </g>
+      <rect x="27" y="27" width="10" height="10" rx="2" fill="#000" transform="rotate(45 32 32)"/>
+    </svg>
+  `);
+  const image = nativeImage.createFromDataURL(`data:image/svg+xml;charset=utf-8,${svg}`).resize({ width: 20, height: 20 });
+  if (process.platform === "darwin") image.setTemplateImage(true);
+  return image;
+}
+
+function refreshNativeIcons() {
+  const image = iconImage();
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setIcon(image);
+  if (process.platform === "darwin" && app.dock) app.dock.setIcon(image);
+  if (tray && !tray.isDestroyed()) tray.setImage(trayIconImage());
 }
 
 function getFreePort() {
@@ -392,6 +421,18 @@ function createMenu() {
       ],
     },
     {
+      label: "编辑",
+      submenu: [
+        { role: "undo", label: "撤销" },
+        { role: "redo", label: "重做" },
+        { type: "separator" },
+        { role: "cut", label: "剪切" },
+        { role: "copy", label: "复制" },
+        { role: "paste", label: "粘贴" },
+        { role: "selectAll", label: "全选" },
+      ],
+    },
+    {
       label: "视图",
       submenu: [
         { role: "reload", label: "重新加载" },
@@ -406,7 +447,7 @@ function createMenu() {
 }
 
 function createTray() {
-  tray = new Tray(iconImage());
+  tray = new Tray(trayIconImage());
   tray.setToolTip("AiTeam");
   const update = () => {
     const remoteActive = settings.mode === "remote";
@@ -546,6 +587,8 @@ if (!gotLock) {
     createMenu();
     createTray();
     createWindow();
+    refreshNativeIcons();
+    nativeTheme.on("updated", refreshNativeIcons);
   });
 
   app.on("before-quit", () => {

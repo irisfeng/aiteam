@@ -1,10 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { useWorkspace } from "../store";
-import { API_BASE, api, type ScenarioInfo } from "../api";
+import { API_BASE, api, billableTokens, parseTaskUsage, type ScenarioInfo } from "../api";
 import type { Task, TaskEvent } from "../types";
 import { computeWorkline } from "../lib/workline";
 import type { SettingsTab } from "./Modals";
 import { INTEGRATIONS_UPDATED_EVENT } from "./IntegrationsTabs";
+import {
+  providerBenchmarkBatchConfirmation,
+  providerBenchmarkRunInput,
+} from "../lib/providerBenchmark";
 
 const EVENT_LABEL: Record<TaskEvent["type"], string> = {
   created: "创建",
@@ -17,6 +21,7 @@ const EVENT_LABEL: Record<TaskEvent["type"], string> = {
   verification: "复核",
   approval: "审批",
   user_close: "关闭",
+  cancelled: "取消",
   failure: "失败",
 };
 const LINK_CHECK_PROJECT_PREFIX = "配置链路验收";
@@ -123,7 +128,7 @@ interface SkillListItem {
 interface LinkCheckResult {
   id: string;
   label: string;
-  status: "passed" | "failed" | "skipped";
+  status: "passed" | "failed" | "waiting" | "skipped";
   detail: string;
   taskId?: string;
 }
@@ -208,6 +213,7 @@ export function WorklineOverview({
     total: number;
     delivered: number;
     done: number;
+    cancelled: number;
     status: "running" | "review" | "done";
   } | null;
   onOpenAcceptanceReview?: () => void;
@@ -266,6 +272,7 @@ export function WorklineOverview({
     .reverse();
   const firstByStatus = (status: Task["status"]) => scopedTasks.find((t) => t.status === status);
   const { running, blocked, blockedWithoutPendingApproval, review, todo, done, active, unassigned } = wl;
+  const cancelled = scopedTasks.filter((task) => task.status === "cancelled");
   const inputOrApprovalCount = scopedApprovals.length + blockedWithoutPendingApproval.length;
   const claimed = scopedTasks.filter((t) => t.assignee_agent_id);
   const attentionItems = wl.attention.map((item) => ({
@@ -284,7 +291,7 @@ export function WorklineOverview({
   const firstDone = firstByStatus("done");
   const firstTask = scopedTasks[0];
   const claimTask = unassigned[0] ?? claimed[0] ?? firstTask;
-  const allClosed = scopedTasks.length > 0 && active.length === 0;
+  const noActiveTasks = scopedTasks.length > 0 && active.length === 0;
   const closableProject = [...ws.projects]
     .filter((project) => project.status !== "done" && (!channelId || project.channel_id === channelId))
     .sort((a, b) => b.updated_at - a.updated_at)
@@ -296,9 +303,14 @@ export function WorklineOverview({
         approval.status === "pending" &&
         (approval.ref_id === project.id || (approval.ref_id ? ids.has(approval.ref_id) : false))
       );
-      return !hasPendingApproval && tasks.every((task) => task.status === "review" || task.status === "done");
+      return !hasPendingApproval && tasks.every(
+        (task) => task.status === "review" || task.status === "done" || task.status === "cancelled",
+      );
     });
   const closableProjectTasks = closableProject ? scopedTasks.filter((task) => task.project_id === closableProject.id) : [];
+  const closableReviewCount = closableProjectTasks.filter((task) => task.status === "review").length;
+  const closableDoneCount = closableProjectTasks.filter((task) => task.status === "done").length;
+  const closableCancelledCount = closableProjectTasks.filter((task) => task.status === "cancelled").length;
   const latestLinkCheckProject = [...ws.projects]
     .filter((p) => p.title.startsWith(LINK_CHECK_PROJECT_PREFIX) && (!channelId || p.channel_id === channelId))
     .sort((a, b) => {
@@ -313,10 +325,12 @@ export function WorklineOverview({
       : latestLinkCheckProject;
   const linkCheckTasks = linkCheckProject ? ws.tasks.filter((t) => t.project_id === linkCheckProject.id) : [];
   const linkCheckDelivered = linkCheckTasks.filter((t) => t.status === "review" || t.status === "done").length;
-  const linkCheckDone = linkCheckTasks.filter((t) => t.status === "done").length;
-  const linkCheckReady = linkCheckTasks.length > 0 && linkCheckDelivered === linkCheckTasks.length;
-  const linkCheckClosed = linkCheckTasks.length > 0 && linkCheckDone === linkCheckTasks.length;
-  const linkCheckOpen = Boolean(linkCheckProject && !linkCheckClosed);
+  const linkCheckCancelled = linkCheckTasks.filter((t) => t.status === "cancelled").length;
+  const linkCheckReady = linkCheckTasks.length > 0 && linkCheckTasks.every(
+    (task) => task.status === "review" || task.status === "done" || task.status === "cancelled",
+  );
+  const linkCheckClosed = linkCheckProject?.status === "done";
+  const linkCheckOpen = Boolean(linkCheckProject && linkCheckProject.status !== "done");
   const parseEventMeta = (event: TaskEvent) => {
     try {
       return JSON.parse(event.metadata_json || "{}") as Record<string, unknown>;
@@ -325,13 +339,15 @@ export function WorklineOverview({
     }
   };
   const persistedLinkCheckResults: LinkCheckResult[] = linkCheckTasks.map((task) => {
-    const isProvider = task.title.startsWith("模型任务演练：");
+    const isProvider = task.title.startsWith("真实模型质量基准：") || task.title.startsWith("模型任务演练：");
     const isMcp = task.title.startsWith("MCP 能力演练：");
     const isSkill = task.title.startsWith("技能演练：");
     const taskEvents = ws.taskEvents.filter((event) => event.task_id === task.id);
     const eventTypes = new Set(taskEvents.map((event) => event.type));
     const eventMetas = taskEvents.map(parseEventMeta);
-    const resultMeta = eventMetas.find((meta) => meta.provider_task_test === true);
+    const resultMeta = [...eventMetas].reverse().find((meta) => meta.provider_task_test === true);
+    const benchmarkMeta = eventMetas.find((meta) => typeof meta.benchmark_id === "string");
+    const verdictMeta = [...eventMetas].reverse().find((meta) => meta.result === "pass" || meta.result === "revise" || meta.result === "gap");
     const resultChecks =
       resultMeta && typeof resultMeta.checks === "object" && resultMeta.checks
         ? (resultMeta.checks as Record<string, unknown>)
@@ -343,20 +359,31 @@ export function WorklineOverview({
     const metaWithModel = eventMetas.find((meta) => typeof meta.model === "string");
     const model = typeof metaWithModel?.model === "string" ? metaWithModel.model : "";
     const latency = typeof resultMeta?.latency_ms === "number" ? ` · ${Math.round(resultMeta.latency_ms)}ms` : "";
-    const billable = typeof usageSummary?.billable === "number" ? ` · ${formatTokenCount(usageSummary.billable)} billable` : "";
+    const liveBillable = billableTokens(parseTaskUsage(task.usage_json));
+    const measuredBillable = typeof usageSummary?.billable === "number" ? usageSummary.billable : liveBillable;
+    const billable = measuredBillable > 0 ? ` · ${formatTokenCount(measuredBillable)} billable` : "";
     const estimatedCost = formatEstimatedCost(usageSummary?.estimated_cost, usageSummary?.price_currency);
     const toolObserved = eventTypes.has("tool");
     const delivered = eventTypes.has("delivery") || task.status === "review" || task.status === "done";
     const verified = eventTypes.has("verification");
     const usageTracked = typeof resultChecks?.usage_tracked === "boolean" ? resultChecks.usage_tracked : null;
+    const qualityContract = resultChecks?.quality_contract === true || benchmarkMeta?.rubric_count === 7;
+    const documentContract = resultChecks?.document_contract === true;
+    const independentReviewer = resultChecks?.independent_reviewer === true || Boolean(task.reviewer_agent_id && task.reviewer_agent_id !== task.assignee_agent_id);
+    const verdictRecorded = resultChecks?.verdict_recorded === true || verdictMeta?.result === "pass";
+    const withinBudget = resultChecks?.within_budget === true || (task.budget_billable > 0 && liveBillable <= task.budget_billable);
+    const sourceTraceClean = resultChecks?.source_trace_clean !== false;
+    const pendingApproval = task.status === "blocked" && ws.approvals.some((approval) => approval.ref_id === task.id && approval.status === "pending");
     const status: LinkCheckResult["status"] =
-      eventTypes.has("failure")
-        ? "failed"
+      pendingApproval
+        ? "waiting"
         : task.status === "review" || task.status === "done"
-          ? "passed"
+          ? verdictRecorded && sourceTraceClean ? "passed" : "failed"
+          : eventTypes.has("failure")
+        ? "failed"
           : "skipped";
     const label = isProvider
-      ? `模型 · ${task.title.replace("模型任务演练：", "")}`
+      ? `模型 · ${task.title.replace(/^真实模型质量基准：AiTeam 产品落地决策简报（|^模型任务演练：/, "").replace(/）$/, "")}`
       : isMcp
         ? `MCP · ${task.title.replace("MCP 能力演练：", "")}`
         : isSkill
@@ -364,7 +391,7 @@ export function WorklineOverview({
           : task.title;
     const detail =
       isProvider && model
-        ? `${model}${latency}${billable}${estimatedCost} · ${delivered ? "交付" : "未交付"} / ${toolObserved ? "工具" : "无工具"} / ${verified ? "验收" : "未验收"} / ${usageTracked === null ? "用量未知" : usageTracked ? "用量" : "无用量"}`
+        ? `${model}${latency}${billable}${estimatedCost} · ${delivered ? "交付" : "未交付"} / ${toolObserved ? "工具" : "无工具"} / ${qualityContract ? "7项契约" : "契约缺失"} / ${documentContract ? "机器预检" : "结构缺项"} / ${independentReviewer ? "独立复核" : "复核冲突"} / ${verdictRecorded ? "pass" : pendingApproval ? "待复核" : verified ? "未通过" : "未验收"} / ${sourceTraceClean ? "来源可追溯" : "来源冲突"} / ${pendingApproval ? "复核预算待批" : withinBudget ? "预算内" : "已触线"} / ${usageTracked === null ? "用量未知" : usageTracked ? "用量" : "无用量"}`
         : task.status === "review" || task.status === "done"
           ? `${task.status} · 已有可复核交付证据`
         : task.status === "blocked"
@@ -376,6 +403,7 @@ export function WorklineOverview({
   const providerCheckResults = visibleLinkCheckResults.filter((item) => item.id.startsWith("provider:") || item.label.startsWith("模型 · "));
   const providerPassed = providerCheckResults.filter((item) => item.status === "passed").length;
   const providerFailed = providerCheckResults.filter((item) => item.status === "failed").length;
+  const providerWaiting = providerCheckResults.filter((item) => item.status === "waiting").length;
   const providerBest = providerCheckResults.find((item) => item.status === "passed");
   const linkCheckButtonLabel = linkCheckBusy
     ? "自检中…"
@@ -393,7 +421,7 @@ export function WorklineOverview({
       ? "链路自检需要管理员权限"
       : linkCheckOpen
         ? "打开当前配置验收项目的任务证据；不重复创建新项目"
-        : "手动跑一次模型/MCP/Skills 任务演练；真实模型会产生少量 token 消耗";
+        : "先显示并确认每个模型通道的实际预算，再运行质量基准与 MCP/Skills 演练；取消不会调用模型";
   const acceptanceButtonLabel =
     scenarioBusy && activeScenarioId === "acceptance"
       ? "验收中…"
@@ -414,7 +442,7 @@ export function WorklineOverview({
       : blockedWithoutPendingApproval.length > 0
         ? `回应 ${blockedWithoutPendingApproval.length} 个阻塞任务，避免 AI 空转。`
         : closableProject
-          ? `项目「${closableProject.title}」已全部交付，确认后归档 ${closableProjectTasks.length} 个任务。`
+          ? `项目「${closableProject.title}」已全部进入终态：${closableReviewCount} 个待评审，${closableDoneCount} 个已完成，${closableCancelledCount} 个已取消；确认后归档项目。`
         : review.length > 0
           ? `复核 ${review.length} 个交付；通过后由你关单，未过则退回返工。`
           : running.length > 0
@@ -423,8 +451,8 @@ export function WorklineOverview({
               ? `给 ${unassigned.length} 个待办任务指定 AI 同事或让它认领。`
               : todo.length > 0
                 ? `${todo.length} 个任务等待依赖解锁或自动开工。`
-                : allClosed
-                  ? "本轮项目已关闭，可从最终交付物复盘。"
+                : noActiveTasks
+                  ? `当前无活跃任务：${done.length} 个完成，${cancelled.length} 个取消。${done.length > 0 ? "可查看已完成任务的交付物。" : ""}`
                   : "先启动一个核心场景，生成带依赖、复核和关单的任务链。";
   const nextActionCta =
     scopedApprovals.length > 0
@@ -446,7 +474,7 @@ export function WorklineOverview({
               ? { label: "指定负责人", onClick: () => onOpenTask(unassigned[0]), primary: false, disabled: false }
               : firstTodo
                 ? { label: "查看待办", onClick: () => onOpenTask(firstTodo), primary: false, disabled: false }
-                : allClosed && firstDone
+                : noActiveTasks && firstDone
                   ? { label: "查看归档", onClick: () => onOpenTask(firstDone), primary: false, disabled: false }
                   : onStartScenario
                     ? {
@@ -462,10 +490,19 @@ export function WorklineOverview({
     const project = ws.projects.find((p) => p.id === projectId);
     const tasks = ws.tasks.filter((task) => task.project_id === projectId);
     if (!project || tasks.length === 0) return;
-    if (!window.confirm(`确认关闭项目「${project.title}」？\n这会把 ${tasks.length} 个已交付任务归档为完成。`)) return;
+    const reviewCount = tasks.filter((task) => task.status === "review").length;
+    const doneCount = tasks.filter((task) => task.status === "done").length;
+    const cancelledCount = tasks.filter((task) => task.status === "cancelled").length;
+    if (!window.confirm(
+      `确认关闭项目「${project.title}」？\n` +
+      `将把 ${reviewCount} 个待评审任务归入「完成」；` +
+      `${doneCount} 个已完成任务保持「完成」；${cancelledCount} 个已取消任务保持「已取消」。`,
+    )) return;
     setClosingProjectId(projectId);
     try {
       await ws.closeProject(projectId);
+    } catch (error) {
+      window.alert(`关闭项目失败：${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setClosingProjectId(null);
     }
@@ -490,7 +527,34 @@ export function WorklineOverview({
     const mcp = latest.mcpServers.filter((s) => s.enabled)[0];
     const skill = latest.skills.filter((s) => s.enabled)[0];
     try {
-      const runnable = Boolean(providersToTest.length > 0 || mcp || skill);
+      const approvedProviderPlans = new Map<string, Awaited<ReturnType<typeof api.providerTaskTestPlan>>>();
+      const availablePlans = (await Promise.all(providersToTest.map(async (provider) => {
+        try {
+          return await api.providerTaskTestPlan(provider.id);
+        } catch (error) {
+          results.push({
+            id: `provider:${provider.id}`,
+            label: `模型 · ${provider.name}`,
+            status: "failed",
+            detail: `预算预检失败：${error instanceof Error ? error.message : String(error)}`.slice(0, 160),
+          });
+          return null;
+        }
+      }))).filter((plan): plan is NonNullable<typeof plan> => Boolean(plan));
+      const approvedProviderRun = availablePlans.length > 0 && window.confirm(providerBenchmarkBatchConfirmation(availablePlans));
+      if (approvedProviderRun) {
+        for (const plan of availablePlans) approvedProviderPlans.set(plan.provider.id, plan);
+      } else if (availablePlans.length > 0) {
+        for (const plan of availablePlans) {
+          results.push({
+            id: `provider:${plan.provider.id}`,
+            label: `模型 · ${plan.provider.name}`,
+            status: "skipped",
+            detail: "用户取消预算确认 · 未调用模型、未创建基准任务",
+          });
+        }
+      }
+      const runnable = Boolean(approvedProviderPlans.size > 0 || mcp || skill);
       const project = linkCheckOpen ? linkCheckProject ?? null : runnable ? (await api.startLinkCheck(channelArg)).project : null;
       if (project) {
         setLinkCheckProjectId(project.id);
@@ -499,15 +563,19 @@ export function WorklineOverview({
       const runArg = project ? { ...channelArg, project_id: project.id } : channelArg;
       if (providersToTest.length === 0) {
         results.push({ id: "provider", label: "模型", status: "skipped", detail: "未找到已保存 key 的模型供应商" });
-      } else {
+      } else if (approvedProviderPlans.size > 0) {
         for (const provider of providersToTest) {
+          const plan = approvedProviderPlans.get(provider.id);
+          if (!plan) continue;
           try {
-            const out = await ws.runProviderTaskTest(provider.id, runArg);
+            const out = await ws.runProviderTaskTest(provider.id, providerBenchmarkRunInput(plan, runArg));
             results.push({
               id: `provider:${provider.id}`,
               label: `模型 · ${provider.name}`,
-              status: out.ok ? "passed" : "failed",
-              detail: `${out.model} · ${Math.round(out.latency_ms)}ms · ${formatTokenCount(out.usage_summary?.billable)} billable${formatEstimatedCost(out.usage_summary?.estimated_cost, out.usage_summary?.price_currency)} · ${out.checks.delivered ? "交付" : "未交付"} / ${out.checks.tool_observed ? "工具" : "无工具"} / ${out.checks.verified ? "验收" : "未验收"} / ${out.checks.usage_tracked ? "用量" : "无用量"}`,
+              status: out.run_status === "passed" ? "passed" : out.run_status === "pending_approval" || out.run_status === "running" ? "waiting" : "failed",
+              detail: out.run_status === "running"
+                ? `${out.models.worker}→${out.models.reviewer} · 后台仍在运行，请勿重复启动 · 已等待 ${Math.round(out.latency_ms)}ms · 当前已记 ${formatTokenCount(out.usage_summary?.billable)} billable${formatEstimatedCost(out.usage_summary?.estimated_cost, out.usage_summary?.price_currency)}`
+                : `${out.models.worker}→${out.models.reviewer} · ${Math.round(out.latency_ms)}ms · ${formatTokenCount(out.usage_summary?.billable)} billable${formatEstimatedCost(out.usage_summary?.estimated_cost, out.usage_summary?.price_currency)} · ${out.checks.delivered ? "交付" : "未交付"} / ${out.checks.quality_contract ? "7项契约" : "契约缺失"} / ${out.checks.document_contract ? "机器预检" : "结构缺项"} / ${out.checks.independent_reviewer ? "独立复核" : "复核冲突"} / ${out.checks.verdict_recorded ? "pass" : out.checks.pending_approval ? "待复核" : "未通过"} / ${out.checks.source_trace_clean ? "来源可追溯" : "来源冲突"} / ${out.checks.pending_approval ? "复核预算待批" : out.checks.within_budget ? "预算内" : "已触线"}`,
               taskId: out.task.id,
             });
           } catch (e: any) {
@@ -583,8 +651,18 @@ export function WorklineOverview({
 
   async function closeLinkCheckProject() {
     if (!linkCheckProject || !linkCheckReady) return;
-    if (!window.confirm(`确认关闭配置验收项目「${linkCheckProject.title}」？\n这会把本轮模型/MCP/Skills 自检任务归档为完成。`)) return;
-    await ws.closeProject(linkCheckProject.id);
+    const reviewCount = linkCheckTasks.filter((task) => task.status === "review").length;
+    const doneCount = linkCheckTasks.filter((task) => task.status === "done").length;
+    if (!window.confirm(
+      `确认关闭配置验收项目「${linkCheckProject.title}」？\n` +
+      `将把 ${reviewCount} 个待评审任务归入「完成」；` +
+      `${doneCount} 个已完成任务保持「完成」；${linkCheckCancelled} 个已取消任务保持「已取消」。`,
+    )) return;
+    try {
+      await ws.closeProject(linkCheckProject.id);
+    } catch (error) {
+      window.alert(`关闭配置验收项目失败：${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   return (
@@ -707,8 +785,8 @@ export function WorklineOverview({
             <FlowStep
               index={6}
               label="关单"
-              value={allClosed ? "已关闭" : active.length > 0 ? `${active.length} 未关闭` : "等待交付"}
-              state={allClosed ? "done" : review.length > 0 ? "active" : "idle"}
+              value={closableProject ? "待确认关单" : noActiveTasks ? `${done.length} 完成 · ${cancelled.length} 取消` : active.length > 0 ? `${active.length} 未关闭` : "等待交付"}
+              state={closableProject ? "active" : noActiveTasks ? "done" : review.length > 0 ? "active" : "idle"}
               onClick={firstReview ? () => onOpenTask(firstReview) : firstDone ? () => onOpenTask(firstDone) : undefined}
             />
           </div>
@@ -813,12 +891,13 @@ export function WorklineOverview({
                     {acceptanceRun.status === "done"
                       ? "项目已由人确认关闭。"
                       : acceptanceRun.status === "review"
-                        ? "所有任务已交付，等待人类复核并关单。"
+                        ? `所有任务已进入终态：${acceptanceRun.delivered} 个已交付，${acceptanceRun.cancelled} 个已取消；等待人类复核并关单。`
                         : "AI 同事正在认领、执行和交付；完成后会进入待复核。"}
                   </div>
                 </div>
                 <span className="rounded bg-sel px-2 py-1 font-mono text-[11px] text-ink-3">
                   {acceptanceRun.delivered}/{acceptanceRun.total} delivered
+                  {acceptanceRun.cancelled > 0 ? ` · ${acceptanceRun.cancelled} cancelled` : ""}
                 </span>
                 {acceptanceRun.status === "review" && (
                   <>
@@ -858,8 +937,12 @@ export function WorklineOverview({
                     <div className="min-w-0 flex-1">
                       <div className="text-[12.5px] font-semibold">模型对比摘要</div>
                       <div className="mt-0.5 text-[11.5px] text-ink-3">
-                        {providerCheckResults.length} 个模型通道完成同构演练；{providerPassed} 通过，{providerFailed} 失败。
-                        {providerBest ? ` 当前可优先复核：${providerBest.label.replace("模型 · ", "")}。` : " 暂无通过项，先打开失败任务看错误。"}
+                        {providerCheckResults.length} 个模型通道已启动同构质量基准；{providerPassed} 通过，{providerFailed} 失败{providerWaiting > 0 ? `，${providerWaiting} 个等待审批` : ""}。
+                        {providerBest
+                          ? ` 当前可优先复核：${providerBest.label.replace("模型 · ", "")}。`
+                          : providerWaiting > 0
+                            ? " 先处理预算审批，再等待独立复核完成。"
+                            : " 暂无通过项，先打开失败任务看错误。"}
                       </div>
                     </div>
                     <span className="rounded bg-sel px-2 py-1 font-mono text-[11px] text-ink-3">
@@ -907,12 +990,13 @@ export function WorklineOverview({
                     {linkCheckClosed
                       ? "项目已由人确认关闭。"
                       : linkCheckReady
-                        ? "模型/MCP/Skills 演练已进入复核，可人工关单。"
+                        ? `模型/MCP/Skills 演练已进入终态：${linkCheckDelivered} 个已交付，${linkCheckCancelled} 个已取消；可人工关单。`
                         : "正在把所有已配置模型、MCP、Skills 演练任务收敛到同一项目。"}
                   </div>
                 </div>
                 <span className="rounded bg-sel px-2 py-1 font-mono text-[11px] text-ink-3">
                   {linkCheckDelivered}/{linkCheckTasks.length} delivered
+                  {linkCheckCancelled > 0 ? ` · ${linkCheckCancelled} cancelled` : ""}
                 </span>
                 {linkCheckTasks.length > 0 && (
                   <button

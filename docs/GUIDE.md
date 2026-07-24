@@ -9,8 +9,9 @@
 ```bash
 git clone <repo> && cd aiteam
 npm install
-npm run build && npm start        # 生产模式，打开 http://localhost:8787
-# 或开发模式：npm run dev          # 打开 http://localhost:5173（热更新）
+npm run dev                       # 本地开发，打开 http://localhost:5173/aiteam/（热更新）
+# 单进程构建版：npm run build && npm start
+# 打开 http://localhost:8787/aiteam/；production-like 启动需显式设置 NODE_ENV 和两类固定密钥，见 docs/TESTING.md
 ```
 
 不配置任何 key 也能跑（Mock 模式，全流程可点但回复是演示内容）。
@@ -32,8 +33,9 @@ npm run build && npm start        # 生产模式，打开 http://localhost:8787
 
 也可以直接点 **DeepSeek / SiliconFlow GLM / 百炼 DashScope** 预设卡自动填入协议路径和模型名。
 价格字段可选填输入/输出每百万 token 单价和币种，仅用于任务演练估算成本，不等同于供应商账单。
-保存后 Mock 徽标消失，内置同事全员可用。首次接入建议勾选 **保存后立即跑任务演练**，
-系统会自动验证工具调用、文档交付、验收和可计费用量归因（billable tokens）；若填了价格，还会展示估算成本，并提供「打开任务」查看活动日志。
+保存后 Mock 徽标消失，内置同事全员可用。首次接入建议勾选 **保存后立即跑质量基准**：
+系统在隔离上下文中用固定业务题让轻量模型产出，先用确定性机器契约检查结论、目标用户、七步工作流、14 天计划、风险、来源与逐条自查；明显缺项会直接返工且不消耗强模型复核额度，通过后再由强模型独立复核，并记录用量与最终裁决；
+开始前会先显示并要求确认当前配置的计费 token 上限（默认 `20,000`）与强模型复核预留（默认 `6,000`）；取消不会调用模型或创建任务。余额不足时保留初稿并暂停等待你决定是否追加，批准后直接从复核继续，不重复生成初稿。若填了价格，确认框还会展示保守金额估算，并提供「打开任务」查看完整交付物和活动日志。
 已配置的供应商可随时点「编辑」修改。
   联网说明：DeepSeek 官方确认其端点原生支持 Claude 的 Web Search——勾选"支持服务端联网工具"
   即可；系统会自动适配它支持的工具组合（不认 web_fetch 时降级仅搜索，逐级适配，留痕可查），
@@ -45,9 +47,9 @@ npm run build && npm start        # 生产模式，打开 http://localhost:8787
 
 ⚙ → 模型供应商 → 底部 **🎨 图像生成（Seedream）**：在
 [火山方舟控制台](https://console.volcengine.com/ark) 开通 Seedream 文生图并创建接入点，
-把 **API Key** 与**接入点 ID**（如 `doubao-seedream-5-0-260128`，以控制台展示为准）填入保存。
+把 **API Key** 与**模型 ID / 接入点 ID**（如 `doubao-seedream-5-0-pro-260628`，以控制台展示为准）填入保存。
 之后所有同事获得 `generate_image` 工具：做报告/PPT 时会自动生成封面、概念示意等点睛配图并嵌入正文。
-按张计费，单次运行上限 3 张（`AITEAM_IMAGES_PER_RUN` 可调）；数据图表不走文生图（sheet 自带图表渲染）。
+按张计费，工具每次只采用 1 张（Seedream 5.0 Pro 使用默认单图模式），单次运行默认上限 2 张（`AITEAM_IMAGES_PER_RUN` 可调）；数据图表不走文生图（sheet 自带图表渲染）。
 
 ## 第 2 步：认识你的团队
 
@@ -95,11 +97,9 @@ AI 之间也会互相 `@` 接力讨论（链深限制防雪崩）。悬浮消息
 - 频道右侧 **⫿ 任务面板**：本频道任务与交付物，不切视图盯进度。
 - **📊 用量**：每日消耗曲线 + 逐次活动账本（谁、干了什么、用的哪个模型、花了多少 token）。
 - **导出工作区快照**（归档/反馈用，包含全部频道时间线、任务看板、文档清单、项目与审批状态、
-  逐条消息的模型归因）：
-  ```bash
-  curl -s localhost:8787/api/export.md -o snapshot.md     # 命令行
-  ```
-  或浏览器直接打开 `http://localhost:8787/api/export.md` 后另存。
+  逐条消息的模型归因）：先登录 AiTeam，再在同一浏览器打开
+  `http://localhost:8787/aiteam/api/export.md` 后另存。该接口需要登录态；不带会话 Cookie 的
+  `curl` 会返回 `401`。
   注意：即使用开发模式（5173 端口），API 端口也固定是 8787；超长消息自动截断到 1500 字。
 
 ## 进阶：扩编与赋能
@@ -120,7 +120,7 @@ AI 之间也会互相 `@` 接力讨论（链深限制防雪崩）。悬浮消息
 | `AGENT_CHAIN_DEPTH` | AI 互相接力的链深上限 | 2 |
 | `AITEAM_STRONG_MODEL` / `AITEAM_LIGHT_MODEL` | 官方通道的强/轻模型 | opus-4-8 / haiku-4-5 |
 | `AITEAM_MAX_MCP_TOOLS` | 注入工作循环的 MCP 工具上限 | 40 |
-| `AITEAM_IMAGES_PER_RUN` | 单次运行的图片生成上限（按张计费） | 3 |
+| `AITEAM_IMAGES_PER_RUN` | 单次运行的图片生成上限（按张计费） | 2 |
 
 ## MCP 推荐：第一块插件装什么
 

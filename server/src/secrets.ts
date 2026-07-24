@@ -9,13 +9,19 @@ import { fileURLToPath } from "node:url";
  *
  * 密钥来源（先到先用）：
  * - AITEAM_CREDENTIAL_KEY：32 字节，hex(64 位) 或 base64——多实例/容器部署用它统一注入；
- * - 数据目录下 credential.key：首启自动生成（0600）。迁移数据库时必须连同此文件一起迁移，
+ * - 数据目录下 credential.key：开发/测试首启自动生成（0600）；生产仅复用既有文件，不静默新建。
+ *   迁移数据库时必须连同此文件一起迁移，
  *   否则存量凭证不可解（decryptSecret 会给出明确报错，不静默回退明文）。
  *
- * 密文格式 `enc1:<iv>:<tag>:<ct>`（base64url）。decrypt 对无前缀的值原样返回，
- * 兼容存量明文——启动迁移（db.ts）会把它们统一重写为密文。
+ * 密文格式 `enc1:<iv>:<tag>:<ct>`（base64url）。decrypt 对无前缀的值原样返回。
+ * 开发/测试启动可把存量明文与 enc:v1 原地规范化；生产启动只认证已有 enc1，
+ * 遇到旧格式必须 fail-closed，改走 credential-recovery 的 copy-only migrate-copy。
  */
 const ENC_PREFIX = "enc1:";
+const LEGACY_V1_PREFIX = "enc:v1:";
+const ENVELOPE_LIKE = /^enc(?::|[0-9]+:)/;
+const COPY_ONLY_MIGRATION_GUIDANCE =
+  "生产启动检测到未规范化的存量凭证，拒绝在原数据目录迁移。请先停服，依次运行 `npm run credentials:recover -- inspect ...`、`dry-run` 和 `migrate-copy` 生成并验证新数据目录，再切换 AITEAM_DATA_DIR。";
 
 // 与 db.ts 同一套数据目录解析规则（不 import db，避免环依赖）
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -39,6 +45,11 @@ function loadKey(): Buffer {
     cachedKey = buf;
     return cachedKey;
   }
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "生产环境缺少凭证落库密钥：请设置 AITEAM_CREDENTIAL_KEY，或恢复数据目录中原有的 credential.key。"
+    );
+  }
   const fresh = crypto.randomBytes(32);
   mkdirSync(dataDir, { recursive: true });
   writeFileSync(keyPath, fresh.toString("base64"), { mode: 0o600 });
@@ -46,13 +57,28 @@ function loadKey(): Buffer {
   return cachedKey;
 }
 
+/** 生产启动探针必须能证明凭证密钥可用，不能等到用户首次保存 provider 时才失败。 */
+export function assertCredentialKeyReady(): void {
+  if (process.env.NODE_ENV === "production") loadKey();
+}
+
 export function isEncryptedSecret(value: string): boolean {
-  return value.startsWith(ENC_PREFIX);
+  return value.startsWith(ENC_PREFIX) || value.startsWith(LEGACY_V1_PREFIX);
 }
 
 /** 空串与已加密值原样返回（幂等，迁移可安全重跑）。 */
 export function encryptSecret(plain: string): string {
-  if (!plain || isEncryptedSecret(plain)) return plain;
+  if (!plain) return plain;
+  if (plain.startsWith(ENC_PREFIX)) {
+    decryptSecret(plain);
+    return plain;
+  }
+  if (plain.startsWith(LEGACY_V1_PREFIX)) {
+    throw new Error("不能把历史 enc:v1 密文当作明文再次加密；请先调用 canonicalizeSecret。");
+  }
+  if (ENVELOPE_LIKE.test(plain)) {
+    throw new Error("检测到未知或不支持的凭证密文格式，拒绝作为明文再次加密。");
+  }
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv("aes-256-gcm", loadKey(), iv);
   const ct = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
@@ -62,10 +88,47 @@ export function encryptSecret(plain: string): string {
 
 /** 无前缀（存量明文）原样返回；密文解不开则抛明确错误，绝不把坏密文当值用。 */
 export function decryptSecret(stored: string): string {
-  if (!stored || !isEncryptedSecret(stored)) return stored;
-  const parts = stored.slice(ENC_PREFIX.length).split(":");
+  if (!stored) return stored;
+  if (!isEncryptedSecret(stored)) {
+    if (ENVELOPE_LIKE.test(stored)) {
+      throw new Error("检测到未知或不支持的凭证密文格式。");
+    }
+    return stored;
+  }
+  if (stored.startsWith(LEGACY_V1_PREFIX)) {
+    const material = process.env.AITEAM_SECRET_KEY || process.env.AITEAM_SESSION_SECRET;
+    if (!material) {
+      throw new Error(
+        "历史凭证解密失败：检测到 enc:v1 数据，但未设置原 AITEAM_SECRET_KEY（或旧 AITEAM_SESSION_SECRET）。"
+      );
+    }
+    try {
+      const raw = Buffer.from(stored.slice(LEGACY_V1_PREFIX.length), "base64");
+      const iv = raw.subarray(0, 12);
+      const tag = raw.subarray(12, 28);
+      const data = raw.subarray(28);
+      const legacyKey = crypto.scryptSync(material, "aiteam-secretbox-v1", 32);
+      const decipher = crypto.createDecipheriv("aes-256-gcm", legacyKey, iv);
+      decipher.setAuthTag(tag);
+      return Buffer.concat([decipher.update(data), decipher.final()]).toString("utf8");
+    } catch {
+      throw new Error(
+        "历史凭证解密失败：AITEAM_SECRET_KEY/AITEAM_SESSION_SECRET 与 enc:v1 数据不匹配，或密文已损坏。"
+      );
+    }
+  }
   try {
+    const parts = stored.slice(ENC_PREFIX.length).split(":");
+    if (
+      parts.length !== 3 ||
+      parts.some((part) => !part || !/^[A-Za-z0-9_-]+$/.test(part))
+    ) {
+      throw new Error("invalid enc1 envelope");
+    }
     const [iv, tag, ct] = parts.map((p) => Buffer.from(p, "base64url"));
+    if (iv.length !== 12 || tag.length !== 16 || ct.length === 0) {
+      throw new Error("invalid enc1 envelope lengths");
+    }
     const decipher = crypto.createDecipheriv("aes-256-gcm", loadKey(), iv);
     decipher.setAuthTag(tag);
     return Buffer.concat([decipher.update(ct), decipher.final()]).toString("utf8");
@@ -74,4 +137,29 @@ export function decryptSecret(stored: string): string {
       "凭证解密失败：加密密钥与数据库不匹配。迁移/恢复数据库时需一并迁移数据目录下的 credential.key（或保持 AITEAM_CREDENTIAL_KEY 一致）。"
     );
   }
+}
+
+function allowsInPlaceCredentialMigration(): boolean {
+  const mode = (process.env.NODE_ENV || "development").trim().toLowerCase();
+  return mode === "development" || mode === "test";
+}
+
+/**
+ * 已有 enc1 先认证再原样保留。
+ * 只有 development/test（含未显式设置 NODE_ENV 的本地开发）允许把明文或 enc:v1 原地转为 enc1；
+ * production 及其他非开发运行模式必须改走 copy-only migrate-copy。
+ */
+export function canonicalizeSecret(stored: string): string {
+  if (!stored) return "";
+  if (stored.startsWith(ENC_PREFIX)) {
+    decryptSecret(stored);
+    return stored;
+  }
+  if (
+    !allowsInPlaceCredentialMigration() &&
+    (stored.startsWith(LEGACY_V1_PREFIX) || !ENVELOPE_LIKE.test(stored))
+  ) {
+    throw new Error(COPY_ONLY_MIGRATION_GUIDANCE);
+  }
+  return encryptSecret(decryptSecret(stored));
 }

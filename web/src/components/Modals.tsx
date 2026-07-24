@@ -4,12 +4,15 @@ import { api, type AgentTemplateInfo, type ImageProviderInfo } from "../api";
 import type { Channel } from "../types";
 import { McpTab, SkillsTab } from "./IntegrationsTabs";
 import { AgentAvatar } from "./Avatar";
+import { providerBenchmarkConfirmation, providerBenchmarkRunInput } from "../lib/providerBenchmark";
 
-function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+function Modal({ title, onClose, children, wide = false }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onMouseDown={onClose}>
       <div
-        className="modal-card max-h-[90vh] w-[440px] overflow-y-auto rounded-xl border border-line bg-panel p-5 shadow-xl"
+        className={`modal-card max-h-[90vh] overflow-y-auto rounded-xl border border-line bg-panel p-5 shadow-xl ${
+          wide ? "w-[min(680px,calc(100vw-24px))]" : "w-[min(440px,calc(100vw-24px))]"
+        }`}
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="mb-4 flex items-center justify-between">
@@ -57,7 +60,7 @@ const PROVIDER_PRESETS = [
     id: "siliconflow-glm",
     name: "SiliconFlow GLM",
     desc: "OpenAI-compatible，GLM 长上下文适合方案、研发和评审任务。",
-    base_url: "https://api.siliconflow.com/v1",
+    base_url: "https://api.siliconflow.cn/v1",
     default_model: "zai-org/GLM-5.2",
     light_model: "",
     web_tools: false,
@@ -484,15 +487,17 @@ export function NewAgentModal({ onClose }: { onClose: () => void }) {
   );
 }
 
-export type SettingsTab = "providers" | "mcp" | "skills";
+export type SettingsTab = "account" | "providers" | "mcp" | "skills";
 
 export function SettingsModal({
   onClose,
   onOpenTask,
-  initialTab = "providers",
+  onReplayOnboarding,
+  initialTab = "account",
 }: {
   onClose: () => void;
   onOpenTask?: (taskId: string) => void;
+  onReplayOnboarding?: () => void;
   initialTab?: SettingsTab;
 }) {
   const ws = useWorkspace();
@@ -510,8 +515,10 @@ export function SettingsModal({
   const [webTools, setWebTools] = useState(false);
   const [isStrong, setIsStrong] = useState(false);
   const [runTaskAfterSave, setRunTaskAfterSave] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [providerTest, setProviderTest] = useState<Record<string, string>>({});
   const [providerTaskTest, setProviderTaskTest] = useState<Record<string, { text: string; taskId?: string }>>({});
   const [providerTaskBusy, setProviderTaskBusy] = useState<Record<string, boolean>>({});
@@ -532,6 +539,7 @@ export function SettingsModal({
     setWebTools(false);
     setIsStrong(false);
     setRunTaskAfterSave(false);
+    setShowAdvanced(false);
     setError("");
   }
 
@@ -547,6 +555,8 @@ export function SettingsModal({
     setPriceCurrency("USD");
     setWebTools(preset.web_tools);
     setIsStrong(preset.is_strong);
+    setShowAdvanced(false);
+    setNotice("");
     setError("");
   }
 
@@ -565,6 +575,8 @@ export function SettingsModal({
     setPriceCurrency(p.price_currency || "USD");
     setWebTools(Boolean(p.web_tools));
     setIsStrong(Boolean(p.is_strong));
+    setShowAdvanced(true);
+    setNotice("");
     setError("");
   }
 
@@ -573,6 +585,7 @@ export function SettingsModal({
     if (!editingId && !apiKey.trim()) return;
     setBusy(true);
     setError("");
+    setNotice("");
     const data = {
       name: name.trim(),
       base_url: baseUrl.trim(),
@@ -592,6 +605,7 @@ export function SettingsModal({
         // 供应商已保存成功；演练失败只记在演练结果里，不能报成「保存失败」诱导重复保存。
         await runProviderTaskTest(saved.id);
       }
+      setNotice(`已保存 ${saved.name}。下一步可运行连通测试；未运行不会产生模型调用。`);
       resetForm();
     } catch (e: any) {
       setError(e?.message ?? "保存失败");
@@ -616,18 +630,35 @@ export function SettingsModal({
   async function runProviderTaskTest(id: string) {
     if (providerTaskBusy[id]) return;
     setProviderTaskBusy((s) => ({ ...s, [id]: true }));
-    setProviderTaskTest((s) => ({ ...s, [id]: { text: "任务演练中…可能产生少量 token 消耗" } }));
+    setProviderTaskTest((s) => ({ ...s, [id]: { text: "正在读取本次预算，不会先调用模型…" } }));
     try {
-      const r = await ws.runProviderTaskTest(id);
+      const plan = await api.providerTaskTestPlan(id);
+      if (!window.confirm(providerBenchmarkConfirmation(plan))) {
+        setProviderTaskTest((s) => ({ ...s, [id]: { text: "已取消 · 未调用模型、未创建任务" } }));
+        return;
+      }
+      setProviderTaskTest((s) => ({ ...s, [id]: { text: `质量基准运行中…上限 ${formatTokenCount(plan.budget_billable)} billable，触线即暂停` } }));
+      const r = await ws.runProviderTaskTest(id, providerBenchmarkRunInput(plan));
       const checks = [
         r.checks.delivered ? "交付" : "未交付",
         r.checks.tool_observed ? "工具" : "无工具",
-        r.checks.verified ? "验收" : "未验收",
+        r.checks.quality_contract ? "7项契约" : "契约缺失",
+        r.checks.document_contract ? "机器预检" : "结构缺项",
+        r.checks.independent_reviewer ? "独立复核" : "复核冲突",
+        r.checks.verdict_recorded ? "通过" : r.checks.pending_approval ? "待复核" : "未通过",
+        r.checks.source_trace_clean ? "来源可追溯" : "来源声明冲突",
+        r.checks.pending_approval ? "复核预算待批" : r.checks.within_budget ? "预算内" : "已触线",
         r.checks.usage_tracked ? "用量" : "无用量",
       ].join(" / ");
+      const resultText = r.run_status === "running"
+        ? `仍在后台运行，请勿重复启动 · ${r.task.status} · 已等待 ${r.latency_ms}ms · 当前已记 ${formatTokenCount(r.usage_summary?.billable)} billable${formatEstimatedCost(r.usage_summary?.estimated_cost, r.usage_summary?.price_currency)}`
+        : `${r.run_status === "passed" ? "通过" : r.run_status === "pending_approval" ? "已产出初稿，等待预算审批" : "未通过"} · ${r.task.status} · ${checks} · ${r.latency_ms}ms · ${formatTokenCount(r.usage_summary?.billable)} billable${formatEstimatedCost(r.usage_summary?.estimated_cost, r.usage_summary?.price_currency)}`;
       setProviderTaskTest((s) => ({
         ...s,
-        [id]: { text: `${r.ok ? "通过" : "未通过"} · ${r.task.status} · ${checks} · ${r.latency_ms}ms · ${formatTokenCount(r.usage_summary?.billable)} billable${formatEstimatedCost(r.usage_summary?.estimated_cost, r.usage_summary?.price_currency)}`, taskId: r.task.id },
+        [id]: {
+          text: resultText,
+          taskId: r.task.id,
+        },
       }));
     } catch (e: any) {
       setProviderTaskTest((s) => ({ ...s, [id]: { text: `失败：${String(e?.message ?? e).slice(0, 160)}` } }));
@@ -646,22 +677,62 @@ export function SettingsModal({
   );
 
   return (
-    <Modal title="设置" onClose={onClose}>
+    <Modal title="设置" onClose={onClose} wide>
       <div className="mb-3 flex gap-1 border-b border-line pb-2">
-        {tabBtn("providers", "模型供应商")}
-        {tabBtn("mcp", "MCP 插件")}
-        {tabBtn("skills", "技能")}
+        {tabBtn("account", "个人")}
+        {ws.user.role === "admin" && tabBtn("providers", "模型")}
+        {ws.user.role === "admin" && tabBtn("mcp", "MCP 插件")}
+        {ws.user.role === "admin" && tabBtn("skills", "技能")}
       </div>
-      {tab === "mcp" && <McpTab onOpenTask={onOpenTask} />}
-      {tab === "skills" && <SkillsTab onOpenTask={onOpenTask} />}
-      {tab === "providers" && (
+      {tab === "account" && (
         <div>
-      <div className="text-[12.5px] leading-relaxed text-ink-2">
-        默认推荐 Anthropic 官方（环境变量 <code className="rounded bg-panel px-1">ANTHROPIC_API_KEY</code>）。
-        也可接入 Anthropic-compatible 端点（如 DeepSeek Anthropic）或 OpenAI-compatible 端点（如 SiliconFlow、百炼 DashScope、LiteLLM、vLLM）。
-        系统会按 Base URL 自动识别协议。
-        <span className="font-medium">默认模型</span>承担分析/创作，<span className="font-medium">轻量模型</span>承担
-        重复性/格式化任务（拆解时由 Lead 逐任务智能选择，大幅降本）。
+          <div className="rounded-xl border border-line bg-paper p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-[11px] font-medium uppercase tracking-[0.12em] text-ink-3">AiTeam 身份</div>
+                <div className="mt-2 text-[18px] font-semibold text-ink">{ws.user.name}</div>
+                <div className="mt-1 text-[12px] text-ink-3">{ws.user.role === "admin" ? "工作区管理员" : "工作区成员"}</div>
+              </div>
+              <span className="rounded-full bg-accent-soft px-2.5 py-1 text-[11px] font-medium text-accent">
+                {ws.user.role === "admin" ? "管理员" : "成员"}
+              </span>
+            </div>
+          </div>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            <div className="rounded-xl border border-line p-4">
+              <div className="text-[13px] font-semibold text-ink">你的权限</div>
+              <p className="mt-1.5 text-[12px] leading-5 text-ink-3">
+                {ws.user.role === "admin"
+                  ? "可维护模型、MCP 插件和技能；所有成员都可发起任务、查看交付并参与人工关单。"
+                  : "可发起任务、查看交付并参与人工关单；模型与插件由管理员统一维护。"}
+              </p>
+            </div>
+            <div className="rounded-xl border border-line p-4">
+              <div className="text-[13px] font-semibold text-ink">首次使用引导</div>
+              <p className="mt-1.5 text-[12px] leading-5 text-ink-3">重新查看目标 → 推进 → 复核的工作方式和模型接入说明。</p>
+              <button type="button" onClick={onReplayOnboarding} className="mt-3 rounded-lg border border-line px-3 py-1.5 text-[12px] font-medium text-ink-2 hover:bg-sel hover:text-ink">
+                重看使用引导
+              </button>
+            </div>
+          </div>
+          <div className="mt-4 rounded-xl border border-line p-4">
+            <div className="text-[13px] font-semibold text-ink">登录与安全</div>
+            <p className="mt-1.5 text-[12px] leading-5 text-ink-3">当前会话使用服务端 HttpOnly Cookie；API Key 不会下发到前端。修改密码与找回密码将在独立安全流程中提供。</p>
+          </div>
+        </div>
+      )}
+      {ws.user.role === "admin" && tab === "mcp" && <McpTab onOpenTask={onOpenTask} />}
+      {ws.user.role === "admin" && tab === "skills" && <SkillsTab onOpenTask={onOpenTask} />}
+      {ws.user.role === "admin" && tab === "providers" && (
+        <div>
+      <div className="rounded-xl border border-line bg-paper p-4">
+        <div className="text-[13.5px] font-semibold text-ink">快速接入：3 步完成</div>
+        <div className="mt-2 grid gap-2 text-[11.5px] text-ink-3 sm:grid-cols-3">
+          <div><span className="mr-1.5 rounded-full bg-accent px-1.5 py-0.5 text-white">1</span>选择国内供应商</div>
+          <div><span className="mr-1.5 rounded-full bg-accent px-1.5 py-0.5 text-white">2</span>粘贴 API Key</div>
+          <div><span className="mr-1.5 rounded-full bg-accent px-1.5 py-0.5 text-white">3</span>保存后测试连通</div>
+        </div>
+        <p className="mt-2 text-[11.5px] leading-5 text-ink-3">API Key 仅保存在服务端。主模型负责分析、创作与复核；轻量模型和价格等参数按需在高级设置中调整。</p>
       </div>
 
       {ws.providers.length > 0 && (
@@ -669,59 +740,73 @@ export function SettingsModal({
           {ws.providers.map((p) => (
             <div
               key={p.id}
-              className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-[13px] ${editingId === p.id ? "border-accent/60 bg-accent-soft/40" : "border-line"}`}
+              className={`rounded-lg border px-3 py-2.5 text-[13px] ${editingId === p.id ? "border-accent/60 bg-accent-soft/40" : "border-line"}`}
             >
-              <span className="font-medium">{p.name}</span>
-              <span className="min-w-0 flex-1 truncate text-[12px] text-ink-3">
-                {p.base_url || "api.anthropic.com"} · {p.default_model || "未设默认模型"}
-                {p.light_model ? ` · ⚡${p.light_model}` : ""}
-                {p.price_input_per_million > 0 || p.price_output_per_million > 0
-                  ? ` · ${p.price_currency || "USD"}/百万 输入 ${p.price_input_per_million || 0} 输出 ${p.price_output_per_million || 0}`
-                  : ""}
-                {providerTest[p.id] ? ` · ${providerTest[p.id]}` : ""}
-                {providerTaskTest[p.id] ? ` · 任务演练：${providerTaskTest[p.id].text}` : ""}
-              </span>
-              {providerTaskTest[p.id]?.taskId && (
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="font-semibold text-ink">{p.name}</div>
+                  <div className="mt-0.5 break-all text-[11.5px] leading-snug text-ink-3">
+                    {p.base_url || "api.anthropic.com"}
+                  </div>
+                </div>
                 <button
-                  onClick={() => onOpenTask?.(providerTaskTest[p.id]!.taskId!)}
-                  className="rounded px-1.5 text-[12px] text-accent hover:bg-accent-soft"
-                  title="打开该模型演练任务的详情、活动日志和交付物"
+                  onClick={() => {
+                    if (editingId === p.id) resetForm();
+                    void ws.deleteProvider(p.id);
+                  }}
+                  className="shrink-0 rounded px-1.5 py-0.5 text-[11.5px] text-ink-3 hover:bg-sel hover:text-red-500"
+                  title="删除后，引用它的同事将回退到官方通道"
                 >
-                  打开任务
+                  删除
                 </button>
+              </div>
+              <div className="mt-2 flex flex-wrap gap-1.5 text-[11.5px] text-ink-2">
+                <span className="rounded bg-sel px-2 py-1">主模型 · {p.default_model || "未设置"}</span>
+                {p.light_model && <span className="rounded bg-sel px-2 py-1">轻量 · {p.light_model}</span>}
+                {(p.price_input_per_million > 0 || p.price_output_per_million > 0) && (
+                  <span className="rounded bg-sel px-2 py-1">
+                    {p.price_currency || "USD"}/百万 · 输入 {p.price_input_per_million || 0} · 输出 {p.price_output_per_million || 0}
+                  </span>
+                )}
+              </div>
+              {providerTest[p.id] && (
+                <div className="mt-2 rounded bg-sel/60 px-2 py-1.5 text-[11.5px] leading-snug text-ink-2">连通测试：{providerTest[p.id]}</div>
               )}
-              <button
-                onClick={() => void testProvider(p.id)}
-                className="rounded px-1.5 text-[12px] text-ink-2 hover:bg-sel hover:text-ink"
-                title="发送一次最小模型请求，验证 Base URL / Key / 模型名 / 协议适配"
-              >
-                测试
-              </button>
-              <button
-                onClick={() => void runProviderTaskTest(p.id)}
-                disabled={Boolean(providerTaskBusy[p.id])}
-                className="rounded px-1.5 text-[12px] text-ink-2 hover:bg-sel hover:text-ink disabled:opacity-40"
-                title="创建一条诊断任务，验证工具调用、文档交付、验收和用量归因；会产生少量 token 消耗"
-              >
-                {providerTaskBusy[p.id] ? "演练中…" : "任务演练"}
-              </button>
-              <button
-                onClick={() => startEdit(p.id)}
-                className="rounded px-1.5 text-[12px] text-ink-2 hover:bg-sel hover:text-ink"
-                title="编辑该供应商"
-              >
-                编辑
-              </button>
-              <button
-                onClick={() => {
-                  if (editingId === p.id) resetForm();
-                  void ws.deleteProvider(p.id);
-                }}
-                className="rounded px-1.5 text-ink-3 hover:bg-sel hover:text-ink"
-                title="删除（引用它的同事将回退到官方通道）"
-              >
-                ✕
-              </button>
+              {providerTaskTest[p.id] && (
+                <div className="mt-2 rounded bg-sel/60 px-2 py-1.5 text-[11.5px] leading-snug text-ink-2">质量基准：{providerTaskTest[p.id].text}</div>
+              )}
+              <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                <button
+                  onClick={() => void testProvider(p.id)}
+                  className="whitespace-nowrap rounded-md border border-line px-2.5 py-1.5 text-[12px] text-ink-2 hover:bg-sel hover:text-ink"
+                  title="发送一次最小模型请求，验证 Base URL、Key、模型名与协议适配"
+                >
+                  连通测试
+                </button>
+                <button
+                  onClick={() => void runProviderTaskTest(p.id)}
+                  disabled={Boolean(providerTaskBusy[p.id])}
+                  className="whitespace-nowrap rounded-md border border-accent/40 bg-accent-soft px-2.5 py-1.5 text-[12px] text-accent hover:border-accent disabled:opacity-40"
+                  title="先查看并确认实际预算，再运行固定隔离业务题；取消不会调用模型"
+                >
+                  {providerTaskBusy[p.id] ? "基准运行中…" : "运行质量基准"}
+                </button>
+                <button
+                  onClick={() => startEdit(p.id)}
+                  className="whitespace-nowrap rounded-md border border-line px-2.5 py-1.5 text-[12px] text-ink-2 hover:bg-sel hover:text-ink"
+                >
+                  编辑配置
+                </button>
+                {providerTaskTest[p.id]?.taskId && (
+                  <button
+                    onClick={() => onOpenTask?.(providerTaskTest[p.id]!.taskId!)}
+                    className="whitespace-nowrap rounded-md px-2.5 py-1.5 text-[12px] text-accent hover:bg-accent-soft"
+                    title="打开该模型演练任务的详情、活动日志和交付物"
+                  >
+                    查看结果
+                  </button>
+                )}
+              </div>
             </div>
           ))}
         </div>
@@ -763,10 +848,6 @@ export function SettingsModal({
         </>
       )}
 
-      <label className={labelCls}>名称</label>
-      <input value={name} onChange={(e) => setName(e.target.value)} placeholder="例如 DeepSeek / SiliconFlow / 百炼" className={inputCls} />
-      <label className={labelCls}>Base URL（自动识别 Anthropic-compatible / OpenAI-compatible）</label>
-      <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://api.deepseek.com/anthropic 或 https://api.siliconflow.cn/v1" className={inputCls} />
       <label className={labelCls}>API Key（仅存服务端，不会下发前端）</label>
       <input
         value={apiKey}
@@ -775,73 +856,67 @@ export function SettingsModal({
         placeholder={editingId ? "留空 = 保持原 Key 不变" : "sk-…"}
         className={inputCls}
       />
-      <div className="flex gap-2">
-        <div className="flex-1">
-          <label className={labelCls}>默认模型（分析/创作）</label>
-          <input value={defaultModel} onChange={(e) => setDefaultModel(e.target.value)} placeholder="deepseek-v4-pro / THUDM/GLM-4.1V-9B-Thinking / qwen-plus" className={inputCls} />
+      {name ? (
+        <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg bg-sel/60 px-3 py-2 text-[11.5px] text-ink-2">
+          <span className="font-medium text-ink">{name}</span>
+          <span>主模型 · {defaultModel || "待填写"}</span>
+          {lightModel && <span>轻量 · {lightModel}</span>}
         </div>
-        <div className="flex-1">
-          <label className={labelCls}>轻量模型（重复性任务，可选）</label>
-          <input value={lightModel} onChange={(e) => setLightModel(e.target.value)} placeholder="deepseek-v4-flash / Qwen/Qwen3-8B / qwen-turbo" className={inputCls} />
+      ) : (
+        <div className="mt-2 text-[11.5px] text-amber-600">请先选择一个推荐预设，或展开高级设置手动接入兼容端点。</div>
+      )}
+
+      <button type="button" onClick={() => setShowAdvanced((value) => !value)} className="mt-3 rounded-lg px-2 py-1.5 text-[12px] font-medium text-ink-3 hover:bg-sel hover:text-ink">
+        {showAdvanced ? "收起高级设置" : "高级设置（模型名、价格与协议）"}
+      </button>
+
+      {showAdvanced && (
+        <div className="mt-1 rounded-xl border border-line bg-paper p-3">
+          <label className={labelCls}>名称</label>
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="例如 DeepSeek / SiliconFlow / 百炼" className={inputCls} />
+          <label className={labelCls}>Base URL（自动识别 Anthropic-compatible / OpenAI-compatible）</label>
+          <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://api.deepseek.com/anthropic 或 https://api.siliconflow.cn/v1" className={inputCls} />
+          <div className="flex gap-2">
+            <div className="flex-1">
+              <label className={labelCls}>默认模型（分析/创作）</label>
+              <input value={defaultModel} onChange={(e) => setDefaultModel(e.target.value)} placeholder="deepseek-v4-pro / zai-org/GLM-5.2 / qwen-plus" className={inputCls} />
+            </div>
+            <div className="flex-1">
+              <label className={labelCls}>轻量模型（重复性任务，可选）</label>
+              <input value={lightModel} onChange={(e) => setLightModel(e.target.value)} placeholder="deepseek-v4-flash / Qwen/Qwen3-8B / qwen-turbo" className={inputCls} />
+            </div>
+          </div>
+          <label className={labelCls}>单次输出上限 max_tokens（可选）</label>
+          <input value={maxTokens} onChange={(e) => setMaxTokens(e.target.value)} placeholder="默认 16000；不确定时留空" className={inputCls} />
+          <label className={labelCls}>价格（可选，用于模型演练估算成本）</label>
+          <div className="grid gap-2 sm:grid-cols-[1fr_1fr_96px]">
+            <input value={priceInputPerMillion} onChange={(e) => setPriceInputPerMillion(e.target.value)} placeholder="输入 / 1M tokens" inputMode="decimal" className={inputCls} />
+            <input value={priceOutputPerMillion} onChange={(e) => setPriceOutputPerMillion(e.target.value)} placeholder="输出 / 1M tokens" inputMode="decimal" className={inputCls} />
+            <input value={priceCurrency} onChange={(e) => setPriceCurrency(e.target.value.toUpperCase())} placeholder="USD" className={inputCls} />
+          </div>
+          <div className="mt-1 text-[11px] leading-relaxed text-ink-3">不填价格则只显示 billable tokens，不估算金额。</div>
+          <label className="mt-3 flex cursor-pointer items-start gap-2 text-[12px] leading-5 text-ink-2">
+            <input className="mt-0.5" type="checkbox" checked={webTools} onChange={(e) => setWebTools(e.target.checked)} />
+            Anthropic-compatible 端点支持服务端联网工具；OpenAI-compatible 联网优先用 MCP。
+          </label>
+          <label className="mt-2 flex cursor-pointer items-start gap-2 text-[12px] leading-5 text-ink-2">
+            <input className="mt-0.5" type="checkbox" checked={isStrong} onChange={(e) => setIsStrong(e.target.checked)} />
+            用作强通道：验收与项目汇总优先使用该供应商的默认模型。
+          </label>
+          <label className="mt-2 flex cursor-pointer items-start gap-2 text-[12px] leading-5 text-ink-2">
+            <input className="mt-0.5" type="checkbox" checked={runTaskAfterSave} onChange={(e) => setRunTaskAfterSave(e.target.checked)} />
+            保存后立即跑质量基准：运行前会展示实际 token 上限、复核预留和可估算金额；余额不足时保留初稿，批准后从复核继续，不重复生成。
+          </label>
         </div>
-      </div>
-      <label className={labelCls}>单次输出上限 max_tokens（可选）</label>
-      <input
-        value={maxTokens}
-        onChange={(e) => setMaxTokens(e.target.value)}
-        placeholder="默认 16000（DeepSeek V4 支持 384K，可不填）；本地模型按运行时上限"
-        className={inputCls}
-      />
-      <label className={labelCls}>价格（可选，用于模型演练估算成本）</label>
-      <div className="grid gap-2 sm:grid-cols-[1fr_1fr_96px]">
-        <input
-          value={priceInputPerMillion}
-          onChange={(e) => setPriceInputPerMillion(e.target.value)}
-          placeholder="输入 / 1M tokens"
-          inputMode="decimal"
-          className={inputCls}
-        />
-        <input
-          value={priceOutputPerMillion}
-          onChange={(e) => setPriceOutputPerMillion(e.target.value)}
-          placeholder="输出 / 1M tokens"
-          inputMode="decimal"
-          className={inputCls}
-        />
-        <input
-          value={priceCurrency}
-          onChange={(e) => setPriceCurrency(e.target.value.toUpperCase())}
-          placeholder="USD"
-          className={inputCls}
-        />
-      </div>
-      <div className="mt-1 text-[11px] leading-relaxed text-ink-3">
-        按供应商控制台价格手动填写；不填则只显示 billable tokens，不估算金额。
-      </div>
-      <label className="mt-3 flex cursor-pointer items-center gap-2 text-[12.5px] text-ink-2">
-        <input type="checkbox" checked={webTools} onChange={(e) => setWebTools(e.target.checked)} />
-        该端点支持 Anthropic 服务端联网工具（web_search/web_fetch）。仅 Anthropic-compatible 端点建议勾选；
-        OpenAI-compatible 通道会自动关闭该项，联网请优先用 MCP。
-      </label>
-      <label className="mt-2 flex cursor-pointer items-center gap-2 text-[12.5px] text-ink-2">
-        <input type="checkbox" checked={isStrong} onChange={(e) => setIsStrong(e.target.checked)} />
-        ⭐ 用作强通道：没有官方 Anthropic key 时，验收与项目汇总优先走该供应商的默认模型
-        （质量闭环的下限，建议指给最强的一家）。
-      </label>
-      <label className="mt-2 flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-2">
-        <input className="mt-0.5" type="checkbox" checked={runTaskAfterSave} onChange={(e) => setRunTaskAfterSave(e.target.checked)} />
-        <span>
-          保存后立即跑任务演练：创建一条诊断任务，验证工具调用、文档交付、验收和用量归因。
-          会产生少量 token 消耗，适合 DeepSeek / SiliconFlow / 百炼首次接入后直接闭环。
-        </span>
-      </label>
+      )}
+      {notice && <div className="mt-3 rounded-lg bg-emerald-50 px-3 py-2 text-[12px] text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300" role="status">{notice}</div>}
       {error && <div className="mt-2 text-[12px] text-red-500">{error}</div>}
       <button
         onClick={() => void submit()}
         disabled={!name.trim() || (!editingId && !apiKey.trim()) || busy}
         className="mt-4 w-full rounded-lg bg-accent py-2 text-[13.5px] font-medium text-white disabled:opacity-40"
       >
-        {busy ? "处理中…" : runTaskAfterSave ? "保存并跑任务演练" : editingId ? "保存修改" : "添加供应商"}
+        {busy ? "处理中…" : runTaskAfterSave ? "保存并跑质量基准" : editingId ? "保存修改" : "保存模型配置"}
       </button>
 
       <ImageProviderSection />
@@ -884,14 +959,16 @@ function ImageProviderSection() {
   }
 
   return (
-    <div className="mt-5 border-t border-line pt-4">
-      <div className="flex items-center gap-2 text-[12.5px] font-medium text-ink">
-        🎨 图像生成（Seedream）
-        {info?.has_key && <span className="rounded bg-sel px-1.5 py-px font-mono text-[10px] text-accent">已启用</span>}
-      </div>
-      <div className="mt-1 text-[12px] leading-relaxed text-ink-3">
+    <details className="mt-5 rounded-xl border border-line bg-paper">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-[12.5px] font-medium text-ink">
+        <span>图像生成（Seedream，可选）</span>
+        <span className={`rounded px-2 py-0.5 text-[10px] ${info?.has_key ? "bg-accent-soft text-accent" : "bg-sel text-ink-3"}`}>{info?.has_key ? "已启用" : "未接入"}</span>
+      </summary>
+      <div className="border-t border-line px-4 pb-4 pt-3">
+      <div className="text-[12px] leading-relaxed text-ink-3">
         接入字节火山方舟的 Seedream 文生图后，AI 同事获得 generate_image 工具，可为报告/PPT 生成配图
-        （按张计费，单次运行上限 3 张）。在方舟控制台开通 Seedream 并创建接入点，把接入点 ID 填到模型一栏。
+        （按张计费，默认单次运行上限 2 张，工具每次只采用 1 张；Seedream 5.0 Pro 使用默认单图模式）。Base URL 可填写 API 根地址或完整
+        /images/generations 端点；模型栏填写方舟控制台展示的模型 ID 或接入点 ID。
       </div>
       <label className={labelCls}>Base URL</label>
       <input
@@ -912,7 +989,7 @@ function ImageProviderSection() {
       <input
         value={model}
         onChange={(e) => setModel(e.target.value)}
-        placeholder="例如 doubao-seedream-5-0-260128（以方舟控制台为准）"
+        placeholder="例如 doubao-seedream-5-0-pro-260628（以方舟控制台为准）"
         className={inputCls}
       />
       {error && <div className="mt-2 text-[12px] text-red-500">{error}</div>}
@@ -923,6 +1000,7 @@ function ImageProviderSection() {
       >
         保存图像生成配置
       </button>
-    </div>
+      </div>
+    </details>
   );
 }

@@ -46,6 +46,7 @@ npm install
 # 可选：配模型 key（缺省进 Mock 模式，仍可体验全链路）；也可启动后在界面 ⚙ 里配
 export ANTHROPIC_API_KEY=sk-ant-...
 export AITEAM_SESSION_SECRET="一串足够长的随机字符串"   # standalone 登录会话密钥
+# 开发/测试若不设 AITEAM_CREDENTIAL_KEY，会在数据目录自动生成 credential.key
 npm run dev
 ```
 
@@ -57,7 +58,10 @@ npm run dev
 
 ```bash
 npm run build
-AITEAM_SESSION_SECRET="一串足够长的随机字符串" npm start
+# 以下两把密钥首次生成后要持久保存，重启/恢复时继续使用同一值
+export AITEAM_SESSION_SECRET="$(openssl rand -base64 48)"
+export AITEAM_CREDENTIAL_KEY="$(openssl rand -hex 32)"
+npm start
 ```
 
 单进程服务在 **http://localhost:8787/aiteam/**。
@@ -89,6 +93,8 @@ npm run pack:verify --workspace desktop  # 脱离源码树验证包内运行时
 |---|---|---|
 | `AITEAM_AUTH_MODE` | `standalone` | `standalone`=自建邮箱密码登录；`coworker`=复用统一 Web App 的 NextAuth 登录态 |
 | `AITEAM_SESSION_SECRET` | 开发回退值 | standalone 会话 JWT 签名密钥，**生产必配** |
+| `AITEAM_CREDENTIAL_KEY` | 开发自动生成 `credential.key` | provider / MCP / 文生图凭证的 AES-256-GCM 落库密钥；32 字节（64 位 hex 或 base64），**生产必须配置或恢复已有 `credential.key`** |
+| `AITEAM_SECRET_KEY` | — | 仅用于把历史 `enc:v1:` 凭证一次性迁移到当前 `enc1:`；迁移完成即删除 |
 | `AITEAM_ADMIN_EMAILS` | 空 | 管理员邮箱白名单（逗号分隔）；命中即 admin。不设则**首个注册者**为 admin |
 | `AITEAM_ALLOW_SIGNUP` | `1`（开） | 是否开放公开注册；设 `0` 则关闭，由 admin 建号 |
 | `AUTH_SECRET` | — | coworker 模式下解密 NextAuth 会话 cookie 的密钥 |
@@ -104,15 +110,23 @@ npm run pack:verify --workspace desktop  # 脱离源码树验证包内运行时
 | `AITEAM_DATA_DIR` | `server/data` | sqlite 库与生成图资产目录（测试/多实例隔离用） |
 | `AITEAM_USER_NAME` | `我` | 用户显示名回退值 |
 
+> 升级旧数据库前先备份。若库中已有 `enc:v1:`，必须同时提供原
+> `AITEAM_SECRET_KEY` 与新的 `AITEAM_CREDENTIAL_KEY` 才能迁移；旧密钥遗失时，历史凭证无法恢复，
+> 应从可用备份恢复或在界面重新录入，不能盲目启动真实数据目录。详见
+> [OPERATIONS.md](docs/OPERATIONS.md#51-历史-encv1-凭证升级)。
+
 ### 护栏 / 调优
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `AITEAM_DAILY_TOKEN_BUDGET` | `0`（不限） | 每用户每日 token 预算硬切断（按加权计费 token） |
 | `AITEAM_TASK_TOKEN_BUDGET` | `0`（不限） | 单任务默认预算（加权计费 token）；任务累计触线自动暂停待批，批准即追加续跑（任务级 `budget_billable` 可覆盖） |
 | `TASK_MAX_REVISIONS` | `1` | 验收未过的返工次数上限 |
+| `AITEAM_PROVIDER_BENCHMARK_BUDGET` | `20000` | 固定模型质量基准的计费 token 上限 |
+| `AITEAM_PROVIDER_BENCHMARK_REVIEW_RESERVE` | `6000` | 为独立强模型复核预留的计费 token；不足时先暂停待批 |
+| `AITEAM_PROVIDER_BENCHMARK_MAX_REVISIONS` | `1` | 固定质量基准的自动返工次数；成本敏感验收可临时设 `0` |
 | `AGENT_CHAIN_DEPTH` | `2` | AI 互相 @ 接力的链深上限（防雪崩） |
 | `AITEAM_MCP_CALLS_PER_RUN` | `5` | 单次运行 MCP 插件调用上限（按次计费） |
-| `AITEAM_IMAGES_PER_RUN` | `3` | 单次运行文生图上限（按张计费） |
+| `AITEAM_IMAGES_PER_RUN` | `2` | 单次运行文生图上限（按张计费；工具每次只采用 1 张，Seedream 5.0 Pro 使用默认单图模式） |
 | `AITEAM_MCP_TIMEOUT_MS` | `45000` | MCP 连接/调用超时（防插件挂死阻塞运行） |
 | `AITEAM_MCP_CACHE_TTL_MS` | `600000` | MCP 同参调用结果缓存 TTL |
 | `AITEAM_MAX_MCP_TOOLS` | `40` | 注入工作循环的 MCP 工具数上限 |

@@ -72,6 +72,9 @@ for (const [label, source, needle] of [
   ["desktop remote workspace connect window preload", main, "connect-preload.cjs"],
   ["desktop remote workspace switch back to local", main, "async function switchToLocal()"],
   ["desktop remote workspace connect preload bridge", connectPreload, "aiteamConnect"],
+  ["desktop edit menu keeps macOS paste shortcut", main, "{ role: \"paste\", label: \"粘贴\" }"],
+  ["desktop edit menu keeps macOS copy shortcut", main, "{ role: \"copy\", label: \"复制\" }"],
+  ["desktop edit menu keeps macOS select-all shortcut", main, "{ role: \"selectAll\", label: \"全选\" }"],
 ]) {
   const present = source.includes(needle);
   console.log(`${present ? "OK" : "MISSING"} ${label}: ${needle}`);

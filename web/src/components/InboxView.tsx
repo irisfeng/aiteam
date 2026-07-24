@@ -3,6 +3,7 @@ import { useWorkspace } from "../store";
 import { AgentAvatar } from "./Avatar";
 import type { Approval, Doc, Task } from "../types";
 import { TaskDetailDrawer } from "./TaskDetailDrawer";
+import { parseNetworkApprovalPayload } from "../lib/approvals";
 
 const DocViewerModal = lazy(() => import("./DocsView").then((m) => ({ default: m.DocViewerModal })));
 
@@ -60,6 +61,40 @@ function ApprovalPayload({ approval }: { approval: Approval }) {
       );
     }
   }
+  if (approval.kind === "network") {
+    const parsed = parseNetworkApprovalPayload(approval.payload);
+    if (parsed) {
+      return (
+        <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50/70 p-3 text-[13px] text-ink-2 dark:border-amber-900/60 dark:bg-amber-950/20">
+          <div className="text-[11px] font-semibold text-amber-800 dark:text-amber-300">一次性网络外发</div>
+          {parsed.details && <div className="mt-1 whitespace-pre-wrap">{parsed.details}</div>}
+          <dl className="mt-2 grid gap-1.5">
+            <div>
+              <dt className="inline text-[11px] font-medium text-ink-3">目标：</dt>
+              <dd className="inline">
+                {parsed.serverName} <span className="font-mono text-[11.5px]">({parsed.serverTarget})</span>
+              </dd>
+            </div>
+            <div>
+              <dt className="inline text-[11px] font-medium text-ink-3">工具：</dt>
+              <dd className="inline font-mono text-[11.5px]">{parsed.tool}</dd>
+            </div>
+            <div>
+              <dt className="text-[11px] font-medium text-ink-3">完整参数：</dt>
+              <dd>
+                <pre className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap wrap-anywhere rounded-md bg-panel px-2 py-1.5 font-mono text-[11.5px]">
+                  {JSON.stringify(parsed.input, null, 2)}
+                </pre>
+              </dd>
+            </div>
+          </dl>
+          <div className="mt-2 text-[11.5px] text-amber-800 dark:text-amber-300">
+            仅允许以上目标配置、工具和参数执行一次；修改任一项都必须重新审批。
+          </div>
+        </div>
+      );
+    }
+  }
   return (
     <pre className="mt-2 max-h-60 overflow-y-auto whitespace-pre-wrap rounded-lg bg-sel p-3 text-[13px] text-ink-2">
       {approval.payload}
@@ -105,7 +140,7 @@ export function InboxView({
     <div className="flex h-full min-w-0 flex-1 flex-col">
       <header className="flex items-center gap-3 border-b border-line px-5 py-3">
         <h1 className="text-[15px] font-semibold">收件箱</h1>
-        <span className="text-[12px] text-ink-3">高风险动作、项目计划和任务阻塞输入在这里等待你处理</span>
+        <span className="text-[12px] text-ink-3">高风险动作、单次网络调用、项目计划和任务阻塞输入在这里等待你处理</span>
       </header>
       <div className="flex-1 overflow-y-auto p-5">
         {pending.length === 0 && (
@@ -135,8 +170,19 @@ export function InboxView({
                       ⏸ 需要输入
                     </span>
                   )}
+                  {a.kind === "network" && (
+                    <span className="rounded bg-amber-50 px-1.5 py-px text-[11px] font-medium text-amber-700 dark:bg-amber-950/30 dark:text-amber-300">
+                      🌐 单次外发
+                    </span>
+                  )}
                   <span className="text-[12px] text-ink-3">
-                    {a.kind === "plan" ? "批准后自动开工" : a.kind === "clarification" ? "确认后恢复任务" : "请求批准"} · {fmt(a.created_at)}
+                    {a.kind === "plan"
+                      ? "批准后自动开工"
+                      : a.kind === "clarification"
+                        ? "确认后恢复任务"
+                        : a.kind === "network"
+                          ? "批准后仅执行列明调用一次"
+                          : "请求批准"} · {fmt(a.created_at)}
                   </span>
                 </div>
                 <div className="mt-2 text-[14px] font-medium">{a.title}</div>
@@ -169,14 +215,24 @@ export function InboxView({
                     disabled={!!resolvingId}
                     className="rounded-lg bg-accent px-4 py-1.5 text-[13px] font-medium text-white disabled:opacity-40"
                   >
-                    {resolvingId === a.id ? "处理中…" : a.kind === "clarification" ? "确认并恢复" : "批准"}
+                    {resolvingId === a.id
+                      ? "处理中…"
+                      : a.kind === "clarification"
+                        ? "确认并恢复"
+                        : a.kind === "network"
+                          ? "批准一次并恢复"
+                          : "批准"}
                   </button>
                   <button
                     onClick={() => void resolveInboxApproval(a, false)}
                     disabled={!!resolvingId}
                     className="rounded-lg border border-line px-4 py-1.5 text-[13px] font-medium text-ink-2 hover:bg-sel disabled:opacity-40"
                   >
-                    {resolvingId === a.id ? "处理中…" : a.kind === "clarification" ? "保持阻塞" : "拒绝"}
+                    {resolvingId === a.id
+                      ? "处理中…"
+                      : a.kind === "clarification" || a.kind === "network"
+                        ? "拒绝并保持阻塞"
+                        : "拒绝"}
                   </button>
                   {linkedTask && (
                     <button

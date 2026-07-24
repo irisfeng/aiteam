@@ -27,6 +27,12 @@ recoverInFlightTasks();
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
+// 回归进程专用实例探针：只有显式注入随机 token 时才注册，避免固定端口误命中另一套 AiTeam 并污染其数据。
+if (process.env.AITEAM_TEST_INSTANCE_ID) {
+  app.get("/aiteam/api/__test/instance", (_req, res) => {
+    res.json({ instance_id: process.env.AITEAM_TEST_INSTANCE_ID });
+  });
+}
 // 整合后所有 AiTeam 路由统一挂在 /aiteam/* 前缀下（由反向代理路由到本进程）。
 // 登录/注册路由公开（不经 requireUser，登出态也要能访问）；其余 API 一律需登录。
 app.use("/aiteam/api/auth", authRoutes);

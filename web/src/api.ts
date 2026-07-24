@@ -1,4 +1,4 @@
-import type { Agent, Approval, Channel, Doc, Message, Project, Provider, QualitySummary, Task, TaskEvent, Verdict } from "./types";
+import type { Agent, Approval, Channel, Doc, Message, Project, Provider, QualitySummary, Task, TaskEvent, TaskUpdateInput, Verdict } from "./types";
 
 // 统一入口下 AiTeam 挂在 /aiteam/，BASE_URL 即 "/aiteam/"。
 // 导出供少数绕过 req() 直接 fetch 的组件（MCP/技能/用量/团队等）复用，确保都带 /aiteam 前缀。
@@ -105,11 +105,23 @@ export interface ProviderTestResult {
 
 export interface ProviderTaskTestResult {
   ok: boolean;
+  run_status: "running" | "passed" | "pending_approval" | "failed";
+  pending_approval_id: string | null;
   provider: Provider;
   model: string;
+  models: { worker: string; reviewer: string };
+  benchmark: {
+    id: string;
+    version: number;
+    rubric: string[];
+    budget_billable: number;
+    worker_model: string;
+    reviewer_model: string;
+  };
   latency_ms: number;
   task: Task;
   docs: Doc[];
+  verdicts: Verdict[];
   events: TaskEvent[];
   checks: {
     completed: boolean;
@@ -117,6 +129,13 @@ export interface ProviderTaskTestResult {
     tool_observed: boolean;
     verified: boolean;
     usage_tracked: boolean;
+    quality_contract: boolean;
+    independent_reviewer: boolean;
+    verdict_recorded: boolean;
+    within_budget: boolean;
+    source_trace_clean: boolean;
+    document_contract: boolean;
+    pending_approval: boolean;
   };
   usage_summary: {
     input: number;
@@ -125,6 +144,52 @@ export interface ProviderTaskTestResult {
     estimated_cost: number | null;
     price_currency: string;
   };
+}
+
+export interface ProviderBenchmarkPlan {
+  confirmation_version: number;
+  benchmark: { id: string; version: number; title: string; output_contract: string };
+  provider: { id: string; name: string };
+  models: { worker: string; reviewer: string };
+  budget_billable: number;
+  review_reserve_billable: number;
+  estimated_cost_ceiling: number | null;
+  price_currency: string;
+  stages: string[];
+  warning: string;
+}
+
+export interface ProviderBenchmarkRunInput {
+  channel_id?: string | null;
+  project_id?: string | null;
+  confirmation_version: number;
+  confirmed_benchmark_id: string;
+  confirmed_benchmark_version: number;
+  confirmed_budget_billable: number;
+}
+
+export interface ProviderQualityGate {
+  task_id: string;
+  document: { id: string; title: string; kind: string; created_at: number } | null;
+  machine: { pass: boolean; gaps: string[] };
+  reviewer: {
+    ready: boolean;
+    result_passed: boolean;
+    bound_to_current_document: boolean;
+    verdict_id: string | null;
+    document_id: string | null;
+    result: "pass" | "revise" | null;
+    reasons: string;
+    source: "auto" | "fallback" | "human" | null;
+  };
+  human: {
+    completed: boolean;
+    checks_completed: number;
+    checks_total: number;
+    note: string;
+  };
+  ready_for_human_audit: boolean;
+  complete: boolean;
 }
 
 export interface McpTaskTestResult {
@@ -234,9 +299,10 @@ export const api = {
   updateProvider: (id: string, data: ProviderInput) =>
     req<Provider>(`/providers/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
   testProvider: (id: string) => req<ProviderTestResult>(`/providers/${id}/test`, { method: "POST" }),
+  providerTaskTestPlan: (id: string) => req<ProviderBenchmarkPlan>(`/providers/${id}/task-test/plan`),
   startLinkCheck: (data: { channel_id?: string | null } = {}) =>
     req<LinkCheckStartResult>("/link-checks", { method: "POST", body: JSON.stringify(data) }),
-  runProviderTaskTest: (id: string, data: { channel_id?: string | null; project_id?: string | null } = {}) =>
+  runProviderTaskTest: (id: string, data: ProviderBenchmarkRunInput) =>
     req<ProviderTaskTestResult>(`/providers/${id}/task-test`, { method: "POST", body: JSON.stringify(data) }),
   deleteProvider: (id: string) => req<{ ok: boolean }>(`/providers/${id}`, { method: "DELETE" }),
   getImageProvider: () => req<ImageProviderInfo>("/image-provider"),
@@ -255,6 +321,8 @@ export const api = {
     channel_id?: string | null;
     assignee_agent_id?: string | null;
     reviewer_agent_id?: string | null;
+    acceptance_criteria?: string;
+    source_doc_ids?: string[];
     budget_billable?: number;
   }) =>
     req<Task>("/tasks", { method: "POST", body: JSON.stringify(data) }),
@@ -263,8 +331,9 @@ export const api = {
     req<ScenarioStartResult>(`/scenarios/${id}/start`, { method: "POST", body: JSON.stringify(data) }),
   taskEvents: (id: string) => req<TaskEvent[]>(`/tasks/${id}/events`),
   taskVerdicts: (id: string) => req<Verdict[]>(`/tasks/${id}/verdicts`),
+  taskQualityGate: (id: string) => req<ProviderQualityGate>(`/tasks/${id}/quality-gate`),
   quality: () => req<QualitySummary>("/quality"),
-  updateTask: (id: string, data: Partial<Pick<Task, "title" | "description" | "status" | "assignee_agent_id" | "reviewer_agent_id" | "budget_billable">>) =>
+  updateTask: (id: string, data: TaskUpdateInput) =>
     req<Task>(`/tasks/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
   requestRevision: (id: string, reason: string) =>
     req<Task>(`/tasks/${id}/revise`, { method: "POST", body: JSON.stringify({ reason }) }),

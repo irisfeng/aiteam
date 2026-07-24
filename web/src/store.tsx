@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { api, type Bootstrap } from "./api";
-import type { Agent, AgentStatus, Approval, Channel, Doc, Message, Project, Provider, Task, TaskEvent, View } from "./types";
+import type { Agent, AgentStatus, Approval, Channel, Doc, Message, Project, Provider, Task, TaskEvent, TaskUpdateInput, View } from "./types";
 
 interface State {
   ready: boolean;
@@ -248,12 +248,15 @@ interface Store extends State {
     channel_id?: string | null;
     assignee_agent_id?: string | null;
     reviewer_agent_id?: string | null;
+    acceptance_criteria?: string;
+    source_doc_ids?: string[];
+    budget_billable?: number;
   }) => Promise<Task>;
-  updateTask: (id: string, data: Partial<Pick<Task, "title" | "description" | "status" | "assignee_agent_id" | "reviewer_agent_id" | "budget_billable">>) => Promise<Task>;
+  updateTask: (id: string, data: TaskUpdateInput) => Promise<Task>;
   createProvider: (data: import("./api").ProviderInput) => Promise<Provider>;
   updateProvider: (id: string, data: import("./api").ProviderInput) => Promise<Provider>;
   deleteProvider: (id: string) => Promise<void>;
-  runProviderTaskTest: (id: string, data?: { channel_id?: string | null; project_id?: string | null }) => Promise<import("./api").ProviderTaskTestResult>;
+  runProviderTaskTest: (id: string, data: import("./api").ProviderBenchmarkRunInput) => Promise<import("./api").ProviderTaskTestResult>;
   runMcpTaskTest: (id: string, data?: { channel_id?: string | null; project_id?: string | null }) => Promise<import("./api").McpTaskTestResult>;
   runSkillTaskTest: (id: string, data?: { channel_id?: string | null; project_id?: string | null }) => Promise<import("./api").SkillTaskTestResult>;
   moveTask: (task: Task, status: Task["status"]) => Promise<void>;
@@ -479,7 +482,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         dispatch({ type: "providers:set", providers: fresh.providers, mockMode: fresh.mock_mode });
       },
       runProviderTaskTest: async (id, data) => {
-        const result = await api.runProviderTaskTest(id, data ?? {});
+        const result = await api.runProviderTaskTest(id, data);
         const fresh = await api.bootstrap();
         dispatch({ type: "bootstrap:merge", data: fresh });
         return result;

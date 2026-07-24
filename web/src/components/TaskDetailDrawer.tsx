@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useWorkspace } from "../store";
-import type { Approval, Doc, Task, TaskEvent, Verdict } from "../types";
-import { api, billableTokens, parseTaskUsage } from "../api";
+import type { Approval, Doc, HumanQualityAudit, Task, TaskEvent, Verdict } from "../types";
+import { api, billableTokens, parseTaskUsage, type ProviderQualityGate } from "../api";
+import { formatNetworkApprovalPayload } from "../lib/approvals";
 
 const EVENT_LABEL: Record<TaskEvent["type"], string> = {
   created: "创建",
@@ -14,7 +15,16 @@ const EVENT_LABEL: Record<TaskEvent["type"], string> = {
   verification: "复核",
   approval: "审批",
   user_close: "关闭",
+  cancelled: "取消",
   failure: "失败",
+};
+const TASK_STATUS_LABEL: Record<Task["status"], string> = {
+  todo: "待办",
+  doing: "进行中",
+  blocked: "等待输入",
+  review: "待评审",
+  done: "已关闭",
+  cancelled: "已取消",
 };
 
 const VERDICT_SOURCE_LABEL: Record<Verdict["source"], string> = {
@@ -23,6 +33,26 @@ const VERDICT_SOURCE_LABEL: Record<Verdict["source"], string> = {
   fallback: "兜底",
   human: "人工退回",
 };
+
+const PROVIDER_QUALITY_BENCHMARK_PREFIX = "真实模型质量基准：AiTeam 产品落地决策简报";
+const HUMAN_AUDIT_ITEMS: { key: Exclude<keyof HumanQualityAudit, "note">; label: string }[] = [
+  { key: "decision_useful", label: "结论足以支持继续/停止决策，不只是内容摘要" },
+  { key: "evidence_traceable", label: "关键事实、数字和能力声明都能回到任务证据" },
+  { key: "no_fabrication", label: "没有编造字段、事件、状态、工具、来源或用户反馈" },
+  { key: "workflow_actionable", label: "七步工作流、负责人、退出条件和下一步可实际执行" },
+  { key: "no_padding", label: "没有重复段落、占位符或为凑篇幅写的空泛内容" },
+];
+
+function parseRecordedHumanAudit(events: TaskEvent[]): (HumanQualityAudit & { version?: number }) | null {
+  for (let index = events.length - 1; index >= 0; index--) {
+    if (events[index].type !== "user_close") continue;
+    try {
+      const meta = JSON.parse(events[index].metadata_json || "{}") as { human_audit?: HumanQualityAudit & { version?: number } };
+      if (meta.human_audit) return meta.human_audit;
+    } catch { /* 损坏的历史 metadata 不影响任务详情 */ }
+  }
+  return null;
+}
 
 function fmtNum(n: number) {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -64,6 +94,7 @@ function parseClarificationPayload(payload: string) {
 }
 
 function approvalQuestion(a: Approval) {
+  if (a.kind === "network") return formatNetworkApprovalPayload(a.payload);
   if (a.kind !== "clarification") return a.payload;
   const parsed = parseClarificationPayload(a.payload);
   if (!parsed) return a.payload;
@@ -78,6 +109,8 @@ function approvalQuestion(a: Approval) {
 function approvalKindLabel(kind: Approval["kind"]) {
   if (kind === "plan") return "计划";
   if (kind === "clarification") return "输入";
+  if (kind === "network") return "网络";
+  if (kind === "budget") return "预算";
   return "审批";
 }
 
@@ -88,7 +121,18 @@ function splitAcceptanceCriteria(raw: string) {
     .filter(Boolean);
 }
 
+function hasSelfCheckEvidence(content: string) {
+  return /(?:^|\n)#{1,6}\s+[^\n]*(?:自查|验收核对)/m.test(content) ||
+    /(?:^|\n)\s*\|[^\n]*(?:状态|是否满足)[^\n]*\|[^\n]*(?:证据|验收标准)/m.test(content);
+}
+
 function nextActionHint(task: Task, pendingApprovals: Approval[], docs: Doc[], dependencies: Task[], assignee?: { name: string } | undefined) {
+  if (task.status === "cancelled") {
+    return { tone: "idle" as const, label: "已取消", body: "任务已取消归档，不代表交付或验收通过，也不会解锁下游依赖。" };
+  }
+  if (task.status === "done") {
+    return { tone: "done" as const, label: "已关闭", body: "任务已由人类确认关闭；保留交付物、审批和活动日志供复盘。" };
+  }
   if (pendingApprovals.length > 0) {
     const clarification = pendingApprovals.some((a) => a.kind === "clarification");
     return {
@@ -100,7 +144,11 @@ function nextActionHint(task: Task, pendingApprovals: Approval[], docs: Doc[], d
     };
   }
   if (task.status === "blocked") {
-    return { tone: "attention" as const, label: "任务已阻塞", body: "等待补充事实、权限或选择；不要把 blocked 手工推成已交付。" };
+    return {
+      tone: "attention" as const,
+      label: "任务已阻塞",
+      body: "当前没有待处理审批。可先调整预算或负责人，再恢复到待办重新尝试；也可以直接取消归档。",
+    };
   }
   if (task.status === "review") {
     return {
@@ -118,7 +166,7 @@ function nextActionHint(task: Task, pendingApprovals: Approval[], docs: Doc[], d
     if (blockedDeps.length > 0) return { tone: "idle" as const, label: "等待依赖", body: `${blockedDeps.length} 个前置任务未交付；依赖完成后 ${assignee?.name ?? "负责人"} 会继续。` };
     return { tone: "run" as const, label: "准备开工", body: `${assignee?.name ?? "负责人"} 已归属；任务会按调度进入执行。` };
   }
-  return { tone: "done" as const, label: "已关闭", body: "任务已由人类确认关闭；保留交付物、审批和活动日志供复盘。" };
+  return { tone: "idle" as const, label: "状态待确认", body: "请返回任务看板刷新状态后继续。" };
 }
 
 export function TaskDetailDrawer({
@@ -133,7 +181,9 @@ export function TaskDetailDrawer({
   onOpenTask?: (task: Task) => void;
 }) {
   const ws = useWorkspace();
+  const isProviderQualityBenchmark = task.title.startsWith(PROVIDER_QUALITY_BENCHMARK_PREFIX);
   const [closing, setClosing] = useState(false);
+  const [resuming, setResuming] = useState(false);
   const [revising, setRevising] = useState(false);
   const [resolvingApprovalId, setResolvingApprovalId] = useState("");
   const [approvalResponses, setApprovalResponses] = useState<Record<string, string>>({});
@@ -142,21 +192,92 @@ export function TaskDetailDrawer({
   const [expandedVerdicts, setExpandedVerdicts] = useState<Record<string, boolean>>({});
   const [budgetInput, setBudgetInput] = useState("");
   const [savingBudget, setSavingBudget] = useState(false);
+  const [editingBrief, setEditingBrief] = useState(false);
+  const [briefDescription, setBriefDescription] = useState("");
+  const [briefAcceptance, setBriefAcceptance] = useState("");
+  const [savingBrief, setSavingBrief] = useState(false);
+  const [actionError, setActionError] = useState("");
+  const [humanAuditChecks, setHumanAuditChecks] = useState<Record<Exclude<keyof HumanQualityAudit, "note">, boolean>>({
+    decision_useful: false,
+    evidence_traceable: false,
+    no_fabrication: false,
+    workflow_actionable: false,
+    no_padding: false,
+  });
+  const [humanAuditNote, setHumanAuditNote] = useState("");
+  const [benchmarkGate, setBenchmarkGate] = useState<ProviderQualityGate | null | undefined>(undefined);
+  const taskEvidenceVersion = useMemo(() => {
+    const documents = ws.documents
+      .filter((document) => document.task_id === task.id)
+      .map((document) => `${document.id}:${document.version}:${document.updated_at}`)
+      .sort()
+      .join("|");
+    const events = ws.taskEvents
+      .filter((event) => event.task_id === task.id && ["delivery", "verification", "user_close"].includes(event.type))
+      .map((event) => `${event.id}:${event.created_at}:${event.metadata_json}`)
+      .sort()
+      .join("|");
+    return `${documents}::${events}`;
+  }, [task.id, ws.documents, ws.taskEvents]);
 
   useEffect(() => {
-    let alive = true;
     // 抽屉切换任务时不卸载：先清上一个任务的裁决链，避免请求返回前闪现旧数据
     setVerdicts([]);
     setExpandedVerdicts({});
-    api.taskVerdicts(task.id).then((v) => alive && setVerdicts(v)).catch(() => undefined);
+  }, [task.id]);
+  useEffect(() => {
+    let alive = true;
+    const loadVerdicts = () => api.taskVerdicts(task.id)
+      .then((value) => alive && setVerdicts(value))
+      .catch(() => undefined);
+    void loadVerdicts();
+    // task event 会先于相邻写入通过 WebSocket 到达时，短延迟再核对一次，避免同状态下漏掉最新裁决。
+    const retry = window.setTimeout(loadVerdicts, 250);
     return () => {
       alive = false;
+      window.clearTimeout(retry);
     };
-  }, [task.id]);
+  }, [task.id, taskEvidenceVersion]);
 
   useEffect(() => {
     setBudgetInput(task.budget_billable > 0 ? String(task.budget_billable) : "");
-  }, [task.id, task.budget_billable]);
+    setBriefDescription(task.description);
+    setBriefAcceptance(task.acceptance_criteria);
+    setEditingBrief(false);
+    setActionError("");
+  }, [task.id, task.budget_billable, task.description, task.acceptance_criteria]);
+  useEffect(() => {
+    if (task.status === "review") return;
+    setHumanAuditChecks({
+      decision_useful: false,
+      evidence_traceable: false,
+      no_fabrication: false,
+      workflow_actionable: false,
+      no_padding: false,
+    });
+    setHumanAuditNote("");
+  }, [task.id, task.status]);
+  useEffect(() => {
+    if (!isProviderQualityBenchmark) {
+      setBenchmarkGate(undefined);
+      return;
+    }
+    setBenchmarkGate(undefined);
+  }, [isProviderQualityBenchmark, task.id]);
+  useEffect(() => {
+    if (!isProviderQualityBenchmark) return;
+    let alive = true;
+    const loadGate = () => api.taskQualityGate(task.id)
+      .then((gate) => alive && setBenchmarkGate(gate))
+      .catch(() => alive && setBenchmarkGate(null));
+    void loadGate();
+    // 文档、复核事件或人工关单在状态不变时也必须刷新；延迟复核一次吸收 WebSocket/事务提交时序差。
+    const retry = window.setTimeout(loadGate, 250);
+    return () => {
+      alive = false;
+      window.clearTimeout(retry);
+    };
+  }, [isProviderQualityBenchmark, task.id, task.status, taskEvidenceVersion]);
   const assignee = ws.agentById(task.assignee_agent_id);
   const reviewer = ws.agentById(task.reviewer_agent_id);
   const creator = task.created_by === "user" ? null : ws.agentById(task.created_by);
@@ -167,26 +288,79 @@ export function TaskDetailDrawer({
   const docs = ws.documents.filter((d) => d.task_id === task.id).sort((a, b) => b.created_at - a.created_at);
   const latestDoc = docs[0];
   const events = ws.taskEvents.filter((e) => e.task_id === task.id).sort((a, b) => a.created_at - b.created_at);
+  const recordedHumanAudit = parseRecordedHumanAudit(events);
   const tools = events.filter((e) => e.type === "tool").slice(-6).reverse();
   const acceptanceItems = splitAcceptanceCriteria(task.acceptance_criteria);
   const deliveryEvidence = docs.length > 0;
-  const selfCheckEvidence = docs.some((d) => /自查表|验收标准|是否满足|证据位置/.test(d.content));
-  const verificationEvidence = events.some((e) => e.type === "verification");
+  const selfCheckEvidence = docs.some((d) => hasSelfCheckEvidence(d.content));
+  const latestVerdict = verdicts.at(-1);
+  const verificationPassed = latestVerdict?.result === "pass";
+  const checkedHumanAuditCount = HUMAN_AUDIT_ITEMS.filter((item) => humanAuditChecks[item.key]).length;
+  const humanAuditComplete = checkedHumanAuditCount === HUMAN_AUDIT_ITEMS.length && humanAuditNote.trim().length >= 12;
   const approvals = ws.approvals
     .filter((a) => a.ref_id === task.id || a.id === task.blocked_approval_id)
     .sort((a, b) => Number(b.status === "pending") - Number(a.status === "pending") || b.created_at - a.created_at);
   const pendingApprovals = approvals.filter((a) => a.status === "pending");
   const actionHint = nextActionHint(task, pendingApprovals, docs, dependencies, assignee);
-  const closeDisabled = task.status === "done" || closing || pendingApprovals.length > 0;
+  const terminal = task.status === "done" || task.status === "cancelled";
+  const closeDisabled = terminal || closing || pendingApprovals.length > 0;
+  const closeEvidenceGaps = [
+    !deliveryEvidence ? "未看到交付物" : "",
+    !selfCheckEvidence ? "未检出交付自查表" : "",
+    !isProviderQualityBenchmark && !verificationPassed
+      ? latestVerdict?.result === "revise" ? "最近一次复核要求返工" : "暂无结构化复核通过裁决"
+      : "",
+    isProviderQualityBenchmark && benchmarkGate === undefined
+      ? "正在读取当前文档的三重验收状态"
+      : "",
+    isProviderQualityBenchmark && benchmarkGate === null
+      ? "三重验收状态读取失败，请刷新后重试"
+      : "",
+    isProviderQualityBenchmark && benchmarkGate && !benchmarkGate.machine.pass
+      ? `当前文档自动检查未通过（${benchmarkGate.machine.gaps.length} 项差距）`
+      : "",
+    isProviderQualityBenchmark && benchmarkGate && !benchmarkGate.reviewer.ready
+      ? benchmarkGate.reviewer.result_passed
+        ? "独立复核结论未绑定当前文档版本"
+        : "当前文档尚无独立复核通过结论"
+      : "",
+    isProviderQualityBenchmark && checkedHumanAuditCount < HUMAN_AUDIT_ITEMS.length
+      ? `人工质量审计仅完成 ${checkedHumanAuditCount}/${HUMAN_AUDIT_ITEMS.length} 项`
+      : "",
+    isProviderQualityBenchmark && humanAuditNote.trim().length < 12
+      ? "人工决策说明不足 12 个字符"
+      : "",
+  ].filter(Boolean);
+  const captureActionError = (error: unknown) => {
+    setActionError(error instanceof Error ? error.message : String(error));
+  };
 
   async function closeTask() {
     if (closeDisabled) return;
-    // 未交付评审的任务保留人类关闭权（唯一的取消/清理路径），但要显式确认这是"取消归档"而非验收通过。
+    // 未交付评审只能取消，不能伪装成 done；只有 review → done 才表示人类验收通过。
     if (task.status !== "review" &&
-      !window.confirm(`任务「${task.title}」尚未交付评审。\n确认关闭 = 取消并归档该任务（不代表验收通过）。`)) return;
+      !window.confirm(`确认取消任务「${task.title}」？\n取消后会归档，但不计入交付、质量覆盖，也不会解锁下游依赖。`)) return;
+    if (task.status === "review" && isProviderQualityBenchmark && closeEvidenceGaps.length > 0) {
+      setActionError(`真实质量基准不能跳过三重验收：${closeEvidenceGaps.join("；")}`);
+      return;
+    }
+    if (task.status === "review" && closeEvidenceGaps.length > 0 &&
+      !window.confirm(`关单证据仍有缺口：\n- ${closeEvidenceGaps.join("\n- ")}\n\n是否基于你的人工判断，仍然验收并关闭该任务？`)) return;
+    if (task.status === "review" && isProviderQualityBenchmark &&
+      !window.confirm("确认这份真实模型交付已经通过自动检查、独立复核和你的五项质量确认，并记录为可用于产品决策的验收结果？")) return;
+    setActionError("");
     setClosing(true);
     try {
-      await ws.moveTask(task, "done");
+      if (task.status === "review" && isProviderQualityBenchmark) {
+        await ws.updateTask(task.id, {
+          status: "done",
+          human_audit: { ...humanAuditChecks, note: humanAuditNote.trim() },
+        });
+      } else {
+        await ws.moveTask(task, task.status === "review" ? "done" : "cancelled");
+      }
+    } catch (error) {
+      captureActionError(error);
     } finally {
       setClosing(false);
     }
@@ -196,38 +370,82 @@ export function TaskDetailDrawer({
     if (task.status !== "review" || revising) return;
     const reason = window.prompt("退回返工原因", "请按验收标准补全缺口后重新交付。");
     if (reason === null) return;
+    setActionError("");
     setRevising(true);
     try {
       await api.requestRevision(task.id, reason);
       await ws.refreshWorkspace();
+    } catch (error) {
+      captureActionError(error);
     } finally {
       setRevising(false);
     }
   }
 
+  async function resumeBlockedTask() {
+    if (task.status !== "blocked" || pendingApprovals.length > 0 || resuming) return;
+    setActionError("");
+    setResuming(true);
+    try {
+      await ws.updateTask(task.id, { status: "todo" });
+    } catch (error) {
+      captureActionError(error);
+    } finally {
+      setResuming(false);
+    }
+  }
+
   async function resolveTaskApproval(approval: Approval, approve: boolean, response?: string) {
     if (approval.status !== "pending" || resolvingApprovalId) return;
+    setActionError("");
     setResolvingApprovalId(approval.id);
     try {
       await ws.resolveApproval(approval.id, approve, response);
+    } catch (error) {
+      captureActionError(error);
     } finally {
       setResolvingApprovalId("");
     }
   }
 
   async function saveBudget() {
-    if (savingBudget) return;
+    if (savingBudget || terminal) return;
     const n = Math.max(0, Math.round(Number(budgetInput) || 0));
+    setActionError("");
     setSavingBudget(true);
     try {
       await ws.updateTask(task.id, { budget_billable: n });
+    } catch (error) {
+      captureActionError(error);
     } finally {
       setSavingBudget(false);
     }
   }
 
+  async function saveBrief() {
+    if (savingBrief || terminal) return;
+    if (!briefDescription.trim() || !briefAcceptance.trim()) {
+      setActionError("任务简报必须同时包含目标背景和验收标准，才能交给负责人开工。");
+      return;
+    }
+    setActionError("");
+    setSavingBrief(true);
+    try {
+      await ws.updateTask(task.id, {
+        description: briefDescription.trim(),
+        acceptance_criteria: briefAcceptance.trim(),
+      });
+      setEditingBrief(false);
+    } catch (error) {
+      captureActionError(error);
+    } finally {
+      setSavingBrief(false);
+    }
+  }
+
   async function updateRole(kind: "assignee" | "reviewer", agentId: string) {
     if (savingRole) return;
+    setActionError("");
     setSavingRole(kind);
     try {
       await ws.updateTask(
@@ -236,6 +454,8 @@ export function TaskDetailDrawer({
           ? { assignee_agent_id: agentId || null }
           : { reviewer_agent_id: agentId || null },
       );
+    } catch (error) {
+      captureActionError(error);
     } finally {
       setSavingRole("");
     }
@@ -263,11 +483,14 @@ export function TaskDetailDrawer({
             : "border-line bg-sel text-ink-2";
   const hintActions = [
     ...(pendingApprovalCount > 0 ? [{ label: "处理", onClick: () => ws.setView({ kind: "inbox" }), disabled: false }] : []),
-    ...((task.status === "review" || task.status === "done") && latestDoc && onOpenDoc
+    ...((task.status === "review" || task.status === "done" || task.status === "cancelled") && latestDoc && onOpenDoc
       ? [{ label: task.status === "review" ? "看交付物" : "看归档", onClick: () => onOpenDoc(latestDoc), disabled: false }]
       : []),
     ...(task.status === "review"
       ? [{ label: revising ? "退回中…" : "退回返工", onClick: () => void requestRevision(), disabled: revising }]
+      : []),
+    ...(task.status === "blocked" && pendingApprovalCount === 0
+      ? [{ label: resuming ? "恢复中…" : "调整后重试", onClick: () => void resumeBlockedTask(), disabled: resuming }]
       : []),
   ];
 
@@ -279,7 +502,7 @@ export function TaskDetailDrawer({
           <div className="flex items-start gap-2">
             <div className="min-w-0 flex-1">
               <div className="mb-1 flex items-center gap-1.5">
-                <span className="rounded bg-sel px-1.5 py-px font-mono text-[10px] text-ink-3">{task.status}</span>
+                <span className="rounded bg-sel px-1.5 py-px text-[10px] text-ink-3">{TASK_STATUS_LABEL[task.status]}</span>
                 {project && <span className="truncate rounded bg-accent-soft px-1.5 py-px text-[10.5px] text-ink-2">{project.title}</span>}
               </div>
               <h2 className="text-[15px] font-semibold leading-snug">{task.title}</h2>
@@ -288,7 +511,6 @@ export function TaskDetailDrawer({
               ×
             </button>
           </div>
-          {task.description && <p className="mt-2 whitespace-pre-wrap text-[12.5px] leading-relaxed text-ink-2">{task.description}</p>}
           <div className={`mt-3 rounded-lg border px-3 py-2 ${hintToneClass}`}>
             <div className="flex items-start gap-2">
               <div className="min-w-0 flex-1">
@@ -312,9 +534,77 @@ export function TaskDetailDrawer({
               )}
             </div>
           </div>
+          {actionError && (
+            <div role="alert" className="mt-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-[11.5px] text-red-700 dark:border-red-900/60 dark:bg-red-950/20 dark:text-red-300">
+              操作失败：{actionError}
+            </div>
+          )}
         </header>
 
         <div className="flex-1 space-y-4 overflow-y-auto px-4 py-3">
+          <section>
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <h3 className="text-[12px] font-semibold text-ink-2">任务简报</h3>
+              {!terminal && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingBrief((value) => !value);
+                    setActionError("");
+                  }}
+                  className="rounded-md border border-line px-2 py-1 text-[11px] font-medium text-ink-2 hover:bg-sel"
+                >
+                  {editingBrief ? "取消编辑" : task.description && task.acceptance_criteria ? "编辑简报" : "完善简报"}
+                </button>
+              )}
+            </div>
+            {editingBrief ? (
+              <div className="space-y-2 rounded-lg border border-line bg-panel p-3">
+                <label className="block">
+                  <span className="text-[11px] font-medium text-ink-3">目标、背景与边界</span>
+                  <textarea
+                    value={briefDescription}
+                    onChange={(event) => setBriefDescription(event.target.value)}
+                    rows={4}
+                    className="mt-1 w-full resize-y rounded-md border border-line bg-paper px-2.5 py-2 text-[12px] leading-relaxed outline-none focus:border-accent/50"
+                    placeholder="为什么做、给谁用、范围到哪里、有哪些限制？"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-[11px] font-medium text-ink-3">预期交付物与验收标准</span>
+                  <textarea
+                    value={briefAcceptance}
+                    onChange={(event) => setBriefAcceptance(event.target.value)}
+                    rows={5}
+                    className="mt-1 w-full resize-y rounded-md border border-line bg-paper px-2.5 py-2 text-[12px] leading-relaxed outline-none focus:border-accent/50"
+                    placeholder={"交付物：一份可直接使用的报告（report）\n1. 关键结论有证据\n2. 风险与下一步明确"}
+                  />
+                </label>
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => void saveBrief()}
+                    disabled={savingBrief || !briefDescription.trim() || !briefAcceptance.trim()}
+                    className="rounded-md bg-accent px-3 py-1.5 text-[11.5px] font-semibold text-white hover:opacity-90 disabled:opacity-40"
+                  >
+                    {savingBrief ? "保存中…" : "保存简报"}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-2 rounded-lg border border-line bg-panel p-3 text-[12px] leading-relaxed">
+                <div>
+                  <div className="mb-1 text-[10.5px] font-medium text-ink-3">目标、背景与边界</div>
+                  <div className={task.description ? "whitespace-pre-wrap text-ink-2" : "text-amber-600"}>{task.description || "未填写，当前不能指派开工"}</div>
+                </div>
+                <div className="border-t border-line pt-2">
+                  <div className="mb-1 text-[10.5px] font-medium text-ink-3">预期交付物与验收标准</div>
+                  <div className={task.acceptance_criteria ? "whitespace-pre-wrap text-ink-2" : "text-amber-600"}>{task.acceptance_criteria || "未填写，当前不能指派开工"}</div>
+                </div>
+              </div>
+            )}
+          </section>
+
           <section>
             <h3 className="mb-2 text-[12px] font-semibold text-ink-2">责任链</h3>
             <div className="grid grid-cols-2 gap-2 text-[12px]">
@@ -323,7 +613,7 @@ export function TaskDetailDrawer({
                 <select
                   value={task.assignee_agent_id ?? ""}
                   onChange={(e) => void updateRole("assignee", e.target.value)}
-                  disabled={!!savingRole || task.status === "done"}
+                  disabled={!!savingRole || terminal}
                   className="mt-1 w-full rounded-md border border-line bg-panel px-2 py-1 text-[12px] outline-none hover:bg-sel disabled:opacity-50"
                   title="更换负责人会写入任务活动日志；未分配任务可由 AI 同事认领"
                 >
@@ -340,7 +630,7 @@ export function TaskDetailDrawer({
                 <select
                   value={task.reviewer_agent_id ?? ""}
                   onChange={(e) => void updateRole("reviewer", e.target.value)}
-                  disabled={!!savingRole || task.status === "done"}
+                  disabled={!!savingRole || terminal}
                   className="mt-1 w-full rounded-md border border-line bg-panel px-2 py-1 text-[12px] outline-none hover:bg-sel disabled:opacity-50"
                   title="显式复核人优先于系统自动路由，并写入任务活动日志"
                 >
@@ -357,13 +647,6 @@ export function TaskDetailDrawer({
             </div>
             {savingRole && <div className="mt-1.5 text-[11px] text-ink-3">正在更新{savingRole === "assignee" ? "负责人" : "复核人"}…</div>}
           </section>
-
-          {task.acceptance_criteria && (
-            <section>
-              <h3 className="mb-2 text-[12px] font-semibold text-ink-2">验收标准</h3>
-              <div className="whitespace-pre-wrap rounded-md bg-sel px-3 py-2 text-[12px] leading-relaxed text-ink-2">{task.acceptance_criteria}</div>
-            </section>
-          )}
 
           {(task.acceptance_criteria || task.status === "review" || docs.length > 0) && (
             <section>
@@ -383,9 +666,13 @@ export function TaskDetailDrawer({
                     </div>
                   </div>
                   <div className="border-r border-t border-line px-3 py-2">
-                    <span className="text-ink-3">复核事件</span>
-                    <div className={`mt-0.5 font-medium ${verificationEvidence ? "text-emerald-600" : "text-ink-3"}`}>
-                      {verificationEvidence ? "已有复核留痕" : "暂无复核留痕"}
+                    <span className="text-ink-3">复核裁决</span>
+                    <div className={`mt-0.5 font-medium ${verificationPassed ? "text-emerald-600" : latestVerdict ? "text-amber-600" : "text-ink-3"}`}>
+                      {verificationPassed
+                        ? `已通过 · ${VERDICT_SOURCE_LABEL[latestVerdict.source]}`
+                        : latestVerdict
+                          ? `要求返工 · ${VERDICT_SOURCE_LABEL[latestVerdict.source]}`
+                          : "暂无结构化裁决"}
                     </div>
                   </div>
                   <div className="border-t border-line px-3 py-2">
@@ -406,6 +693,125 @@ export function TaskDetailDrawer({
                         </div>
                       ))}
                     </div>
+                  </div>
+                )}
+                {isProviderQualityBenchmark && (
+                  <div className="border-t border-line px-3 py-3">
+                    <div className="flex flex-wrap items-baseline justify-between gap-1">
+                      <div className="text-[11px] font-semibold text-ink-2">三重验收</div>
+                      <div className="text-[10px] text-ink-3">自动检查 → 独立复核 → 你的确认</div>
+                    </div>
+                    {benchmarkGate === undefined ? (
+                      <div className="mt-2 text-[11.5px] text-ink-3">正在核对当前文档与复核记录…</div>
+                    ) : benchmarkGate === null ? (
+                      <div className="mt-2 rounded bg-red-50 px-2 py-1.5 text-[11.5px] text-red-600 dark:bg-red-950/20 dark:text-red-300">
+                        暂时无法读取质量门，请刷新任务后重试。
+                      </div>
+                    ) : (
+                      <div className="mt-2 space-y-2">
+                        <div className="rounded-md border border-line bg-paper px-2.5 py-2">
+                          <div className="flex items-center gap-2 text-[11.5px]">
+                            <span className="font-mono text-[10px] text-ink-3">01</span>
+                            <span className="font-medium text-ink-2">自动检查</span>
+                            <span className={`ml-auto rounded px-1.5 py-px text-[10px] font-medium ${benchmarkGate.machine.pass ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300" : "bg-red-50 text-red-600 dark:bg-red-950/20 dark:text-red-300"}`}>
+                              {benchmarkGate.machine.pass ? "当前文档通过" : `未通过 · ${benchmarkGate.machine.gaps.length} 项`}
+                            </span>
+                          </div>
+                          {benchmarkGate.document && (
+                            <div className="mt-1 truncate text-[10.5px] text-ink-3" title={benchmarkGate.document.title}>
+                              文档：{benchmarkGate.document.title}
+                            </div>
+                          )}
+                          {!benchmarkGate.machine.pass && benchmarkGate.machine.gaps.length > 0 && (
+                            <ul className="mt-1.5 space-y-1 text-[10.5px] leading-snug text-red-600 dark:text-red-300">
+                              {benchmarkGate.machine.gaps.slice(0, 3).map((gap) => <li key={gap}>· {gap}</li>)}
+                              {benchmarkGate.machine.gaps.length > 3 && <li>· 另有 {benchmarkGate.machine.gaps.length - 3} 项差距</li>}
+                            </ul>
+                          )}
+                        </div>
+                        <div className="rounded-md border border-line bg-paper px-2.5 py-2">
+                          <div className="flex items-center gap-2 text-[11.5px]">
+                            <span className="font-mono text-[10px] text-ink-3">02</span>
+                            <span className="font-medium text-ink-2">独立复核</span>
+                            <span className={`ml-auto rounded px-1.5 py-px text-[10px] font-medium ${benchmarkGate.reviewer.ready ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300" : "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-300"}`}>
+                              {benchmarkGate.reviewer.ready
+                                ? "通过且绑定当前文档"
+                                : benchmarkGate.reviewer.result_passed
+                                  ? "通过但版本已变化"
+                                  : "尚未通过"}
+                            </span>
+                          </div>
+                          {!benchmarkGate.reviewer.ready && benchmarkGate.reviewer.reasons && (
+                            <div className="mt-1 line-clamp-3 text-[10.5px] leading-snug text-ink-3">{benchmarkGate.reviewer.reasons}</div>
+                          )}
+                        </div>
+                        <div className="rounded-md border border-line bg-paper px-2.5 py-2">
+                          <div className="flex items-center gap-2 text-[11.5px]">
+                            <span className="font-mono text-[10px] text-ink-3">03</span>
+                            <span className="font-medium text-ink-2">你的确认</span>
+                            <span className={`ml-auto rounded px-1.5 py-px text-[10px] font-medium ${benchmarkGate.human.completed ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300" : "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-300"}`}>
+                              {benchmarkGate.human.completed ? "已完成 5/5" : `待完成 · ${checkedHumanAuditCount}/5`}
+                            </span>
+                          </div>
+                          <div className="mt-1 text-[10.5px] leading-snug text-ink-3">
+                            {benchmarkGate.ready_for_human_audit
+                              ? "前两步已通过，可以开始最终确认。"
+                              : "先补齐当前文档的自动检查与独立复核，再进行最终确认。"}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {isProviderQualityBenchmark && task.status === "review" && (
+                  <div className="border-t border-line px-3 py-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[11px] font-semibold text-ink-2">最后一步 · 你的质量确认</div>
+                      <span className={`rounded px-1.5 py-px font-mono text-[10px] ${humanAuditComplete ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300" : "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-300"}`}>
+                        {checkedHumanAuditCount}/{HUMAN_AUDIT_ITEMS.length}
+                      </span>
+                    </div>
+                    <div className="mt-2 space-y-2">
+                      {HUMAN_AUDIT_ITEMS.map((item) => (
+                        <label key={item.key} className="flex cursor-pointer items-start gap-2 text-[11.5px] leading-snug text-ink-2">
+                          <input
+                            type="checkbox"
+                            checked={humanAuditChecks[item.key]}
+                            onChange={(event) => setHumanAuditChecks((current) => ({ ...current, [item.key]: event.target.checked }))}
+                            className="mt-0.5 h-3.5 w-3.5 accent-[var(--accent)]"
+                          />
+                          <span>{item.label}</span>
+                        </label>
+                      ))}
+                    </div>
+                    <label className="mt-3 block text-[11px] text-ink-3">
+                      最终判断（至少 12 个字符）
+                      <textarea
+                        value={humanAuditNote}
+                        onChange={(event) => setHumanAuditNote(event.target.value)}
+                        maxLength={500}
+                        rows={2}
+                        placeholder="例如：证据完整、风险与停止条件可执行，同意进入首批用户测试。"
+                        className="mt-1 w-full resize-y rounded-md border border-line bg-paper px-2 py-1.5 text-[11.5px] leading-relaxed text-ink outline-none focus:border-accent/50"
+                      />
+                    </label>
+                    <div className="mt-1 text-[10.5px] leading-relaxed text-ink-3">
+                      关单时会把五项确认、最终判断、当前文档和独立复核结果一起留痕，不能跳过。
+                    </div>
+                  </div>
+                )}
+                {isProviderQualityBenchmark && task.status === "done" && recordedHumanAudit && (
+                  <div className="border-t border-emerald-200 bg-emerald-50 px-3 py-2 text-[11.5px] leading-relaxed text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/20 dark:text-emerald-300">
+                    <div className="font-medium">人工质量审计已记录 · 5/5</div>
+                    <div className="mt-0.5 whitespace-pre-wrap">{recordedHumanAudit.note}</div>
+                  </div>
+                )}
+                {task.status === "review" && closeEvidenceGaps.length > 0 && (
+                  <div className="border-t border-amber-200 bg-amber-50 px-3 py-2 text-[11.5px] leading-relaxed text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/20 dark:text-amber-300">
+                    关单前仍需人工确认：{closeEvidenceGaps.join("；")}。
+                    {isProviderQualityBenchmark
+                      ? "真实质量基准必须补齐全部证据，不能跳过三重验收。"
+                      : "你仍可基于人工判断验收关闭，但系统会在操作时再次提醒。"}
                   </div>
                 )}
               </div>
@@ -467,11 +873,12 @@ export function TaskDetailDrawer({
                     onKeyDown={(e) => e.key === "Enter" && void saveBudget()}
                     inputMode="numeric"
                     placeholder="不限"
-                    className="w-20 rounded-md border border-line bg-paper px-1.5 py-0.5 text-[11.5px] font-mono text-ink outline-none focus:border-accent/50"
+                    disabled={terminal}
+                    className="w-20 rounded-md border border-line bg-paper px-1.5 py-0.5 text-[11.5px] font-mono text-ink outline-none focus:border-accent/50 disabled:opacity-50"
                   />
                   <button
                     onClick={() => void saveBudget()}
-                    disabled={savingBudget}
+                    disabled={savingBudget || terminal}
                     className="rounded-md border border-line px-2 py-0.5 text-[11px] text-ink-2 hover:bg-sel disabled:opacity-40"
                   >
                     {savingBudget ? "保存中…" : "保存"}
@@ -605,17 +1012,33 @@ export function TaskDetailDrawer({
                         onClick={() => void resolveTaskApproval(a, true, a.kind === "clarification" ? responseValue : undefined)}
                         disabled={!!resolvingApprovalId}
                         className="rounded-md bg-accent px-2.5 py-1 text-[12px] font-medium text-white disabled:opacity-40"
-                        title={a.kind === "clarification" ? "确认后任务会恢复执行" : "批准该请求"}
+                        title={
+                          a.kind === "clarification"
+                            ? "确认后任务会恢复执行"
+                            : a.kind === "network"
+                              ? "只批准当前显示的目标、工具和完整参数执行一次"
+                              : "批准该请求"
+                        }
                       >
-                        {resolvingApprovalId === a.id ? "处理中…" : a.kind === "clarification" ? "确认并恢复" : "批准"}
+                        {resolvingApprovalId === a.id
+                          ? "处理中…"
+                          : a.kind === "clarification"
+                            ? "确认并恢复"
+                            : a.kind === "network"
+                              ? "批准一次并恢复"
+                              : "批准"}
                       </button>
                       <button
                         onClick={() => void resolveTaskApproval(a, false)}
                         disabled={!!resolvingApprovalId}
                         className="rounded-md border border-line bg-panel px-2.5 py-1 text-[12px] font-medium text-ink-2 hover:bg-sel disabled:opacity-40"
-                        title={a.kind === "clarification" ? "任务保持阻塞，等待后续输入" : "拒绝该请求"}
+                        title={
+                          a.kind === "clarification" || a.kind === "network"
+                            ? "任务保持阻塞，可调整后再重试或取消"
+                            : "拒绝该请求"
+                        }
                       >
-                        {a.kind === "clarification" ? "保持阻塞" : "拒绝"}
+                        {a.kind === "clarification" || a.kind === "network" ? "拒绝并保持阻塞" : "拒绝"}
                       </button>
                     </div>
                   )}
@@ -670,10 +1093,28 @@ export function TaskDetailDrawer({
           <button
             onClick={closeTask}
             disabled={closeDisabled}
-            className="rounded-lg bg-accent px-3 py-1.5 text-[13px] font-medium text-white disabled:opacity-40"
-            title={pendingApprovalCount > 0 ? "先处理该任务的审批或输入，再关闭任务" : "关单是 human-only 操作"}
+            className={task.status === "review"
+              ? "rounded-lg bg-accent px-3 py-1.5 text-[13px] font-medium text-white disabled:opacity-40"
+              : terminal
+                ? "rounded-lg border border-line bg-sel px-3 py-1.5 text-[13px] font-medium text-ink-3 disabled:opacity-70"
+                : "rounded-lg border border-red-300 bg-red-50 px-3 py-1.5 text-[13px] font-medium text-red-700 hover:bg-red-100 disabled:opacity-40 dark:border-red-900/60 dark:bg-red-950/20 dark:text-red-300"}
+            title={pendingApprovalCount > 0
+              ? "先处理该任务的审批或输入"
+              : task.status === "review"
+                ? isProviderQualityBenchmark
+                  ? "补齐自动检查、独立复核与五项最终确认后关单"
+                  : "验收通过后由人类确认关单"
+                : "取消只归档，不代表验收通过"}
           >
-            {task.status === "done" ? "已关闭" : closing ? "关闭中…" : "确认关闭任务"}
+            {task.status === "done"
+              ? "已关闭"
+              : task.status === "cancelled"
+                ? "已取消"
+                : closing
+                  ? task.status === "review" ? "关闭中…" : "取消中…"
+                  : task.status === "review"
+                    ? isProviderQualityBenchmark ? "确认质量并关单" : "确认关闭任务"
+                    : "取消任务"}
           </button>
           <button onClick={onClose} className="rounded-lg border border-line px-3 py-1.5 text-[13px] text-ink-2 hover:bg-sel">
             返回

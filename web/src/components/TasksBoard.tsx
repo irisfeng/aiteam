@@ -3,6 +3,7 @@ import { useWorkspace } from "../store";
 import type { Doc, Task } from "../types";
 import { API_BASE } from "../api";
 import { TaskDetailDrawer } from "./TaskDetailDrawer";
+import { TaskBriefComposer } from "./TaskBriefComposer";
 
 const DocViewerModal = lazy(() => import("./DocsView").then((m) => ({ default: m.DocViewerModal })));
 
@@ -12,24 +13,32 @@ const COLUMNS: { key: Task["status"]; label: string }[] = [
   { key: "blocked", label: "等待输入" },
   { key: "review", label: "待评审" },
   { key: "done", label: "完成" },
+  { key: "cancelled", label: "已取消" },
 ];
-const COLUMN_LABEL = Object.fromEntries(COLUMNS.map((c) => [c.key, c.label])) as Record<Task["status"], string>;
+const COLUMN_LABEL: Record<Task["status"], string> = {
+  todo: "待办",
+  doing: "进行中",
+  blocked: "等待输入",
+  review: "待评审",
+  done: "完成",
+  cancelled: "已取消",
+};
 const PROJECT_STATUS_TONE: Record<Task["status"], string> = {
   todo: "bg-slate-400",
   doing: "bg-accent",
   blocked: "bg-red-500",
   review: "bg-blue-500",
   done: "bg-emerald-500",
+  cancelled: "bg-slate-600",
 };
 
 function prevStatus(task: Task): Task["status"] | null {
-  if (task.status === "doing" || task.status === "review") return "todo";
   if (task.status === "done") return "review";
+  if (task.status === "cancelled") return "todo";
   return null;
 }
 
 function nextStatus(task: Task): Task["status"] | null {
-  if (task.status === "doing") return "review";
   if (task.status === "review") return "done";
   return null;
 }
@@ -46,6 +55,8 @@ function TaskCard({ task, onOpenDoc, onOpenTask }: { task: Task; onOpenDoc: (doc
   const hasPendingApproval = ws.approvals.some(
     (a) => a.status === "pending" && (a.ref_id === task.id || a.id === task.blocked_approval_id),
   );
+  const terminal = task.status === "done" || task.status === "cancelled";
+  const briefReady = Boolean(task.description.trim() && task.acceptance_criteria.trim());
   let depCount = 0;
   try {
     depCount = (JSON.parse(task.depends_on) as string[]).length;
@@ -101,9 +112,9 @@ function TaskCard({ task, onOpenDoc, onOpenTask }: { task: Task; onOpenDoc: (doc
           <select
             value={task.assignee_agent_id ?? ""}
             onChange={(e) => void ws.updateTask(task.id, { assignee_agent_id: e.target.value || null })}
-            disabled={task.status === "done"}
+            disabled={terminal || !briefReady}
             className="min-w-0 rounded-full border border-line bg-sel px-1.5 py-0.5 text-[11.5px] text-ink-2 outline-none disabled:opacity-50"
-            title="指派给 AI 同事后会自动开工"
+            title={briefReady ? "指派给 AI 同事后会自动开工" : "先打开详情，补齐目标背景和验收标准"}
           >
             <option value="">未分配</option>
             {ws.agents.map((a) => (
@@ -115,7 +126,7 @@ function TaskCard({ task, onOpenDoc, onOpenTask }: { task: Task; onOpenDoc: (doc
           <select
             value={task.reviewer_agent_id ?? ""}
             onChange={(e) => void ws.updateTask(task.id, { reviewer_agent_id: e.target.value || null })}
-            disabled={task.status === "done"}
+            disabled={terminal}
             className="min-w-0 rounded-full border border-line bg-sel px-1.5 py-0.5 text-[11.5px] text-ink-2 outline-none disabled:opacity-50"
             title="指定复核人；留空则系统按交付物类型自动选择"
           >
@@ -128,6 +139,15 @@ function TaskCard({ task, onOpenDoc, onOpenTask }: { task: Task; onOpenDoc: (doc
           </select>
         </div>
         <div className="flex min-h-6 items-center gap-1.5">
+          {!briefReady && !terminal && (
+            <button
+              onClick={() => onOpenTask(task)}
+              className="rounded bg-amber-50 px-1.5 py-0.5 text-[11px] font-medium text-amber-700 hover:bg-amber-100 dark:bg-amber-950/20 dark:text-amber-300"
+              title="缺少目标背景或验收标准，暂不能指派开工"
+            >
+              简报待完善
+            </button>
+          )}
           {creator && (
             <span className="truncate text-[11px] text-ink-3" title={`由 ${creator.name} 创建`}>
               {creator.emoji} 创建
@@ -138,9 +158,13 @@ function TaskCard({ task, onOpenDoc, onOpenTask }: { task: Task; onOpenDoc: (doc
             <button
               onClick={() => onOpenTask(task)}
               className="rounded bg-red-50 px-1.5 font-medium text-red-600 hover:bg-red-100 dark:bg-red-950/30 dark:text-red-300 dark:hover:bg-red-950/50"
-              title="打开详情，在「审批与输入」区回应后任务自动恢复"
+              title={
+                hasPendingApproval
+                  ? "打开详情处理待审批或补充输入"
+                  : "审批已处理或上下文已变化；打开详情调整后重试"
+              }
             >
-              去处理
+              {hasPendingApproval ? "去处理" : "调整重试"}
             </button>
           )}
           {task.status === "doing" && (
@@ -199,8 +223,8 @@ function TaskCard({ task, onOpenDoc, onOpenTask }: { task: Task; onOpenDoc: (doc
 
 /**
  * 项目级折叠卡：把同一项目在某列里的子任务收成一张可展开的组卡，给看板封顶。
- * 当项目全部任务都已交付（project-wide 都在 review）时，在「待评审」列露出
- * 「✅ 确认关闭项目」——一次决策批量关单，守住 human-only 签核又不必逐卡点。
+ * 当项目全部任务都进入终态时，仅在一个对应列露出「✅ 确认关闭项目」：
+ * review 会转 done，cancelled 保持取消，守住 human-only 签核又不必逐卡点。
  */
 function ProjectGroup({
   projectId,
@@ -233,11 +257,15 @@ function ProjectGroup({
     .filter((e) => e.task_id && taskIds.has(e.task_id))
     .sort((a, b) => a.created_at - b.created_at);
   const revisionTotal = allTasks.reduce((sum, t) => sum + (t.revision_count ?? 0), 0);
-  const delivered = allTasks.filter((t) => t.status === "review" || t.status === "done").length;
-  const allDelivered = allTasks.length > 0 && allTasks.every((t) => t.status === "review" || t.status === "done");
-  const closeBlockedByApproval = column === "review" && allDelivered && pendingApprovals.length > 0 && project?.status !== "done";
-  const canClose = column === "review" && allDelivered && pendingApprovals.length === 0 && project?.status !== "done";
   const statusCounts = Object.fromEntries(COLUMNS.map((c) => [c.key, allTasks.filter((t) => t.status === c.key).length])) as Record<Task["status"], number>;
+  const delivered = allTasks.filter((t) => t.status === "review" || t.status === "done").length;
+  const allTerminal = allTasks.length > 0 && allTasks.every(
+    (t) => t.status === "review" || t.status === "done" || t.status === "cancelled",
+  );
+  const closeColumn: Task["status"] =
+    statusCounts.review > 0 ? "review" : statusCounts.cancelled > 0 ? "cancelled" : "done";
+  const closeBlockedByApproval = column === closeColumn && allTerminal && pendingApprovals.length > 0 && project?.status !== "done";
+  const canClose = column === closeColumn && allTerminal && pendingApprovals.length === 0 && project?.status !== "done";
   const progressPct = allTasks.length > 0 ? Math.round((delivered / allTasks.length) * 100) : 0;
   const nextHint =
     statusCounts.blocked > 0
@@ -256,12 +284,15 @@ function ProjectGroup({
     if (closing) return;
     if (!window.confirm(
       `确认关闭项目「${project?.title ?? "项目"}」？\n` +
-      `将把 ${allTasks.length} 个已交付任务归入「完成」。\n` +
+      `将把 ${statusCounts.review} 个待评审任务归入「完成」；` +
+      `${statusCounts.done} 个已完成任务保持「完成」；${statusCounts.cancelled} 个已取消任务保持「已取消」。\n` +
       `交付物 ${projectDocs.length} 个，返工 ${revisionTotal} 次，活动事件 ${projectEvents.length} 条。`
     )) return;
     setClosing(true);
     try {
       await ws.closeProject(projectId);
+    } catch (error) {
+      window.alert(`关闭项目失败：${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setClosing(false);
     }
@@ -319,10 +350,10 @@ function ProjectGroup({
               </span>
             </button>
           )}
-          {allDelivered && (
+          {allTerminal && (
             <div className="mt-2 rounded-md border border-line bg-paper/70 px-2 py-1.5">
               <div className="mb-1 flex items-center justify-between gap-2 text-[11px] font-medium text-ink-2">
-                <span>验收摘要</span>
+                <span>关单摘要</span>
                 <span className={pendingApprovals.length > 0 ? "text-amber-600" : "text-emerald-600"}>
                   {pendingApprovals.length > 0 ? "仍有待处理" : "可人工关单"}
                 </span>
@@ -362,7 +393,7 @@ function ProjectGroup({
             onClick={close}
             disabled={closing}
             className="w-full rounded-md bg-accent px-2 py-1 text-[12px] font-medium text-white hover:opacity-90 disabled:opacity-50"
-            title="一次性把本项目全部已交付任务关单并归档"
+            title="归档项目：待评审任务转完成，已取消任务保持取消"
           >
             {closing ? "关闭中…" : "✅ 确认关闭项目"}
           </button>
@@ -387,8 +418,7 @@ export function TasksBoard({
   onDeepTaskConsumed?: () => void;
 }) {
   const ws = useWorkspace();
-  const [title, setTitle] = useState("");
-  const [assignee, setAssignee] = useState("");
+  const [briefOpen, setBriefOpen] = useState(false);
   const [openDoc, setOpenDoc] = useState<Doc | null>(null);
   const [openTask, setOpenTask] = useState<Task | null>(null);
 
@@ -400,48 +430,21 @@ export function TasksBoard({
     onDeepTaskConsumed?.();
   }, [deepTaskId, onDeepTaskConsumed, ws.tasks]);
 
-  async function addTask() {
-    const t = title.trim();
-    if (!t) return;
-    await ws.createTask({ title: t, assignee_agent_id: assignee || null });
-    setTitle("");
-  }
-
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col">
       <header className="flex flex-wrap items-center gap-3 border-b border-line px-4 py-3 sm:px-5">
         <h1 className="text-[15px] font-semibold">任务</h1>
-        <span className="min-w-0 flex-1 text-[12px] text-ink-3">指派给 AI 同事即自动开工：调研 → 交付文档 → 转待评审</span>
+        <span className="min-w-0 flex-1 text-[12px] text-ink-3">任务简报 → AI 执行 → 独立复核 → 人工关闭</span>
         <div className="flex w-full flex-wrap items-center gap-2 lg:ml-auto lg:w-auto">
-          <input
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && void addTask()}
-            placeholder="快速新建任务…"
-            className="min-w-0 flex-1 rounded-lg border border-line bg-panel px-3 py-1.5 text-[13px] outline-none focus:border-accent/50 sm:flex-none sm:w-52"
-          />
-          <select
-            value={assignee}
-            onChange={(e) => setAssignee(e.target.value)}
-            className="min-w-28 flex-1 rounded-lg border border-line bg-panel px-2 py-1.5 text-[13px] text-ink-2 outline-none sm:flex-none"
-          >
-            <option value="">不指派</option>
-            {ws.agents.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.emoji} {a.name}
-              </option>
-            ))}
-          </select>
           <button
-            onClick={() => void addTask()}
-            disabled={!title.trim()}
+            onClick={() => setBriefOpen(true)}
             className="rounded-lg bg-accent px-3 py-1.5 text-[13px] font-medium text-white disabled:opacity-40"
           >
-            新建
+            新建任务简报
           </button>
         </div>
       </header>
-      <div className="grid flex-1 grid-cols-[repeat(5,minmax(190px,1fr))] gap-3 overflow-auto p-4">
+      <div className="grid flex-1 grid-cols-[repeat(6,minmax(190px,1fr))] gap-3 overflow-auto p-4">
         {COLUMNS.map((col) => {
           const tasks = ws.tasks.filter((t) => t.status === col.key);
           // 同一项目的子任务收进折叠组卡；无项目的单任务平铺。保留列内出现顺序。
@@ -498,6 +501,7 @@ export function TasksBoard({
           onOpenTask={setOpenTask}
         />
       )}
+      <TaskBriefComposer open={briefOpen} onClose={() => setBriefOpen(false)} onCreated={setOpenTask} />
     </div>
   );
 }

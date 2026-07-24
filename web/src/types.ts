@@ -49,7 +49,7 @@ export interface Task {
   channel_id: string | null;
   title: string;
   description: string;
-  status: "todo" | "doing" | "review" | "blocked" | "done";
+  status: "todo" | "doing" | "review" | "blocked" | "done" | "cancelled";
   assignee_agent_id: string | null;
   reviewer_agent_id: string | null;
   blocked_approval_id: string | null;
@@ -69,6 +69,18 @@ export interface Task {
   created_at: number;
   updated_at: number;
 }
+/** 真实模型质量基准的人工关单证据；五项必须全部确认，note 记录可决策理由。 */
+export interface HumanQualityAudit {
+  decision_useful: boolean;
+  evidence_traceable: boolean;
+  no_fabrication: boolean;
+  workflow_actionable: boolean;
+  no_padding: boolean;
+  note: string;
+}
+export type TaskUpdateInput = Partial<Pick<Task,
+  "title" | "description" | "acceptance_criteria" | "status" | "assignee_agent_id" | "reviewer_agent_id" | "budget_billable"
+>> & { human_audit?: HumanQualityAudit };
 /** 单次验收裁决（D1 质量闭环落表） */
 export interface Verdict {
   id: string;
@@ -108,6 +120,7 @@ export interface TaskEvent {
     | "verification"
     | "approval"
     | "user_close"
+    | "cancelled"
     | "failure";
   summary: string;
   metadata_json: string;
@@ -131,11 +144,13 @@ export interface Approval {
   agent_id: string;
   title: string;
   payload: string;
-  kind: "action" | "plan" | "clarification";
+  kind: "action" | "network" | "plan" | "clarification" | "budget";
   ref_id: string | null;
   status: "pending" | "approved" | "rejected";
   created_at: number;
   resolved_at: number | null;
+  /** network grant used or invalidated */
+  consumed_at: number | null;
 }
 export interface Doc {
   id: string;
