@@ -23,6 +23,7 @@
     "test": "npm run test:secrets && npm run test:credential-recovery && node scripts/regression.mjs",
     "test:secrets": "node scripts/secret-regression.mjs",
     "test:credential-recovery": "node scripts/credential-recovery-regression.mjs",
+    "slides:benchmark": "npm run build --workspace server && node scripts/render-slide-benchmark.mjs",
     "credentials:recover": "node scripts/credential-recovery.mjs"
   },
   "devDependencies": {

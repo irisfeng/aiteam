@@ -6,6 +6,10 @@ export interface Agent {
   system_prompt: string;
   model: string;
   provider_id: string | null;
+  fallback_model: string;
+  fallback_provider_id: string | null;
+  strong_model: string;
+  strong_provider_id: string | null;
   created_at: number;
 }
 export interface Provider {

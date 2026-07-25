@@ -89,6 +89,7 @@ const SCENES: {
   { icon: "🚀", name: "产品立项", desc: "拆解分工 → 并行交付 → 汇总", channel: "project", roleKeys: ["产品", "工程", "评审"], templateIds: [], skills: ["金字塔写作法", "交付自查清单"], mcp: "" },
   { icon: "✍️", name: "内容与增长", desc: "选题 → 成文 → 校对 → SEO", channel: "content", roleKeys: ["SEO", "增长", "内容", "文案", "校对"], templateIds: ["writer", "proofreader"], skills: ["金字塔写作法", "交付自查清单"], mcp: "Tavily 联网搜索" },
   { icon: "🧰", name: "解决方案", desc: "需求澄清 → 选型对比 → 实施方案", channel: "solution", roleKeys: ["方案", "产品", "工程"], templateIds: ["solution"], skills: ["结构化头脑风暴", "交付自查清单"], mcp: "Tavily 联网搜索 / 文件系统" },
+  { icon: "🖥️", name: "高质量演示", desc: "证据 → 叙事 → 可编辑 PPTX → 文字/视觉双审", channel: "presentation", roleKeys: ["PPT", "调研", "校对", "设计审核", "产品", "工程"], templateIds: ["slides", "researcher", "proofreader", "design-reviewer"], skills: ["演示设计与防溢出法", "演示风格选择法", "交付自查清单"], mcp: "联网搜索 / 文档解析（视觉终审需多模态模型）" },
 ];
 
 export function NewChannelModal({ onClose, onCustomRole }: { onClose: () => void; onCustomRole: () => void }) {

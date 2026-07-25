@@ -1050,11 +1050,98 @@ check(
     `节点=${dg?.nodes.length} 边=${dg?.edges.length} dropped=${dg?.droppedLinks} 接入层子项=${byLabel["接入层"]?.items?.length} stat0=${stats[0]?.value}/${stats[0]?.label}`);
 }
 
+// PPTX8 确定性质量门禁：机器只判断可证明的字符/密度/视觉页/备注/悬空边，不冒充审美评分
+{
+  const { slidesQualityReport } = await import(join(root, "server/dist/pptx.js"));
+  const good = [
+    "# 封面\n\n一句话结论\n\n> 来源：产品验收简报\n\n<!-- note: 说明决策背景。 -->",
+    "# 痛点是缺少交付闭环\n\n| 痛点 | 影响 |\n|---|---|\n| 能力孤立 | 难协作 |\n\n> 来源：用户访谈\n\n<!-- note: 解释问题边界。 -->",
+    "# 自动化把调用变成流程\n\n```arch\ntype: flow\n触发 | 输入\n触发 -> 协作 | 分工\n协作 -> 交付 | 验收\n```\n\n> 来源：工作流设计记录\n\n<!-- note: 按箭头讲流程。 -->",
+    "# 企业工作流必须可恢复\n\n| 阶段 | 机制 |\n|---|---|\n| 暂停 | 人在环 |\n| 继续 | 状态恢复 |\n\n> 来源：架构说明\n\n<!-- note: 强调中断恢复。 -->",
+    "# 模型路由同时守住质量与成本\n\n| 角色 | 主模型 | 升级条件 |\n|---|---|---|\n| 校对 | 轻量 | 事实争议 |\n| 终审 | 强模型 | 始终 |\n\n> 来源：模型策略\n\n<!-- note: 说明分层原则。 -->",
+    "# 九十天先闭环再扩张\n\n```arch\ntype: flow\n起步 | 角色验收\n起步 -> 扩展 | 自动化\n扩展 -> 治理 | 预算合规\n```\n\n> 来源：实施路线图\n\n<!-- note: 给出行动顺序。 -->",
+  ].join("\n\n---\n\n");
+  const broken = [
+    "# 封面�\n\n结论",
+    "# 第二页\n\n" + "这是一段只有文字且没有任何关系视觉的密集正文。".repeat(30),
+    "# 第三页\n\n只有文字",
+    "# 第四页\n\n只有文字",
+    "# 第五页\n\n只有文字",
+  ].join("\n\n---\n\n");
+  const goodReport = slidesQualityReport(good);
+  const brokenReport = slidesQualityReport(broken);
+  check(
+    "PPTX8",
+    "演示质量报告：字符损坏/密集页/视觉页/备注/悬空边可观测，合格 6 页结构门禁通过",
+      goodReport.status === "pass" &&
+      goodReport.visualPages >= goodReport.requiredVisualPages &&
+      goodReport.pagesWithNotes >= goodReport.requiredNotesPages &&
+      goodReport.pagesWithSources >= goodReport.requiredSourcePages &&
+      brokenReport.status === "fail" &&
+      brokenReport.corruptedPages.includes(1) &&
+      brokenReport.densePages.includes(2) &&
+      brokenReport.visualPages < brokenReport.requiredVisualPages,
+    `good=${goodReport.status} visuals=${goodReport.visualPages}/${goodReport.requiredVisualPages} notes=${goodReport.pagesWithNotes}/${goodReport.requiredNotesPages} sources=${goodReport.pagesWithSources}/${goodReport.requiredSourcePages} broken=${brokenReport.status}/${brokenReport.issues.join("|")}`,
+  );
+}
+
+// PPTX9 图文编排：短结论 + 单张核心视觉自动进入左右分栏；长内容继续走安全分页而不硬塞
+{
+  const { slidesManifest, slidesToPptx } = await import(join(root, "server/dist/pptx.js"));
+  const shortVisual = [
+    "# 封面\n\n从工具到可交付团队",
+    [
+      "# 自动化不是定时调用，而是可恢复交付",
+      "触发、分工、验收必须进入同一条可审计链路。",
+      "- 轻量模型处理归纳与格式",
+      "- 强模型只处理争议与终审",
+      "```arch",
+      "type: flow",
+      "触发 | 简报",
+      "触发 -> 协作 | 分工",
+      "协作 -> 验收 | 双审",
+      "```",
+    ].join("\n"),
+    [
+      "# 长内容必须保持可读",
+      ...Array.from({ length: 7 }, (_, i) => `- 这是第 ${i + 1} 条需要独立排布的较长说明，不能为了分栏而压缩字号`),
+      "```arch",
+      "type: flow",
+      "输入 | 目标",
+      "输入 -> 输出 | 交付",
+      "```",
+    ].join("\n"),
+  ].join("\n\n---\n\n");
+  const manifest = slidesManifest(shortVisual);
+  const buf = await slidesToPptx({ id: "split", title: "图文分栏", kind: "slides", content: shortVisual });
+  check(
+    "PPTX9",
+    "图文编排：短结论+单视觉采用左右分栏，长内容不强塞且仍可端到端导出",
+    manifest.splitVisualSlides === 1 && manifest.continuationSlides >= 1 && buf.length > 5000,
+    `split=${manifest.splitVisualSlides} continuation=${manifest.continuationSlides} bytes=${buf.length}`,
+  );
+}
+
+// PPTX10 CJK 字体契约：每个文本 run 必须显式写入跨无头渲染可发现的字体，避免 PDF 中文整段丢失
+{
+  const { slidesToPptx } = await import(join(root, "server/dist/pptx.js"));
+  const JSZip = (await import("jszip")).default;
+  const expectedFont = process.env.AITEAM_PPTX_FONT || (process.platform === "win32" ? "Microsoft YaHei" : process.platform === "darwin" ? "Arial Unicode MS" : "Noto Sans CJK SC");
+  const buf = await slidesToPptx({ id: "font", title: "中文字体", kind: "slides", content: "# 中文标题\n\n中文正文" });
+  const zip = await JSZip.loadAsync(buf);
+  const xml = await zip.file("ppt/slides/slide1.xml").async("string");
+  const explicit = xml.includes(`typeface="${expectedFont}"`) && xml.includes("中文标题") && xml.includes("中文正文");
+  check("PPTX10", "CJK 字体：文本 run 显式写入跨平台字体，不依赖不可控回退", explicit, `font=${expectedFont}`);
+}
+
 // WD1 write_document kind 契约校验：坏格式被拒（返回行号/分页提示），合法格式放行
 {
   const v = engine.validateDocContent;
   const slidesOk = v("slides", "# 封面\n\n---\n\n# 第二页\n\n- 要点") === null;
   const slidesBad = typeof v("slides", "这是一段没有分页符的散文，被当成 slides") === "string"; // 无 --- 应拒
+  const slidesCorrupted = (v("slides", "# 封面�\n\n---\n\n# 第二页\n\n- 要点") || "").includes("乱码");
+  const textOnlyDeck = Array.from({ length: 5 }, (_, i) => `# 第${i + 1}页\n\n只有文字说明`).join("\n\n---\n\n");
+  const slidesVisualGate = (v("slides", textOnlyDeck) || "").includes("有效视觉页不足");
   const sheetOk = v("sheet", "模型,价格\nA,1\nB,2") === null;
   const sheetBad = (v("sheet", "模型,价格,速度\nA,1") || "").includes("列"); // 列数不齐应拒并提列
   const sheetDuplicateHeaderBad = (v("sheet", "指标,指标\nA,1") || "").includes("重复列名");
@@ -1063,7 +1150,7 @@ check(
   const emptyBad = typeof v("report", "   ") === "string";
   const rubricKinds = ["report", "slides", "sheet", "html"].every((kind) => engine.deliverableQualityRubric(kind).length >= 5);
   check("WD1", "write_document 契约校验：坏格式/占位/重复表头拒收，分类质量标准完整",
-    slidesOk && slidesBad && sheetOk && sheetBad && sheetDuplicateHeaderBad && reportOk && placeholderBad && emptyBad && rubricKinds);
+    slidesOk && slidesBad && slidesCorrupted && slidesVisualGate && sheetOk && sheetBad && sheetDuplicateHeaderBad && reportOk && placeholderBad && emptyBad && rubricKinds);
 }
 
 // SK1 技能相关性：trigger 优先命中/不命中 + 无 trigger 回退 SKILL_KEYWORDS[name] + 通用始终
@@ -3016,18 +3103,33 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
     const secondTasks = second.body.tasks ?? [];
     const projects = db.listProjects().filter((p) => p.channel_id === ch.id && p.title === project.title);
     const tasks = db.listTasks().filter((t) => t.project_id === project.id);
+    const byTitle = new Map(tasks.map((task) => [task.title, task]));
+    const copyReview = byTitle.get("逐页文字、乱码与事实一致性终检");
+    const visualReview = byTitle.get("逐页视觉层级与图文关系终检");
+    const closeReview = byTitle.get("合并双审结论并形成关闭摘要");
+    const deck = byTitle.get("制作可编辑演示并完成首次实渲");
+    const copyDeps = JSON.parse(copyReview?.depends_on || "[]");
+    const visualDeps = JSON.parse(visualReview?.depends_on || "[]");
+    const closeDeps = JSON.parse(closeReview?.depends_on || "[]");
+    const qualityContract = [deck, copyReview, visualReview].map((task) => task?.acceptance_criteria || "").join("\n");
     const ok =
       first.ok &&
       second.ok &&
       second.body.reused === true &&
       second.body.project?.id === project.id &&
       projects.length === 1 &&
-      firstTasks.length === 4 &&
-      secondTasks.length === 4 &&
-      tasks.length === 4;
-    check("HC5C", "场景复用：同频道同场景未关闭时重复启动只返回现有项目，不创建重复任务",
+      firstTasks.length === 7 &&
+      secondTasks.length === 7 &&
+      tasks.length === 7 &&
+      copyReview?.model_tier === "light" &&
+      copyDeps.length === 1 && copyDeps[0] === deck?.id &&
+      visualDeps.length === 1 && visualDeps[0] === deck?.id &&
+      closeDeps.length === 2 && closeDeps.includes(copyReview?.id) && closeDeps.includes(visualReview?.id) &&
+      tasks.every((task) => !task.reviewer_agent_id || task.reviewer_agent_id !== task.assignee_agent_id) &&
+      /乱码/.test(qualityContract) && /讲者备注/.test(qualityContract) && /视觉/.test(qualityContract);
+    check("HC5C", "高质量演示场景：研究/方案/制稿/文字与视觉双审/关闭七步 DAG，重复启动幂等",
       ok,
-      `reused=${second.body.reused} projects=${projects.length} firstTasks=${firstTasks.length} secondTasks=${secondTasks.length} storedTasks=${tasks.length}`);
+      `reused=${second.body.reused} projects=${projects.length} tasks=${tasks.length} copyTier=${copyReview?.model_tier} closeDeps=${closeDeps.length}`);
   }
 
   {
@@ -4451,8 +4553,25 @@ const fakeOpenAiBase = `http://127.0.0.1:${fakeOpenAiServer.address().port}/v1`;
     check("D2", "记忆：写入/读取/清空（沉淀质量待真实 key 观察）", mem.content.includes("回归记忆") && cleared);
     const prov = (await J("/providers", { method: "POST", body: JSON.stringify({ name: "回归prov", api_key: "sk-secret-x", base_url: "https://x.example.com" }) })).body;
     const leak = JSON.stringify((await J("/bootstrap")).body).includes("sk-secret-x");
+    const routed = (await J(`/agents/${pm.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        provider_id: prov.id,
+        model: "role-primary",
+        fallback_provider_id: prov.id,
+        fallback_model: "role-fallback",
+        strong_provider_id: prov.id,
+        strong_model: "role-strong",
+      }),
+    })).body;
     await J(`/providers/${prov.id}`, { method: "DELETE" });
-    check("S1", "安全：API key 永不下发前端", prov.has_key === true && !leak);
+    const clearedAgent = (await J("/bootstrap")).body.agents.find((agent) => agent.id === pm.id);
+    check("S1", "安全与角色路由：API key 不下发；主/兜底/升级模型可编辑，删 Provider 后引用安全清理",
+      prov.has_key === true && !leak &&
+      routed.model === "role-primary" && routed.fallback_model === "role-fallback" && routed.strong_model === "role-strong" &&
+      clearedAgent.provider_id === null && clearedAgent.fallback_provider_id === null && clearedAgent.strong_provider_id === null &&
+      clearedAgent.fallback_model === "" && clearedAgent.strong_model === "",
+      `routed=${routed.model}/${routed.fallback_model}/${routed.strong_model} cleared=${clearedAgent.provider_id}/${clearedAgent.fallback_provider_id}/${clearedAgent.strong_provider_id}`);
   }
 } finally {
   server.kill();

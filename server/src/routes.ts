@@ -46,6 +46,7 @@ import {
   listTasks,
   resolveApprovalOnce,
   updateApprovalPayload,
+  updateAgent,
   updateTask,
   createVerdict,
   listVerdictsForTask,
@@ -80,7 +81,7 @@ import {
   updateProvider,
   type Provider,
 } from "./db.js";
-import { slidesToPptx } from "./pptx.js";
+import { slidesQualityReport, slidesToPptx } from "./pptx.js";
 import { MCP_REGISTRY, SKILL_PACK_REGISTRY } from "./registry.js";
 import { DEFAULT_IMAGE_BASE_URL, generateImageBytes } from "./agents/images.js";
 import { providerBenchmarkPassed, providerBenchmarkRunStatus, providerBenchmarkSourceTrace } from "./qualityBenchmark.js";
@@ -346,10 +347,17 @@ api.post("/dms", (req, res) => {
 });
 
 api.post("/agents", (req, res) => {
-  const { name, emoji, role, system_prompt, model, provider_id } = req.body ?? {};
+  const {
+    name, emoji, role, system_prompt, model, provider_id,
+    fallback_model, fallback_provider_id, strong_model, strong_provider_id,
+  } = req.body ?? {};
   if (!name || !system_prompt) return res.status(400).json({ error: "name and system_prompt required" });
   const provider = provider_id ? getProvider(String(provider_id)) : undefined;
+  const fallbackProvider = fallback_provider_id ? getProvider(String(fallback_provider_id)) : undefined;
+  const strongProvider = strong_provider_id ? getProvider(String(strong_provider_id)) : undefined;
   if (provider_id && !provider) return res.status(400).json({ error: "provider not found" });
+  if (fallback_provider_id && !fallbackProvider) return res.status(400).json({ error: "fallback provider not found" });
+  if (strong_provider_id && !strongProvider) return res.status(400).json({ error: "strong provider not found" });
   try {
     const agent = createAgent({
       name: String(name).trim(),
@@ -358,10 +366,55 @@ api.post("/agents", (req, res) => {
       system_prompt: String(system_prompt),
       model: model ? String(model) : provider?.default_model || undefined,
       provider_id: provider?.id ?? null,
+      fallback_model: fallback_model ? String(fallback_model) : fallbackProvider?.default_model || "",
+      fallback_provider_id: fallbackProvider?.id ?? null,
+      strong_model: strong_model ? String(strong_model) : strongProvider?.default_model || "",
+      strong_provider_id: strongProvider?.id ?? null,
     });
     res.json(agent);
   } catch (err: any) {
     res.status(400).json({ error: err?.message ?? "create failed" });
+  }
+});
+
+/** 角色级模型路由：主通道、故障兜底、关键节点升级均可在创建后调整。 */
+api.patch("/agents/:id", (req, res) => {
+  const current = getAgent(req.params.id);
+  if (!current) return res.status(404).json({ error: "agent not found" });
+  const body = req.body ?? {};
+  const patch: Parameters<typeof updateAgent>[1] = {};
+  for (const key of ["name", "emoji", "role", "system_prompt"] as const) {
+    if (body[key] !== undefined) patch[key] = String(body[key]).trim();
+  }
+  if (patch.name === "") return res.status(400).json({ error: "name required" });
+  if (patch.system_prompt === "") return res.status(400).json({ error: "system_prompt required" });
+
+  const routes = [
+    { providerKey: "provider_id", modelKey: "model", label: "primary" },
+    { providerKey: "fallback_provider_id", modelKey: "fallback_model", label: "fallback" },
+    { providerKey: "strong_provider_id", modelKey: "strong_model", label: "strong" },
+  ] as const;
+  for (const route of routes) {
+    const providerTouched = body[route.providerKey] !== undefined;
+    const modelTouched = body[route.modelKey] !== undefined;
+    if (!providerTouched && !modelTouched) continue;
+    const providerId = providerTouched && body[route.providerKey] ? String(body[route.providerKey]) : null;
+    const provider = providerId ? getProvider(providerId) : undefined;
+    if (providerId && !provider) return res.status(400).json({ error: `${route.label} provider not found` });
+    if (providerTouched) patch[route.providerKey] = provider?.id ?? null;
+    const explicitModel = modelTouched ? String(body[route.modelKey]).trim() : "";
+    if (modelTouched || providerTouched) {
+      patch[route.modelKey] = explicitModel || provider?.default_model || (route.modelKey === "model" ? current.model : "");
+    }
+  }
+
+  try {
+    const agent = updateAgent(current.id, patch);
+    if (!agent) return res.status(404).json({ error: "agent not found" });
+    broadcast({ type: "agent:update", payload: agent });
+    res.json(agent);
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? "update failed" });
   }
 });
 
@@ -1200,8 +1253,8 @@ const SCENARIOS = [
   },
   {
     id: "solution-deck",
-    title: "方案演示",
-    desc: "需求澄清、方案架构、演示文稿、交付复核。",
+    title: "高质量演示",
+    desc: "双线研究与方案 → 专业制稿 → 文字/视觉双审 → 人类关闭。",
   },
 ] as const;
 
@@ -1254,6 +1307,9 @@ api.post("/scenarios/:id/start", (req, res) => {
   const reviewer = pickScenarioAgent(agents, [/审核|评审|复核|review|QA|测试/i], 2);
   const researcher = pickScenarioAgent(agents, [/调研|分析|SEO|增长|research|analyst/i], 3);
   const writer = pickScenarioAgent(agents, [/文案|内容|写作|SEO|writer|content/i], 3);
+  const presenter = pickScenarioAgent(agents, [/PPT|演示|幻灯片|presentation|slides|deck/i], 3);
+  const copyEditor = pickScenarioAgent(agents, [/校对|文档编辑|文字审核|proof|copy editor|document editor/i], 2);
+  const visualReviewer = pickScenarioAgent(agents, [/设计审核|视觉审核|设计师|design review|visual review|designer/i], 2);
   const projectTitle =
     acceptanceMode
       ? "闭环验收：AI 同事任务运行线"
@@ -1268,7 +1324,7 @@ api.post("/scenarios/:id/start", (req, res) => {
       : scenarioId === "research-report"
       ? "验证 AI 同事围绕同一调研目标分工：先定口径，再调研与对比，最后交付报告并等待人类关单。"
       : scenarioId === "solution-deck"
-        ? "验证需求澄清、方案设计、演示文稿与复核摘要能在同一任务运行线中推进。"
+        ? "交付一份可直接用于决策的中文可编辑演示：事实可追溯、逐页单一结论、图文关系明确、中文无乱码且经文字与视觉两条独立复核线验收。"
         : "验证 AI 同事在同一频道里认领任务、按依赖推进、留下结构化审计轨迹，并等待人类最终关闭。";
   const existingProject = listProjects().find((p) => p.channel_id === channel.id && p.title === projectTitle && p.status !== "done");
   if (existingProject) {
@@ -1329,39 +1385,73 @@ api.post("/scenarios/:id/start", (req, res) => {
         ? [
             {
               key: "needs",
-              title: "澄清目标、受众和成功标准",
-              description: "明确演示对象、业务目标、约束和必须回答的问题。",
+              title: "锁定决策目标、受众和完成定义",
+              description: "把演示对象、业务决策、核心主张、页数、格式、约束和不可编造项写成可验收 brief。",
               assignee: lead.id,
               reviewer: reviewer.id,
               deps: [],
-              acceptance: "输出受众、目标、约束、成功标准和待确认项。",
+              modelTier: "standard" as const,
+              acceptance: "明确受众与场景、希望推动的决策、一句话核心结论、页数/16:9/PPTX/讲者备注要求、视觉页比例、来源边界和禁止项；缺失信息列为显式假设而非阻塞等待。",
+            },
+            {
+              key: "evidence",
+              title: "核验事实并建立逐页来源底稿",
+              description: "只使用任务允许的一手来源，区分来源事实、推断与团队建议，给出逐页可用事实和页脚。",
+              assignee: researcher.id,
+              reviewer: reviewer.id,
+              deps: [],
+              modelTier: "standard" as const,
+              acceptance: "每个量化主张有可访问来源和检索日期；逐页列出允许使用的事实/页脚；无来源数字不得进入正文，团队建议必须明确标注。",
             },
             {
               key: "solution",
-              title: "设计解决方案与实施路径",
-              description: "给出架构/流程、阶段计划、风险和资源需求。",
+              title: "设计论证结构、方案与实施路径",
+              description: "把完成定义和事实底稿合并为逐页叙事，选择真正表达关系的流程、矩阵、时间轴或架构图。",
               assignee: builder.id,
               reviewer: reviewer.id,
-              deps: ["needs"],
-              acceptance: "方案应能落地，包含边界、里程碑和风险控制。",
+              deps: ["needs", "evidence"],
+              modelTier: "standard" as const,
+              acceptance: "逐页给出结论型标题、必要证据、视觉形态、讲者备注要点和来源；全篇形成问题→证据→机制→行动的叙事弧，方案包含边界、里程碑与风险。",
             },
             {
               key: "deck",
-              title: "制作汇报演示文稿",
-              description: "把方案转成可讲解的 slides 结构和正文。",
-              assignee: writer.id,
-              reviewer: reviewer.id,
+              title: "制作可编辑演示并完成首次实渲",
+              description: "由演示专职角色把结构转为 slides，使用原生表格、数字卡、流程/架构图和必要配图，导出前按渲染清单自检。",
+              assignee: presenter.id,
+              reviewer: visualReviewer.id,
               deps: ["solution"],
-              acceptance: "演示稿应有标题页、问题、方案、路径、风险和结论页。",
+              modelTier: "standard" as const,
+              acceptance: "交付 kind=slides；16:9、逐页单一结论、中文字体可读且无 �/孤立代理字符/原始 HTML；正文克制；至少半数内容页含表格/数字卡/原生图/来源相关配图；每页有与实际引用一致的页脚，至少 80% 页面有讲者备注；机器渲染清单无 droppedLinks、无密集页，PPTX 可导出。",
+            },
+            {
+              key: "copy-review",
+              title: "逐页文字、乱码与事实一致性终检",
+              description: "从当前演示逐页检查中文、异常字符、重复、正文密度、讲者备注、数字与来源对应关系。",
+              assignee: copyEditor.id,
+              reviewer: lead.id,
+              deps: ["deck"],
+              modelTier: "light" as const,
+              acceptance: "输出逐页 PASS/REVISE 表；明确列出乱码/异常字符、重复、过长文案、备注缺失、来源错配和未经支撑数字；每个问题附可直接替换的文案或修改动作。不得只写笼统评价。",
+            },
+            {
+              key: "visual-review",
+              title: "逐页视觉层级与图文关系终检",
+              description: "独立检查首屏结论层级、图文比例、对齐/留白、对比度、图表是否表达关系及装饰性假图。",
+              assignee: visualReviewer.id,
+              reviewer: lead.id,
+              deps: ["deck"],
+              modelTier: "standard" as const,
+              acceptance: "输出逐页 PASS/REVISE 表和阻断项；检查溢出、遮挡、字体缺失、低对比、信息层级、对齐、图片语义与来源；视觉模型/工具不可用时必须明确判定未完成，不得伪装已看过渲染稿。",
             },
             {
               key: "review",
-              title: "复核演示并整理关闭摘要",
-              description: "检查方案与演示是否一致，给出通过/返工意见。",
-              assignee: reviewer.id,
-              reviewer: lead.id,
-              deps: ["deck"],
-              acceptance: "输出复核结论、需修改项或可关闭摘要。",
+              title: "合并双审结论并形成关闭摘要",
+              description: "合并文字与视觉复核，只在所有阻断项关闭后给出可交付结论；否则明确返工责任与目标版本。",
+              assignee: lead.id,
+              reviewer: reviewer.id,
+              deps: ["copy-review", "visual-review"],
+              modelTier: "standard" as const,
+              acceptance: "逐条映射完成定义、文字复核和视觉复核；列出最终版本/导出物/未解决风险/成本；只有两条复核线均通过且当前版本一致时才建议人类关单。",
             },
           ]
         : [
@@ -1396,16 +1486,20 @@ api.post("/scenarios/:id/start", (req, res) => {
 
   const byKey = new Map<string, string>();
   const tasks = specs.map((s) => {
+    const independentReviewer = s.reviewer !== s.assignee
+      ? s.reviewer
+      : agents.find((agent) => agent.id !== s.assignee)?.id ?? null;
     const task = createTask({
       channel_id: channel.id,
       project_id: project.id,
       title: s.title,
       description: s.description,
       assignee_agent_id: s.assignee,
-      reviewer_agent_id: s.reviewer,
+      reviewer_agent_id: independentReviewer,
       created_by: "user",
       depends_on: s.deps.map((key) => byKey.get(key)).filter(Boolean) as string[],
       acceptance_criteria: s.acceptance,
+      model_tier: (s as { modelTier?: "standard" | "light" }).modelTier ?? "standard",
     });
     byKey.set(s.key, task.id);
     return task;
@@ -1962,6 +2056,13 @@ api.delete("/documents/:id", (req, res) => {
 });
 
 /** slides 文档导出为真 .pptx（可编辑文本 + Hive 主题 + 讲者备注 + 嵌入生成图） */
+api.get("/documents/:id/slides-quality", (req, res) => {
+  const doc = getDocument(req.params.id);
+  if (!doc) return res.status(404).json({ error: "document not found" });
+  if (doc.kind !== "slides") return res.status(400).json({ error: "only slides documents have a slides quality report" });
+  res.json(slidesQualityReport(doc.content));
+});
+
 api.get("/documents/:id/pptx", (req, res) => {
   const doc = getDocument(req.params.id);
   if (!doc) return res.status(404).json({ error: "document not found" });
