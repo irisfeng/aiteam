@@ -57,7 +57,7 @@ import {
 } from "../db.js";
 import { broadcast } from "../bus.js";
 import { currentOwner, withOwner } from "../ownerScope.js";
-import { parseSlides, slidesManifest } from "../pptx.js";
+import { parseSlides, slidesManifest, slidesQualityReport } from "../pptx.js";
 import { callMcpTool, isMcpTool, mcpToolDefs, mcpToolPrefixReady, mcpSafetyGate, mcpServerForTool, searchQuerySignature } from "./mcp.js";
 import { IMAGE_TOOL, generateImage, imageGenAvailable } from "./images.js";
 import { getSkillTemplate } from "../registry.js";
@@ -126,7 +126,14 @@ export function validateDocContent(kind: "report" | "slides" | "sheet" | "html",
       return "slides 需要用单独一行 --- 分页（首页标题页，之后每页一个要点群），当前没有检测到任何分页符。";
     const pages = parseSlides(content);
     if (pages.length < 1) return "slides 没有解析出任何有效页面。";
-    if (pages.every((p) => !p.title)) return "slides 每页应有标题（以 # 开头），当前未检测到任何页标题。";
+    const quality = slidesQualityReport(content);
+    if (quality.untitledPages.length) return `slides 第 ${quality.untitledPages.join("、")} 页缺少标题（每页须以 # 开头）。`;
+    if (quality.corruptedPages.length) return `slides 第 ${quality.corruptedPages.join("、")} 页含乱码替代符、控制字符或损坏的 Unicode，请修复源文本后再交付。`;
+    if (quality.droppedLinks > 0) return `slides 架构图有 ${quality.droppedLinks} 条连向未定义节点的悬空边；请补节点或删除错误连线。`;
+    if (quality.densePages.length) return `slides 第 ${quality.densePages.join("、")} 页正文过密；请删减、改成表格/图表或拆页，不能依赖缩小字体硬塞。`;
+    if (quality.visualPages < quality.requiredVisualPages) return `slides 有效视觉页不足（${quality.visualPages}/${quality.requiredVisualPages}）；请用原生表格、数字卡、流程/架构图或来源相关配图表达关系，不能只堆文字。`;
+    if (quality.pagesWithNotes < quality.requiredNotesPages) return `slides 讲者备注覆盖不足（${quality.pagesWithNotes}/${quality.requiredNotesPages}）；至少半数页面需用 <!-- note: ... --> 或成对 note 块补充讲解。`;
+    if (quality.pagesWithSources < quality.requiredSourcePages) return `slides 来源脚注覆盖不足（${quality.pagesWithSources}/${quality.requiredSourcePages}）；请在含事实、数据或竞品判断的页面使用 > 来源：... 写入可见页脚。`;
     return unsourcedNumbersHint(content);
   }
   if (kind === "sheet") {
@@ -545,6 +552,12 @@ function resolveRuntime(agent: Agent, opts: RuntimeOpts = {}): Runtime {
   const fromProvider = (p: NonNullable<ReturnType<typeof getProvider>>, agentModel: string): Runtime =>
     runtimeFromProvider(p, agentModel, light);
   if (opts.preferStrong) {
+    // 角色显式升级通道优先于工作区默认强通道：研究、制稿、复核可各自绑定最合适的模型，
+    // 避免所有高价值节点都被无差别推到同一昂贵模型。
+    if (agent.strong_provider_id) {
+      const bound = getProvider(agent.strong_provider_id);
+      if (bound?.api_key) return fromProvider(bound, agent.strong_model || bound.default_model || agent.model);
+    }
     if (envClient) {
       return {
         client: envClient,
@@ -566,6 +579,12 @@ function resolveRuntime(agent: Agent, opts: RuntimeOpts = {}): Runtime {
   if (agent.provider_id) {
     const p = getProvider(agent.provider_id);
     if (p?.api_key) return fromProvider(p, agent.model);
+  }
+  // 主通道未配置/缺 key 时才启用显式兜底。运行中已产生文本或工具副作用后不做跨模型重放，
+  // 防止重复发消息、重复写文档；瞬时网络错误仍由 llmLoop 在原通道内重试。
+  if (agent.fallback_provider_id) {
+    const fallback = getProvider(agent.fallback_provider_id);
+    if (fallback?.api_key) return fromProvider(fallback, agent.fallback_model || fallback.default_model || agent.model);
   }
   if (envClient) {
     return {
@@ -1916,7 +1935,8 @@ async function runVerification(
     doc.kind === "slides"
       ? (() => {
           const m = slidesManifest(doc.content);
-          return `渲染清单（机器读出，用于核对"声称 vs 实产"）：源页 ${m.sourcePages}、实渲幻灯片 ${m.renderedSlides}（含续页 ${m.continuationSlides}）、数字卡 ${m.statCards}、表格 ${m.tables}、配图 ${m.images}、带讲者备注页 ${m.pagesWithNotes}/${m.sourcePages}。`;
+          const q = slidesQualityReport(doc.content);
+          return `渲染与质量清单（机器读出，只证明结构下限，不代替视觉终审）：源页 ${m.sourcePages}、实渲幻灯片 ${m.renderedSlides}（含续页 ${m.continuationSlides}）、图文分栏 ${m.splitVisualSlides} 页、数字卡 ${m.statCards}、表格 ${m.tables}、原生图 ${m.diagrams}、配图 ${m.images}、有效视觉页 ${q.visualPages}/${q.requiredVisualPages}、带讲者备注页 ${m.pagesWithNotes}/${q.requiredNotesPages}、带来源脚注页 ${m.pagesWithSources}/${q.requiredSourcePages}、密集页 ${q.densePages.length ? q.densePages.join("/") : "无"}、字符损坏页 ${q.corruptedPages.length ? q.corruptedPages.join("/") : "无"}、悬空连线 ${q.droppedLinks}。${q.issues.length ? `结构警告：${q.issues.join("；")}` : "结构门禁通过。"}`;
         })()
       : "";
 

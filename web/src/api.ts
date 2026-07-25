@@ -79,6 +79,25 @@ export interface ProviderInput {
   price_currency?: string;
 }
 
+export interface SlidesQualityReport {
+  status: "pass" | "warn" | "fail";
+  sourcePages: number;
+  visualPages: number;
+  requiredVisualPages: number;
+  densePages: number[];
+  corruptedPages: number[];
+  untitledPages: number[];
+  pagesWithNotes: number;
+  requiredNotesPages: number;
+  notesCoverage: number;
+  pagesWithSources: number;
+  requiredSourcePages: number;
+  sourceCoverage: number;
+  droppedLinks: number;
+  issues: string[];
+  pages: Array<{ page: number; title: string; textChars: number; visualElements: number; hasNotes: boolean; hasSources: boolean; issues: string[] }>;
+}
+
 export interface ScenarioStartResult {
   project: Project;
   tasks: Task[];
@@ -294,7 +313,23 @@ export const api = {
     system_prompt: string;
     model?: string;
     provider_id?: string | null;
+    fallback_model?: string;
+    fallback_provider_id?: string | null;
+    strong_model?: string;
+    strong_provider_id?: string | null;
   }) => req<Agent>("/agents", { method: "POST", body: JSON.stringify(data) }),
+  updateAgent: (id: string, data: {
+    name?: string;
+    emoji?: string;
+    role?: string;
+    system_prompt?: string;
+    model?: string;
+    provider_id?: string | null;
+    fallback_model?: string;
+    fallback_provider_id?: string | null;
+    strong_model?: string;
+    strong_provider_id?: string | null;
+  }) => req<Agent>(`/agents/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
   createProvider: (data: ProviderInput) => req<Provider>("/providers", { method: "POST", body: JSON.stringify(data) }),
   updateProvider: (id: string, data: ProviderInput) =>
     req<Provider>(`/providers/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
@@ -305,6 +340,7 @@ export const api = {
   runProviderTaskTest: (id: string, data: ProviderBenchmarkRunInput) =>
     req<ProviderTaskTestResult>(`/providers/${id}/task-test`, { method: "POST", body: JSON.stringify(data) }),
   deleteProvider: (id: string) => req<{ ok: boolean }>(`/providers/${id}`, { method: "DELETE" }),
+  slidesQuality: (id: string) => req<SlidesQualityReport>(`/documents/${id}/slides-quality`),
   getImageProvider: () => req<ImageProviderInfo>("/image-provider"),
   saveImageProvider: (data: { base_url?: string; api_key?: string; model?: string }) =>
     req<ImageProviderInfo>("/image-provider", { method: "PUT", body: JSON.stringify(data) }),

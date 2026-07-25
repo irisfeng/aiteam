@@ -110,6 +110,11 @@ CREATE TABLE IF NOT EXISTS agents (
   role TEXT NOT NULL DEFAULT '',
   system_prompt TEXT NOT NULL,
   model TEXT NOT NULL DEFAULT 'claude-opus-4-8',
+  provider_id TEXT,
+  fallback_model TEXT NOT NULL DEFAULT '',
+  fallback_provider_id TEXT,
+  strong_model TEXT NOT NULL DEFAULT '',
+  strong_provider_id TEXT,
   created_at INTEGER NOT NULL,
   UNIQUE(owner_id, name)
 );
@@ -261,6 +266,10 @@ addColumnIfMissing("tasks", "depends_on", "depends_on TEXT NOT NULL DEFAULT '[]'
 addColumnIfMissing("tasks", "project_id", "project_id TEXT");
 addColumnIfMissing("tasks", "revision_count", "revision_count INTEGER NOT NULL DEFAULT 0");
 addColumnIfMissing("agents", "provider_id", "provider_id TEXT");
+addColumnIfMissing("agents", "fallback_model", "fallback_model TEXT NOT NULL DEFAULT ''");
+addColumnIfMissing("agents", "fallback_provider_id", "fallback_provider_id TEXT");
+addColumnIfMissing("agents", "strong_model", "strong_model TEXT NOT NULL DEFAULT ''");
+addColumnIfMissing("agents", "strong_provider_id", "strong_provider_id TEXT");
 addColumnIfMissing("providers", "web_tools", "web_tools INTEGER NOT NULL DEFAULT 0");
 addColumnIfMissing("projects", "autonomy", "autonomy TEXT NOT NULL DEFAULT 'auto'");
 addColumnIfMissing("approvals", "kind", "kind TEXT NOT NULL DEFAULT 'action'");
@@ -319,10 +328,12 @@ db.exec(`CREATE INDEX IF NOT EXISTS idx_verdicts_owner ON verdicts(owner_id, cre
       id TEXT PRIMARY KEY, owner_id TEXT NOT NULL DEFAULT '', name TEXT NOT NULL,
       emoji TEXT NOT NULL DEFAULT '🤖', role TEXT NOT NULL DEFAULT '',
       system_prompt TEXT NOT NULL, model TEXT NOT NULL DEFAULT 'claude-opus-4-8',
-      provider_id TEXT, created_at INTEGER NOT NULL, UNIQUE(owner_id, name)
+      provider_id TEXT, fallback_model TEXT NOT NULL DEFAULT '', fallback_provider_id TEXT,
+      strong_model TEXT NOT NULL DEFAULT '', strong_provider_id TEXT,
+      created_at INTEGER NOT NULL, UNIQUE(owner_id, name)
     )`);
-    db.exec(`INSERT INTO agents_new (id, owner_id, name, emoji, role, system_prompt, model, provider_id, created_at)
-             SELECT id, owner_id, name, emoji, role, system_prompt, model, provider_id, created_at FROM agents`);
+    db.exec(`INSERT INTO agents_new (id, owner_id, name, emoji, role, system_prompt, model, provider_id, fallback_model, fallback_provider_id, strong_model, strong_provider_id, created_at)
+             SELECT id, owner_id, name, emoji, role, system_prompt, model, provider_id, fallback_model, fallback_provider_id, strong_model, strong_provider_id, created_at FROM agents`);
     db.exec(`DROP TABLE agents`);
     db.exec(`ALTER TABLE agents_new RENAME TO agents`);
   })();
@@ -408,6 +419,12 @@ export interface Agent {
   model: string;
   /** null = 使用官方 Anthropic（环境变量 ANTHROPIC_API_KEY） */
   provider_id: string | null;
+  /** 主通道不可用时使用的显式兜底；空 = 回退工作区默认通道。 */
+  fallback_model: string;
+  fallback_provider_id: string | null;
+  /** 复核/汇总等高风险节点的升级通道；空 = 回退工作区强通道。 */
+  strong_model: string;
+  strong_provider_id: string | null;
   created_at: number;
 }
 export interface Provider {
@@ -597,6 +614,10 @@ export function createAgent(a: {
   system_prompt: string;
   model?: string;
   provider_id?: string | null;
+  fallback_model?: string;
+  fallback_provider_id?: string | null;
+  strong_model?: string;
+  strong_provider_id?: string | null;
 }): Agent {
   const agent: Agent = {
     id: nanoid(10),
@@ -607,12 +628,37 @@ export function createAgent(a: {
     system_prompt: a.system_prompt,
     model: a.model || "claude-opus-4-8",
     provider_id: a.provider_id ?? null,
+    fallback_model: a.fallback_model ?? "",
+    fallback_provider_id: a.fallback_provider_id ?? null,
+    strong_model: a.strong_model ?? "",
+    strong_provider_id: a.strong_provider_id ?? null,
     created_at: now(),
   };
   db.prepare(
-    "INSERT INTO agents (id, owner_id, name, emoji, role, system_prompt, model, provider_id, created_at) VALUES (@id, @owner_id, @name, @emoji, @role, @system_prompt, @model, @provider_id, @created_at)"
+    "INSERT INTO agents (id, owner_id, name, emoji, role, system_prompt, model, provider_id, fallback_model, fallback_provider_id, strong_model, strong_provider_id, created_at) VALUES (@id, @owner_id, @name, @emoji, @role, @system_prompt, @model, @provider_id, @fallback_model, @fallback_provider_id, @strong_model, @strong_provider_id, @created_at)"
   ).run(agent);
   return agent;
+}
+
+export function updateAgent(
+  id: string,
+  fields: Partial<Pick<Agent,
+    "name" | "emoji" | "role" | "system_prompt" | "model" | "provider_id" |
+    "fallback_model" | "fallback_provider_id" | "strong_model" | "strong_provider_id"
+  >>,
+): Agent | undefined {
+  const cur = getAgent(id);
+  if (!cur) return undefined;
+  const next: Agent = { ...cur, ...fields };
+  db.prepare(
+    `UPDATE agents SET
+      name = @name, emoji = @emoji, role = @role, system_prompt = @system_prompt,
+      model = @model, provider_id = @provider_id,
+      fallback_model = @fallback_model, fallback_provider_id = @fallback_provider_id,
+      strong_model = @strong_model, strong_provider_id = @strong_provider_id
+     WHERE id = @id AND owner_id = @owner_id`,
+  ).run(next);
+  return getAgent(id);
 }
 
 // ---- providers（模型供应商 / BYOM）—— 全局共享（管理员配一套 key，所有用户共用）----
@@ -683,6 +729,8 @@ export function updateProvider(
 }
 export function deleteProvider(id: string) {
   db.prepare("UPDATE agents SET provider_id = NULL WHERE provider_id = ?").run(id);
+  db.prepare("UPDATE agents SET fallback_provider_id = NULL, fallback_model = '' WHERE fallback_provider_id = ?").run(id);
+  db.prepare("UPDATE agents SET strong_provider_id = NULL, strong_model = '' WHERE strong_provider_id = ?").run(id);
   db.prepare("DELETE FROM providers WHERE id = ?").run(id);
 }
 /** 给前端的脱敏视图：永不下发 api_key */

@@ -284,6 +284,9 @@ async function runViewport(debugPort, baseUrl, label, viewport) {
     await page.waitText("今天要推进什么？");
     await page.screenshot(`workline-${label}`);
     if (label === "desktop") {
+      // 测试机可能跟随系统深色模式启动；先显式进入 light，避免把 dark→dark 误判成品牌标未响应主题。
+      await page.eval(`document.documentElement.classList.remove('dark')`);
+      await new Promise((resolve) => setTimeout(resolve, 250));
       const lightBrand = await page.eval(`getComputedStyle(document.querySelector('.brand-mark')).backgroundColor`);
       await page.eval(`document.documentElement.classList.add('dark')`);
       await new Promise((resolve) => setTimeout(resolve, 250));

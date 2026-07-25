@@ -53,7 +53,8 @@ type Action =
   | { type: "channel:update"; channel: Channel }
   | { type: "channel:delete"; id: string }
   | { type: "messages:cleared"; channelId: string }
-  | { type: "agent:new"; agent: Agent };
+  | { type: "agent:new"; agent: Agent }
+  | { type: "agent:update"; agent: Agent };
 
 const initial: State = {
   ready: false,
@@ -214,6 +215,8 @@ function reducer(state: State, action: Action): State {
       return state.agents.some((a) => a.id === action.agent.id)
         ? state
         : { ...state, agents: [...state.agents, action.agent] };
+    case "agent:update":
+      return { ...state, agents: state.agents.map((a) => (a.id === action.agent.id ? action.agent : a)) };
     default:
       return state;
   }
@@ -242,6 +245,7 @@ interface Store extends State {
     model?: string;
     provider_id?: string | null;
   }) => Promise<void>;
+  updateAgent: (id: string, data: Parameters<typeof api.updateAgent>[1]) => Promise<Agent>;
   createTask: (data: {
     title: string;
     description?: string;
@@ -323,6 +327,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
             break;
           case "agent:status":
             dispatch({ type: "agent:status", status: payload });
+            break;
+          case "agent:update":
+            dispatch({ type: "agent:update", agent: payload });
             break;
           case "task:upsert":
             dispatch({ type: "task:upsert", task: payload });
@@ -447,6 +454,11 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         const agent = await api.createAgent(data);
         dispatch({ type: "agent:new", agent });
       },
+      updateAgent: async (id, data) => {
+        const agent = await api.updateAgent(id, data);
+        dispatch({ type: "agent:update", agent });
+        return agent;
+      },
       createTask: async (data) => {
         const task = await api.createTask(data);
         const fresh = await api.bootstrap();
@@ -479,7 +491,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       deleteProvider: async (id) => {
         await api.deleteProvider(id);
         const fresh = await api.bootstrap();
-        dispatch({ type: "providers:set", providers: fresh.providers, mockMode: fresh.mock_mode });
+        // 删除 Provider 会同时清空所有角色的主/兜底/升级引用，必须刷新 agents，避免档案面板显示幽灵路由。
+        dispatch({ type: "bootstrap:merge", data: fresh });
       },
       runProviderTaskTest: async (id, data) => {
         const result = await api.runProviderTaskTest(id, data);

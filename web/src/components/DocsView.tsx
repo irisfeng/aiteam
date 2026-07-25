@@ -2,7 +2,7 @@ import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useWorkspace } from "../store";
-import { api, API_BASE } from "../api";
+import { api, API_BASE, type SlidesQualityReport } from "../api";
 import type { Doc } from "../types";
 import { AgentAvatar } from "./Avatar";
 import { DOC_KIND_ICON } from "../lib/docMeta";
@@ -302,6 +302,11 @@ export function DocViewerModal({ doc, onClose }: { doc: Doc; onClose: () => void
   const author = ws.agentById(doc.agent_id);
   const meta = docKindMeta(doc.kind);
   const contentRef = useRef<HTMLDivElement>(null);
+  const [slidesQuality, setSlidesQuality] = useState<SlidesQualityReport | null>(null);
+  useEffect(() => {
+    if (doc.kind !== "slides") return;
+    api.slidesQuality(doc.id).then(setSlidesQuality).catch(() => setSlidesQuality(null));
+  }, [doc.id, doc.kind]);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6" onMouseDown={onClose}>
       <div
@@ -358,6 +363,31 @@ export function DocViewerModal({ doc, onClose }: { doc: Doc; onClose: () => void
           )}
           <button onClick={onClose} className="rounded px-1.5 text-ink-3 hover:bg-sel">✕</button>
         </div>
+        {doc.kind === "slides" && slidesQuality && (
+          <div className="border-b border-line bg-panel px-5 py-2 text-[11.5px] text-ink-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className={`rounded px-1.5 py-0.5 font-medium ${
+                slidesQuality.status === "pass"
+                  ? "bg-emerald-500/10 text-emerald-700"
+                  : slidesQuality.status === "fail"
+                    ? "bg-red-500/10 text-red-600"
+                    : "bg-amber-500/10 text-amber-700"
+              }`}>
+                结构门禁 {slidesQuality.status === "pass" ? "通过" : slidesQuality.status === "fail" ? "失败" : "有警告"}
+              </span>
+              <span>有效视觉页 {slidesQuality.visualPages}/{slidesQuality.requiredVisualPages}</span>
+              <span>备注 {slidesQuality.pagesWithNotes}/{slidesQuality.requiredNotesPages}</span>
+              <span>来源脚注 {slidesQuality.pagesWithSources}/{slidesQuality.requiredSourcePages}</span>
+              <span>密集页 {slidesQuality.densePages.length ? slidesQuality.densePages.join("、") : "无"}</span>
+              <span>字符损坏 {slidesQuality.corruptedPages.length ? slidesQuality.corruptedPages.join("、") : "无"}</span>
+              <span>悬空连线 {slidesQuality.droppedLinks}</span>
+            </div>
+            <div className="mt-1 text-[10.5px] text-ink-3">
+              机器门禁只证明字符、密度、备注、来源和结构要素；最终仍需查看导出后的逐页预览完成视觉终审。
+              {slidesQuality.issues.length ? ` 当前：${slidesQuality.issues.join("；")}` : ""}
+            </div>
+          </div>
+        )}
         <div ref={contentRef} className={`flex-1 overflow-y-auto px-6 py-4 ${doc.kind === "slides" ? "bg-sel/40" : ""}`}>
           {doc.kind === "template" ? (
             <Suspense fallback={<div className="p-6 text-[13px] text-ink-3">加载模板编辑器…</div>}>

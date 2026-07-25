@@ -1,8 +1,12 @@
 import PptxGenJSImport from "pptxgenjs";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
-import { Doc } from "./db.js";
-import { assetsDir } from "./agents/images.js";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { Doc } from "./db.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+// PPT 渲染必须能脱离数据库独立运行；只复用与生图模块相同的路径约定，不导入会初始化凭证库的 images.ts。
+const assetsDir = join(process.env.AITEAM_DATA_DIR || join(__dirname, "..", "data"), "assets");
 
 // NodeNext 下 pptxgenjs 的 CJS 类型声明把默认导出解析成模块命名空间，
 // 而运行时加载的 ESM 构建默认导出即类——统一兜底取类构造器
@@ -20,17 +24,18 @@ const THEME = {
 };
 
 // CJK 字体：pptxgenjs 不传 fontFace 时不写字体块，CJK 回退不可控（macOS/Keynote/WPS 易错排）。
-// 逐 run 指定即根因修复（pptxgenjs 会同时写 <a:latin>/<a:ea>/<a:cs>）。默认 PingFang SC 适配 Mac 本地演示；
-// 面向 Windows/WPS 客户的部署可设环境变量 AITEAM_PPTX_FONT=Microsoft YaHei 覆盖。
-const CJK_FONT = process.env.AITEAM_PPTX_FONT || "PingFang SC";
+// PingFang SC 是 macOS 隐藏系统字体，PowerPoint 可用，但 headless LibreOffice/fontconfig 常匹配成 Verdana，
+// 会把中文整段吞掉。默认改用 macOS/本机无头渲染均可发现的 Arial Unicode MS；Windows/Linux 部署可覆盖。
+const PLATFORM_CJK_FONT = process.platform === "win32" ? "Microsoft YaHei" : process.platform === "darwin" ? "Arial Unicode MS" : "Noto Sans CJK SC";
+const CJK_FONT = process.env.AITEAM_PPTX_FONT || PLATFORM_CJK_FONT;
 
 // 13.33×7.5 in (16:9) 舞台与内容区
 const PAGE = { w: 13.33, h: 7.5 };
 const MARGIN = 0.75;
 const CONTENT_W = PAGE.w - MARGIN * 2; // 11.83
 const CONTENT_TOP = 1.62;
-const CONTENT_BOTTOM = 6.92;
-const CONTENT_H = CONTENT_BOTTOM - CONTENT_TOP; // ~5.30
+const CONTENT_BOTTOM = 6.62; // 给页内来源脚注预留稳定区域
+const CONTENT_H = CONTENT_BOTTOM - CONTENT_TOP; // ~5.00
 
 interface Stat {
   value: string;
@@ -65,6 +70,8 @@ interface SlidePage {
   diagrams: SlideDiagram[];
   /** 本地生成图（/assets/xxx.png）的磁盘路径 */
   images: string[];
+  /** `> 来源：...` / `> Source: ...` → 页内可见来源脚注。 */
+  sources: string[];
   notes: string;
 }
 
@@ -216,7 +223,7 @@ export function parseSlides(content: string): SlidePage[] {
   const pages: SlidePage[] = [];
   for (let i = 0; i < raw.length; i++) {
     if (i === 0 && isFrontmatter(raw[i])) continue;
-    const page: SlidePage = { title: "", bullets: [], paragraphs: [], stats: [], tables: [], code: [], diagrams: [], images: [], notes: "" };
+    const page: SlidePage = { title: "", bullets: [], paragraphs: [], stats: [], tables: [], code: [], diagrams: [], images: [], sources: [], notes: "" };
     // 先在整块上剥离 HTML 注释（含跨行块）：`<!-- note: … -->` 转讲者备注，
     // 其余注释整块丢弃。按行解析做不到这点——多行注释的中间行不以 `-->` 收尾，
     // 会漏成正文渲染进幻灯片（实测出现在标题页 <a:t> 文本里）。
@@ -259,6 +266,8 @@ export function parseSlides(content: string): SlidePage[] {
       }
       if (inDiagram) { diagramBuf.push(lines[li]); continue; }
       if (inCode) { codeBuf.push(lines[li]); continue; }
+      const source = t.match(/^>\s*(?:来源|source)\s*[:：]\s*(.+)$/i);
+      if (source) { page.sources.push(plain(source[1])); continue; }
       // 表格块：连续 `|…|` 行；第二行是分隔行（含 -）才认作真表格
       if (/^\|/.test(t)) {
         let j = li;
@@ -302,12 +311,119 @@ export interface SlidesManifest {
   sourcePages: number;
   renderedSlides: number;
   continuationSlides: number;
+  /** 短结论与单张核心视觉采用左右分栏的源页数。 */
+  splitVisualSlides: number;
   pagesWithNotes: number;
   tables: number;
   statCards: number;
   diagrams: number;
   droppedLinks: number;
   images: number;
+  pagesWithSources: number;
+}
+
+export interface SlidesQualityPage {
+  page: number;
+  title: string;
+  textChars: number;
+  visualElements: number;
+  hasNotes: boolean;
+  hasSources: boolean;
+  issues: string[];
+}
+
+/**
+ * 只报告机器能确定的演示质量下限，不伪装成审美评分：
+ * 字符损坏、标题/备注覆盖、正文密度、有效视觉页与架构图悬空边。
+ * 视觉层级、对齐、图文语义仍必须由实渲截图 + 视觉模型/人类终审。
+ */
+export interface SlidesQualityReport {
+  status: "pass" | "warn" | "fail";
+  sourcePages: number;
+  visualPages: number;
+  requiredVisualPages: number;
+  densePages: number[];
+  corruptedPages: number[];
+  untitledPages: number[];
+  pagesWithNotes: number;
+  requiredNotesPages: number;
+  notesCoverage: number;
+  pagesWithSources: number;
+  requiredSourcePages: number;
+  sourceCoverage: number;
+  droppedLinks: number;
+  issues: string[];
+  pages: SlidesQualityPage[];
+}
+
+function hasCorruptedText(value: string): boolean {
+  return (
+    value.includes("\uFFFD") ||
+    /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(value) ||
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(value)
+  );
+}
+
+export function slidesQualityReport(content: string): SlidesQualityReport {
+  const pages = parseSlides(content);
+  const manifest = slidesManifest(content);
+  const pageReports = pages.map((page, index): SlidesQualityPage => {
+    const text = [page.title, ...page.paragraphs, ...page.bullets, ...page.stats.flatMap((item) => [item.value, item.label]),
+      ...page.tables.flatMap((table) => [...table.header, ...table.rows.flat()]), ...page.code].join("\n");
+    const bodyText = [...page.paragraphs, ...page.bullets, ...page.stats.flatMap((item) => [item.value, item.label]),
+      ...page.tables.flatMap((table) => [...table.header, ...table.rows.flat()]), ...page.code].join("");
+    const textChars = cp(bodyText);
+    const visualElements = page.stats.length + page.tables.length + page.diagrams.length + page.images.length;
+    const issues: string[] = [];
+    if (!page.title.trim()) issues.push("missing_title");
+    if (hasCorruptedText(text)) issues.push("corrupted_text");
+    if (textChars > 260 || page.bullets.length > 8 || page.bullets.some((item) => cp(item) > 90)) issues.push("dense_text");
+    if (!page.notes.trim()) issues.push("missing_notes");
+    if (!page.sources.length) issues.push("missing_sources");
+    return {
+      page: index + 1, title: page.title, textChars, visualElements,
+      hasNotes: Boolean(page.notes.trim()), hasSources: page.sources.length > 0, issues,
+    };
+  });
+  const visualPages = pageReports.filter((page) => page.visualElements > 0).length;
+  const densePages = pageReports.filter((page) => page.issues.includes("dense_text")).map((page) => page.page);
+  const corruptedPages = pageReports.filter((page) => page.issues.includes("corrupted_text")).map((page) => page.page);
+  const untitledPages = pageReports.filter((page) => page.issues.includes("missing_title")).map((page) => page.page);
+  const pagesWithNotes = pageReports.filter((page) => page.hasNotes).length;
+  const pagesWithSources = pageReports.filter((page) => page.hasSources).length;
+  const contentPages = Math.max(0, pages.length - 1);
+  const requiredVisualPages = pages.length >= 5 ? Math.max(2, Math.ceil(contentPages * 0.4)) : 0;
+  const requiredNotesPages = pages.length >= 5 ? Math.ceil(pages.length * 0.5) : 0;
+  const requiredSourcePages = pages.length >= 5 ? Math.max(2, Math.ceil(contentPages * 0.6)) : 0;
+  const notesCoverage = pages.length > 0 ? pagesWithNotes / pages.length : 0;
+  const sourceCoverage = pages.length > 0 ? pagesWithSources / pages.length : 0;
+  const issues: string[] = [];
+  if (corruptedPages.length) issues.push(`字符损坏页：${corruptedPages.join("、")}`);
+  if (untitledPages.length) issues.push(`缺少标题页：${untitledPages.join("、")}`);
+  if (manifest.droppedLinks > 0) issues.push(`架构图存在 ${manifest.droppedLinks} 条悬空连线`);
+  if (densePages.length) issues.push(`正文过密页：${densePages.join("、")}`);
+  if (visualPages < requiredVisualPages) issues.push(`有效视觉页不足：${visualPages}/${requiredVisualPages}`);
+  if (pagesWithNotes < requiredNotesPages) issues.push(`讲者备注覆盖不足：${pagesWithNotes}/${requiredNotesPages}`);
+  if (pagesWithSources < requiredSourcePages) issues.push(`来源脚注覆盖不足：${pagesWithSources}/${requiredSourcePages}`);
+  const hardFailure = corruptedPages.length > 0 || untitledPages.length > 0 || manifest.droppedLinks > 0;
+  return {
+    status: hardFailure ? "fail" : issues.length ? "warn" : "pass",
+    sourcePages: pages.length,
+    visualPages,
+    requiredVisualPages,
+    densePages,
+    corruptedPages,
+    untitledPages,
+    pagesWithNotes,
+    requiredNotesPages,
+    notesCoverage,
+    pagesWithSources,
+    requiredSourcePages,
+    sourceCoverage,
+    droppedLinks: manifest.droppedLinks,
+    issues,
+    pages: pageReports,
+  };
 }
 
 // ── 高度估算（用于溢出分页）──
@@ -372,21 +488,22 @@ function drawEdgeElbow(slide: any, x1: number, y1: number, x2: number, y2: numbe
   if (label) slide.addText(label, { x: (x1 + x2) / 2 - 0.7, y: midY - 0.13, w: 1.4, h: 0.26, fontSize: 9, color: THEME.dim, align: "center", valign: "middle", fontFace: CJK_FONT });
 }
 
-/** 渲染一张架构图（layered/flow/hub 三种确定式布局）到 (y0..y0+H) 区域。 */
-function drawDiagram(slide: any, y0: number, H: number, dg: SlideDiagram) {
+/** 渲染一张架构图（layered/flow/hub 三种确定式布局）到指定区域。
+ *  x0/W 可让架构图进入图文分栏，而不是所有内容只能从上到下堆叠。 */
+function drawDiagram(slide: any, y0: number, H: number, dg: SlideDiagram, x0 = MARGIN, W = CONTENT_W) {
   if (dg.title) {
-    slide.addText(dg.title, { x: MARGIN, y: y0, w: CONTENT_W, h: 0.3, fontSize: 13, bold: true, color: THEME.ink, align: "center", fontFace: CJK_FONT });
+    slide.addText(dg.title, { x: x0, y: y0, w: W, h: 0.3, fontSize: 13, bold: true, color: THEME.ink, align: "center", fontFace: CJK_FONT });
     y0 += 0.36; H -= 0.36;
   }
   const pos = new Map<string, { x: number; y: number; w: number; h: number }>();
   const ctr = (id: string) => { const p = pos.get(id)!; return { cx: p.x + p.w / 2, cy: p.y + p.h / 2 }; };
 
   if (dg.type === "hub") {
-    const cx = MARGIN + CONTENT_W / 2, cyC = y0 + H / 2;
-    const cW = 1.9, cH = 0.74, oW = 1.8, oH = 0.66;
+    const cx = x0 + W / 2, cyC = y0 + H / 2;
+    const cW = Math.min(1.9, W * 0.28), cH = 0.74, oW = Math.min(1.8, W * 0.27), oH = 0.66;
     const outer = dg.nodes.slice(1);
     // 椭圆布局：横向用满舞台、纵向受图高约束——避免外节点与中心重叠
-    const Rx = Math.max(2.4, CONTENT_W / 2 - oW / 2 - 0.3);
+    const Rx = Math.max(W * 0.28, W / 2 - oW / 2 - 0.3);
     const Ry = Math.max(1.2, H / 2 - oH / 2 - 0.2);
     pos.set(dg.nodes[0].id, { x: cx - cW / 2, y: cyC - cH / 2, w: cW, h: cH });
     outer.forEach((n, i) => {
@@ -403,12 +520,12 @@ function drawDiagram(slide: any, y0: number, H: number, dg: SlideDiagram) {
     const horiz = dg.dir !== "down";
     const n = dg.nodes.length, gap = 0.45;
     if (horiz) {
-      const nodeW = Math.min(2.4, (CONTENT_W - gap * (n - 1)) / n), nodeH = Math.min(1.0, H * 0.5);
-      const total = n * nodeW + (n - 1) * gap, sx = MARGIN + (CONTENT_W - total) / 2, cy = y0 + (H - nodeH) / 2;
+      const nodeW = Math.min(2.4, (W - gap * (n - 1)) / n), nodeH = Math.min(1.0, H * 0.5);
+      const total = n * nodeW + (n - 1) * gap, sx = x0 + (W - total) / 2, cy = y0 + (H - nodeH) / 2;
       dg.nodes.forEach((nd, i) => pos.set(nd.id, { x: sx + i * (nodeW + gap), y: cy, w: nodeW, h: nodeH }));
     } else {
-      const nodeW = Math.min(4.2, CONTENT_W * 0.5), nodeH = Math.min(0.7, (H - gap * (n - 1)) / n);
-      const total = n * nodeH + (n - 1) * gap, sx = MARGIN + (CONTENT_W - nodeW) / 2, sy = y0 + (H - total) / 2;
+      const nodeW = Math.min(4.2, W * 0.62), nodeH = Math.min(0.7, (H - gap * (n - 1)) / n);
+      const total = n * nodeH + (n - 1) * gap, sx = x0 + (W - nodeW) / 2, sy = y0 + (H - total) / 2;
       dg.nodes.forEach((nd, i) => pos.set(nd.id, { x: sx, y: sy + i * (nodeH + gap), w: nodeW, h: nodeH }));
     }
     const edges = dg.edges.length ? dg.edges : dg.nodes.slice(1).map((nd, i) => ({ from: dg.nodes[i].id, to: nd.id, label: "", dashed: false }));
@@ -431,15 +548,15 @@ function drawDiagram(slide: any, y0: number, H: number, dg: SlideDiagram) {
   if (down) {
     const rowH = H / k, nodeH = Math.min(rowH * 0.82, hasItems ? 1.2 : 0.66);
     layers.forEach((layer, li) => {
-      const m = layer.length, gap = 0.3, nodeW = Math.min(hasItems ? 4.9 : 2.6, (CONTENT_W - gap * (m + 1)) / m);
-      const total = m * nodeW + (m - 1) * gap, sx = MARGIN + (CONTENT_W - total) / 2, cy = y0 + li * rowH + (rowH - nodeH) / 2;
+      const m = layer.length, gap = 0.3, nodeW = Math.min(hasItems ? 4.9 : 2.6, (W - gap * (m + 1)) / m);
+      const total = m * nodeW + (m - 1) * gap, sx = x0 + (W - total) / 2, cy = y0 + li * rowH + (rowH - nodeH) / 2;
       layer.forEach((nd, ni) => pos.set(nd.id, { x: sx + ni * (nodeW + gap), y: cy, w: nodeW, h: nodeH }));
     });
   } else {
-    const colW = CONTENT_W / k, nodeW = Math.min(hasItems ? 3.0 : 2.4, colW * 0.82);
+    const colW = W / k, nodeW = Math.min(hasItems ? 3.0 : 2.4, colW * 0.82);
     layers.forEach((layer, li) => {
       const m = layer.length, gap = 0.3, nodeH = Math.min(hasItems ? 1.3 : 0.7, (H - gap * (m + 1)) / m);
-      const total = m * nodeH + (m - 1) * gap, sy = y0 + (H - total) / 2, cx = MARGIN + li * colW + (colW - nodeW) / 2;
+      const total = m * nodeH + (m - 1) * gap, sy = y0 + (H - total) / 2, cx = x0 + li * colW + (colW - nodeW) / 2;
       layer.forEach((nd, ni) => pos.set(nd.id, { x: cx, y: sy + ni * (nodeH + gap), w: nodeW, h: nodeH }));
     });
   }
@@ -456,8 +573,93 @@ function drawDiagram(slide: any, y0: number, H: number, dg: SlideDiagram) {
   dg.nodes.forEach((nd) => { const p = pos.get(nd.id)!; const main = /核心|中心|中枢|中台|大脑|引擎|平台|底座/.test(nd.group) || (layerOf.get(nd.id) === 0); drawNodeBox(slide, p.x, p.y, p.w, p.h, nd.label, main ? NODE_MAIN : NODE_CHILD, 13, nd.items); });
 }
 
+/** 左侧结论卡：短句与视觉并列时，用层级化信息而不是普通项目符号堆叠。 */
+function drawNarrativePanel(slide: any, x: number, y: number, w: number, h: number, paragraphs: string[], bullets: string[]) {
+  slide.addShape("roundRect", {
+    x, y, w, h, rectRadius: 0.08,
+    fill: { color: THEME.panel }, line: { color: THEME.line, width: 1 },
+  });
+  slide.addText("核心判断", {
+    x: x + 0.25, y: y + 0.22, w: w - 0.5, h: 0.28,
+    fontSize: 10, bold: true, color: THEME.accent, charSpacing: 1.2, fontFace: CJK_FONT,
+  });
+  let cy = y + 0.62;
+  if (paragraphs.length) {
+    const lead = paragraphs.join("\n");
+    // 17pt 中文在 3.68in 实际每行约 18–20 字；此前按 24 字和 0.3in 行高估算，
+    // Keynote 实渲会把三行结论的末行裁掉，并与第一个编号项重叠。
+    const leadH = Math.min(1.55, Math.max(0.62, estLines(lead, 20) * 0.36));
+    slide.addText(lead, {
+      x: x + 0.25, y: cy, w: w - 0.5, h: leadH,
+      fontSize: 17, bold: true, color: THEME.ink, valign: "top", breakLine: false,
+      lineSpacingMultiple: 1.05, margin: 0, fontFace: CJK_FONT,
+    });
+    cy += leadH + 0.18;
+  }
+  bullets.forEach((bullet, index) => {
+    // 编号项文本区只有约 3.2in；13.5pt 中文实渲每行约 17–18 字。
+    // 旧估算按 26 字/行会把两行项目当成单行，Keynote 中相邻项目发生重叠。
+    const itemH = Math.max(0.54, estLines(bullet, 18) * 0.3 + 0.12);
+    if (cy + itemH > y + h - 0.18) return;
+    slide.addShape("roundRect", {
+      x: x + 0.24, y: cy, w: 0.34, h: 0.34, rectRadius: 0.05,
+      fill: { color: index === 0 ? THEME.accent : THEME.zebra }, line: { color: index === 0 ? THEME.accent : THEME.line, width: 0.8 },
+    });
+    slide.addText(String(index + 1), {
+      x: x + 0.24, y: cy, w: 0.34, h: 0.34, fontSize: 10, bold: true,
+      color: index === 0 ? "FFFFFF" : THEME.dim, align: "center", valign: "middle", margin: 0, fontFace: CJK_FONT,
+    });
+    slide.addText(bullet, {
+      x: x + 0.7, y: cy - 0.01, w: w - 0.95, h: itemH,
+      fontSize: 13.5, color: THEME.ink, valign: "top", margin: 0, lineSpacingMultiple: 1.05, fontFace: CJK_FONT,
+    });
+    cy += itemH + 0.12;
+  });
+}
+
+function visualPairKind(page: SlidePage): "diagram" | "image" | null {
+  const narrativeChars = cp([...page.paragraphs, ...page.bullets].join(""));
+  const canPairNarrative =
+    page.paragraphs.length + page.bullets.length > 0 &&
+    page.paragraphs.length + page.bullets.length <= 5 &&
+    narrativeChars <= 220 &&
+    !page.stats.length && !page.tables.length && !page.code.length;
+  if (canPairNarrative && page.diagrams.length === 1 && page.images.length === 0) return "diagram";
+  if (canPairNarrative && page.images.length === 1 && page.diagrams.length === 0) return "image";
+  return null;
+}
+
 function buildBlocks(page: SlidePage): Block[] {
   const blocks: Block[] = [];
+
+  // 一张核心视觉 + 不超过五条短结论 → 左文右图。把“文档式纵向堆叠”升级为真正的演示版式；
+  // 长文、表格、代码仍走下方的确定式分页，防止为了好看牺牲可读性。
+  const pairKind = visualPairKind(page);
+  const pairedDiagram = pairKind === "diagram";
+  const pairedImage = pairKind === "image";
+  if (pairedDiagram || pairedImage) {
+    const H = 4.78;
+    blocks.push({
+      h: H,
+      draw: (slide, y) => {
+        const leftW = 4.18;
+        const gap = 0.36;
+        const visualX = MARGIN + leftW + gap;
+        const visualW = CONTENT_W - leftW - gap;
+        drawNarrativePanel(slide, MARGIN, y, leftW, H, page.paragraphs, page.bullets);
+        slide.addShape("roundRect", {
+          x: visualX, y, w: visualW, h: H, rectRadius: 0.08,
+          fill: { color: "FAF8F2" }, line: { color: THEME.line, width: 1 },
+        });
+        if (pairedDiagram) {
+          drawDiagram(slide, y + 0.18, H - 0.36, page.diagrams[0], visualX + 0.18, visualW - 0.36);
+        } else {
+          const innerX = visualX + 0.22, innerY = y + 0.22, innerW = visualW - 0.44, innerH = H - 0.44;
+          slide.addImage({ path: page.images[0], x: innerX, y: innerY, w: innerW, h: innerH, sizing: { type: "contain", w: innerW, h: innerH } });
+        }
+      },
+    });
+  }
 
   // 数字卡（最多 4 张一排）
   if (page.stats.length) {
@@ -489,7 +691,7 @@ function buildBlocks(page: SlidePage): Block[] {
   }
 
   // 引导段落（作为 lead 文本）
-  for (const p of page.paragraphs) {
+  for (const p of (pairedDiagram || pairedImage) ? [] : page.paragraphs) {
     const h = Math.max(0.42, estLines(p, 46) * 0.32) + 0.08;
     blocks.push({
       h,
@@ -503,7 +705,7 @@ function buildBlocks(page: SlidePage): Block[] {
   }
 
   // 要点（逐条成块，便于跨页续排）
-  for (const b of page.bullets) {
+  for (const b of (pairedDiagram || pairedImage) ? [] : page.bullets) {
     const h = Math.max(0.4, estLines(b, 40) * 0.32) + 0.06;
     blocks.push({
       h,
@@ -533,7 +735,9 @@ function buildBlocks(page: SlidePage): Block[] {
 
   // 原生表格：主题化表头 + 斑马纹
   for (const tbl of page.tables) {
-    const h = (tbl.rows.length + 1) * 0.4 + 0.2;
+    const rowH = tbl.rows.length <= 3 ? 0.62 : tbl.rows.length <= 5 ? 0.5 : 0.4;
+    const fontSize = tbl.rows.length <= 3 ? 14 : tbl.rows.length <= 5 ? 13 : 12;
+    const h = (tbl.rows.length + 1) * rowH + 0.16;
     blocks.push({
       h,
       draw: (slide, y) => {
@@ -548,7 +752,7 @@ function buildBlocks(page: SlidePage): Block[] {
           }))
         );
         slide.addTable([headRow, ...bodyRows], {
-          x: MARGIN, y, w: CONTENT_W, fontSize: 12, fontFace: CJK_FONT, rowH: 0.34,
+          x: MARGIN, y, w: CONTENT_W, fontSize, fontFace: CJK_FONT, rowH,
           border: { type: "solid", pt: 0.5, color: THEME.line },
         });
       },
@@ -556,7 +760,7 @@ function buildBlocks(page: SlidePage): Block[] {
   }
 
   // 配图：1 张居中、多张 2 列网格（contain 保持比例，不再静默只画第一张）
-  if (page.images.length) {
+  if (page.images.length && !pairedImage) {
     const imgs = page.images;
     const cols = imgs.length === 1 ? 1 : 2;
     const gap = 0.3;
@@ -576,7 +780,7 @@ function buildBlocks(page: SlidePage): Block[] {
   }
 
   // 架构图（原生形状：分层/流程/中心辐射），单图高度上限 4.6in，超高由 packBlocks 独占一页
-  for (const dg of page.diagrams) {
+  for (const dg of pairedDiagram ? [] : page.diagrams) {
     const groups = new Set(dg.nodes.map((n) => n.group)).size;
     const H =
       dg.type === "hub" ? 4.4
@@ -624,7 +828,17 @@ function drawHeader(slide: any, title: string) {
   slide.addShape("rect", { x: 0.74, y: 1.32, w: 1.2, h: 0.06, fill: { color: THEME.accent } });
 }
 
-function drawFooter(slide: any, deckTitle: string, n: number, total: number) {
+function drawSourceFootnote(slide: any, sources: string[]) {
+  if (!sources.length) return;
+  const text = `来源：${sources.join("；")}`;
+  slide.addText(cp(text) > 150 ? [...text].slice(0, 149).join("") + "…" : text, {
+    x: 0.75, y: 6.66, w: 11.83, h: 0.25,
+    fontSize: 8.5, color: THEME.dim, align: "left", valign: "middle", margin: 0, fontFace: CJK_FONT,
+  });
+}
+
+function drawFooter(slide: any, deckTitle: string, n: number, total: number, sources: string[]) {
+  drawSourceFootnote(slide, sources);
   slide.addText(deckTitle, {
     x: 0.7, y: 7.04, w: 9, h: 0.34, fontSize: 9, color: THEME.dim, align: "left", valign: "middle", fontFace: CJK_FONT,
   });
@@ -676,14 +890,17 @@ export async function slidesToPptx(doc: Doc): Promise<Buffer> {
       if (sub) {
         slide.addText(sub, { x: 1.5, y: 4.45, w: 10.33, h: 0.8, fontSize: 16, color: THEME.dim, align: "center", fontFace: CJK_FONT });
       }
+      drawSourceFootnote(slide, page.sources);
       return;
     }
 
     if (p.type === "divider") {
+      if (p.page.notes) slide.addNotes(p.page.notes);
       slide.addShape("rect", { x: 0.9, y: 3.05, w: 1.5, h: 0.09, fill: { color: THEME.accent } });
       slide.addText(p.page.title, {
         x: 0.9, y: 3.35, w: 11.5, h: 1.4, fontSize: 34, bold: true, color: THEME.ink, align: "left", valign: "middle", fontFace: CJK_FONT,
       });
+      drawSourceFootnote(slide, p.page.sources);
       return;
     }
 
@@ -695,7 +912,7 @@ export async function slidesToPptx(doc: Doc): Promise<Buffer> {
       b.draw(slide, y);
       y += b.h + 0.1;
     }
-    drawFooter(slide, doc.title, idx + 1, total);
+    drawFooter(slide, doc.title, idx + 1, total, p.page.sources);
   });
 
   return (await pptx.write({ outputType: "nodebuffer" })) as Buffer;
@@ -709,11 +926,13 @@ export function slidesManifest(content: string): SlidesManifest {
     sourcePages: pages.length,
     renderedSlides: plan.length,
     continuationSlides: plan.filter((p) => p.type === "content" && p.cont).length,
+    splitVisualSlides: pages.filter((p) => visualPairKind(p) !== null).length,
     pagesWithNotes: pages.filter((p) => p.notes).length,
     tables: pages.reduce((a, p) => a + p.tables.length, 0),
     statCards: pages.reduce((a, p) => a + p.stats.length, 0),
     diagrams: pages.reduce((a, p) => a + p.diagrams.length, 0),
     droppedLinks: pages.reduce((a, p) => a + p.diagrams.reduce((b, d) => b + d.droppedLinks, 0), 0),
     images: pages.reduce((a, p) => a + p.images.length, 0),
+    pagesWithSources: pages.filter((p) => p.sources.length > 0).length,
   };
 }
