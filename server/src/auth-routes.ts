@@ -3,6 +3,7 @@ import { countUsers, createUser, getUserByEmail, getUserById } from "./db.js";
 import { hashPassword, verifyPassword } from "./password.js";
 import { SESSION_COOKIE, signSession } from "./session.js";
 import { resolveUserId } from "./auth.js";
+import { coworkerMeIsAdmin, fetchCoworkerMe } from "./coworker.js";
 
 /** 登录/注册/登出/me —— 这些路由不经 requireUser（登出态也要能访问）。 */
 export const authRoutes = Router();
@@ -52,6 +53,13 @@ authRoutes.get("/me", async (req, res) => {
     return res.status(401).json({ error: "unauthorized", allow_signup: ALLOW_SIGNUP, needs_setup: countUsers() === 0 });
   }
   const user = getUserById(userId);
-  // standalone：本地用户带 role；coworker：无本地记录，回 admin（coworker 不做角色门控，requireAdmin 该模式放行）
-  res.json(user ? publicUser(user) : { id: userId, role: "admin" });
+  if (user) {
+    res.json(publicUser(user));
+    return;
+  }
+  const coworkerMe = await fetchCoworkerMe(userId, req.headers.cookie);
+  res.json({
+    id: userId,
+    role: coworkerMeIsAdmin(coworkerMe) ? "admin" : "member",
+  });
 });

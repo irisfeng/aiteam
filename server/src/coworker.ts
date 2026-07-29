@@ -10,10 +10,18 @@ export interface CoworkerMe {
   displayName: string;
   email: string;
   departments: { id: string; name: string; role: string }[];
+  isSuperadmin?: boolean;
 }
 
 const cache = new Map<string, { data: CoworkerMe; ts: number }>();
 const TTL_MS = 60_000;
+
+export function coworkerMeIsAdmin(me: CoworkerMe | null): boolean {
+  return Boolean(
+    me?.isSuperadmin ||
+      me?.departments.some((department) => department.role === "admin"),
+  );
+}
 
 export async function fetchCoworkerMe(
   userId: string | undefined,
