@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: AITeam Mission API
-  version: 0.1.0
-  description: Organization-scoped execution contract used by Coworker.
+  version: 0.2.0
+  description: Organization-scoped research execution and artifact contract used by Coworker.
 servers:
   - url: /aiteam/api/v1
 security:
@@ -108,6 +108,31 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+  /missions/{missionId}/artifacts:
+    parameters:
+      - $ref: "#/components/parameters/MissionId"
+    get:
+      operationId: listMissionArtifacts
+      summary: List current deliverables produced by a Mission
+      responses:
+        "200":
+          description: Ordered Mission artifact list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/MissionArtifact"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 components:
   securitySchemes:
     serviceJwt:
@@ -183,7 +208,37 @@ components:
         requested_by:
           type: string
         status:
-          enum: [queued]
+          enum: [queued, running, blocked, completed, failed, cancelled]
+        created_at:
+          type: integer
+    MissionArtifact:
+      type: object
+      required:
+        - id
+        - mission_id
+        - task_id
+        - kind
+        - title
+        - content
+        - version
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+        mission_id:
+          type: string
+        task_id:
+          type: [string, "null"]
+        kind:
+          enum: [report, slides, sheet, html]
+        title:
+          type: string
+        content:
+          type: string
+        version:
+          type: integer
+          minimum: 1
         created_at:
           type: integer
         updated_at:

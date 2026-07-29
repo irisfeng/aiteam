@@ -47,3 +47,6 @@ Phase 0 只支持 `research_report`，并提供：
 ## 后续门槛
 
 进入 Phase 1 前，需通过 Mission API 集成回归、完整 typecheck/build，并由 OpenAPI 文档与实现保持一致。进入生产灰度前，还需完成密钥轮换、持久化投影、执行恢复和真实研究报告闭环。
+
+Phase 1 的执行映射、报告产物和恢复决策见
+[`ADR-coworker-mission-execution.md`](./ADR-coworker-mission-execution.md)。

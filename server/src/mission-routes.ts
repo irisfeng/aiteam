@@ -8,6 +8,7 @@ import {
   requireServiceJwt,
   type ServiceRequest,
 } from "./service-auth.js";
+import { listMissionArtifacts } from "./mission-execution.js";
 
 export const missionRoutes = Router();
 
@@ -146,4 +147,27 @@ missionRoutes.get("/:missionId/events", (request, res) => {
     data: events,
     next_after: events.at(-1)?.sequence ?? after,
   });
+});
+
+missionRoutes.get("/:missionId/artifacts", (request, res) => {
+  const req = request as ServiceRequest;
+  const claims = req.serviceClaims;
+  if (!claims?.scopes.includes("mission:read")) {
+    return res.status(403).json({
+      error: {
+        code: "MISSION_SCOPE_FORBIDDEN",
+        message: "The token does not allow mission artifact reads",
+      },
+    });
+  }
+  const mission = getMission(claims.organizationId, req.params.missionId);
+  if (!mission) {
+    return res.status(404).json({
+      error: {
+        code: "MISSION_NOT_FOUND",
+        message: "Mission not found",
+      },
+    });
+  }
+  return res.json({ data: listMissionArtifacts(mission) });
 });

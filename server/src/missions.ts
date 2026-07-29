@@ -1,6 +1,18 @@
 import { createHash } from "node:crypto";
 import { nanoid } from "nanoid";
 import { db } from "./db.js";
+import {
+  ensureMissionExecution,
+  inspectMissionExecution,
+} from "./mission-execution.js";
+
+export type MissionStatus =
+  | "queued"
+  | "running"
+  | "blocked"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 export interface Mission {
   id: string;
@@ -9,7 +21,7 @@ export interface Mission {
   title: string;
   brief: string;
   requested_by: string;
-  status: "queued";
+  status: MissionStatus;
   created_at: number;
   updated_at: number;
 }
@@ -55,7 +67,7 @@ export function createMission(
   if (existing) {
     const { request_hash: existingHash, ...mission } = existing;
     return existingHash === hash
-      ? { outcome: "replayed", mission }
+      ? { outcome: "replayed", mission: reconcileMission(mission) }
       : { outcome: "conflict", mission };
   }
 
@@ -98,17 +110,93 @@ export function createMission(
     );
   })();
 
-  return { outcome: "created", mission };
+  try {
+    ensureMissionExecution(mission);
+    return { outcome: "created", mission: reconcileMission(mission) };
+  } catch (error) {
+    return {
+      outcome: "created",
+      mission: transitionMission(mission, "failed", {
+        error:
+          error instanceof Error
+            ? error.message.slice(0, 500)
+            : "Mission execution setup failed",
+      }),
+    };
+  }
+}
+
+function transitionMission(
+  mission: Mission,
+  status: MissionStatus,
+  payload: Record<string, unknown>,
+): Mission {
+  if (mission.status === status) return mission;
+  const eventType: Record<Exclude<MissionStatus, "queued">, string> = {
+    running: "mission.started",
+    blocked: "mission.blocked",
+    completed: "mission.completed",
+    failed: "mission.failed",
+    cancelled: "mission.cancelled",
+  };
+  if (status === "queued") return mission;
+  const updatedAt = Date.now();
+  db.transaction(() => {
+    const sequenceRow = db
+      .prepare(
+        "SELECT COALESCE(MAX(sequence), 0) AS sequence FROM mission_events WHERE mission_id = ?",
+      )
+      .get(mission.id) as { sequence: number };
+    db.prepare(
+      "UPDATE missions SET status = ?, updated_at = ? WHERE id = ? AND organization_id = ?",
+    ).run(status, updatedAt, mission.id, mission.organization_id);
+    db.prepare(
+      `INSERT INTO mission_events (
+        mission_id, organization_id, sequence, type, status, payload_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      mission.id,
+      mission.organization_id,
+      sequenceRow.sequence + 1,
+      eventType[status],
+      status,
+      JSON.stringify(payload),
+      updatedAt,
+    );
+  })();
+  return { ...mission, status, updated_at: updatedAt };
+}
+
+function reconcileMission(mission: Mission): Mission {
+  if (
+    mission.status === "completed" ||
+    mission.status === "cancelled" ||
+    mission.status === "failed"
+  ) {
+    return mission;
+  }
+  try {
+    const execution = inspectMissionExecution(mission);
+    return transitionMission(mission, execution.status, execution.payload);
+  } catch (error) {
+    return transitionMission(mission, "failed", {
+      error:
+        error instanceof Error
+          ? error.message.slice(0, 500)
+          : "Mission execution inspection failed",
+    });
+  }
 }
 
 export function getMission(
   organizationId: string,
   missionId: string,
 ): Mission | undefined {
-  return db.prepare(
+  const mission = db.prepare(
     `SELECT id, organization_id, kind, title, brief, requested_by, status, created_at, updated_at
      FROM missions WHERE id = ? AND organization_id = ?`,
   ).get(missionId, organizationId) as Mission | undefined;
+  return mission ? reconcileMission(mission) : undefined;
 }
 
 export function listMissionEvents(

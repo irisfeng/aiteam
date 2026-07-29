@@ -145,6 +145,69 @@ try {
   assertEqual(createMission.status, 201, "A valid service request creates a mission");
   const createdBody = await createMission.json();
 
+  let completedMission;
+  const completionDeadline = Date.now() + 15_000;
+  while (Date.now() < completionDeadline) {
+    const response = await fetch(
+      `${base}/missions/${createdBody.data.id}`,
+      {
+        headers: {
+          Authorization: `Bearer ${serviceToken("org-alpha")}`,
+        },
+      },
+    );
+    if (response.ok) {
+      const body = await response.json();
+      if (body.data?.status === "completed") {
+        completedMission = body.data;
+        break;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assertEqual(
+    completedMission?.status,
+    "completed",
+    "A research Mission reaches completed through the real task engine",
+  );
+  const missionArtifacts = await fetch(
+    `${base}/missions/${createdBody.data.id}/artifacts`,
+    {
+      headers: {
+        Authorization: `Bearer ${serviceToken("org-alpha")}`,
+      },
+    },
+  );
+  assertEqual(
+    missionArtifacts.status,
+    200,
+    "The owning organization can retrieve Mission artifacts",
+  );
+  const artifactsBody = await missionArtifacts.json();
+  assertEqual(
+    artifactsBody.data?.length > 0,
+    true,
+    "A completed research Mission exposes at least one artifact",
+  );
+  assertEqual(
+    artifactsBody.data?.at(-1)?.kind,
+    "report",
+    "The final Mission artifact is a report",
+  );
+  const crossOrganizationArtifacts = await fetch(
+    `${base}/missions/${createdBody.data.id}/artifacts`,
+    {
+      headers: {
+        Authorization: `Bearer ${serviceToken("org-beta")}`,
+      },
+    },
+  );
+  assertEqual(
+    crossOrganizationArtifacts.status,
+    404,
+    "Mission artifacts are hidden from other organizations",
+  );
+
   const replayMission = await fetch(`${base}/missions`, {
     method: "POST",
     headers: missionHeaders,
@@ -239,9 +302,22 @@ try {
     "mission.created",
     "Mission creation is recorded as the first event",
   );
+  const completedEvent = eventsBody.data?.find(
+    (event) => event.type === "mission.completed",
+  );
+  assertEqual(
+    completedEvent?.status,
+    "completed",
+    "Mission completion is recorded in the replayable event stream",
+  );
+  assertEqual(
+    completedEvent?.payload?.final_artifact_id,
+    artifactsBody.data?.at(-1)?.id,
+    "The completion event points to the final report artifact",
+  );
 
   const noNewEvents = await fetch(
-    `${base}/missions/${createdBody.data.id}/events?after=1`,
+    `${base}/missions/${createdBody.data.id}/events?after=${eventsBody.next_after}`,
     {
       headers: {
         Authorization: `Bearer ${serviceToken("org-alpha")}`,

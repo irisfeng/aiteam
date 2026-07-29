@@ -271,6 +271,17 @@ CREATE TABLE IF NOT EXISTS mission_events (
 );
 CREATE INDEX IF NOT EXISTS idx_mission_events_org_mission_sequence
   ON mission_events(organization_id, mission_id, sequence);
+CREATE TABLE IF NOT EXISTS mission_executions (
+  mission_id TEXT PRIMARY KEY,
+  organization_id TEXT NOT NULL,
+  owner_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  final_task_id TEXT NOT NULL,
+  task_ids_json TEXT NOT NULL DEFAULT '[]',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mission_executions_org_project
+  ON mission_executions(organization_id, project_id);
 `);
 
 // 轻量迁移：旧库补新列
