@@ -315,6 +315,11 @@ try {
     artifactsBody.data?.at(-1)?.id,
     "The completion event points to the final report artifact",
   );
+  assertEqual(
+    completedEvent?.payload?.quality_gate,
+    "mock_skipped",
+    "Mock completion is not presented as a passed quality review",
+  );
 
   const noNewEvents = await fetch(
     `${base}/missions/${createdBody.data.id}/events?after=${eventsBody.next_after}`,

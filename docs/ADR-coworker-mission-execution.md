@@ -22,8 +22,10 @@ AITeam 已有按用户隔离的多智能体任务、依赖调度、独立复核�
 5. `mission_executions` 只保存 Mission 与 Project/Task 的内部映射。
 6. Mission 查询或事件同步时，从执行真相收敛状态并追加
    `mission.started|blocked|completed|failed|cancelled` 事件。
-7. `mission.completed` 必须已有最终报告，并在事件 payload 中给出
-   `final_artifact_id`。
+7. `mission.completed` 必须已有最终报告；真实执行还必须有通过的最终机器
+   裁决，或由 AITeam 人工执行 `done` 覆盖。事件 payload 给出
+   `final_artifact_id`、`quality_gate` 和最终裁决标识。机器裁决未通过或缺失
+   时 Mission 进入 `blocked`，不会伪装成已完成。
 8. Coworker 通过组织范围内的 `/artifacts` 端点读取成果；不能直接访问
    AITeam 数据库或用户工作区。
 
@@ -45,5 +47,7 @@ AITeam 已有按用户隔离的多智能体任务、依赖调度、独立复核�
 
 - AITeam 的 `completed` 只表示执行引擎已交付并通过其复核；Coworker 将其映射
   为 `awaiting_acceptance`，最终业务完成仍需要人在 Coworker 确认。
+- Mock 模式没有真实机器裁决，仍允许用于契约和 UAT，但完成事件明确标注
+  `quality_gate=mock_skipped`，不得提升为真实质量证明。
 - Mock 模式只证明流程、持久化和状态契约，产物明确标记为演示内容；真实研究
   质量仍需配置模型与联网能力后单独验收。

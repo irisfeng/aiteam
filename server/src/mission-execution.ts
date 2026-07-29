@@ -10,9 +10,11 @@ import {
   listDocuments,
   listTaskEvents,
   listTasks,
+  listVerdictsForTask,
   type Task,
 } from "./db.js";
-import { onTaskAssigned } from "./agents/engine.js";
+import { isMock, onTaskAssigned } from "./agents/engine.js";
+import { classifyFinalMissionDelivery } from "./mission-quality.js";
 import { ownerFromUserId, withOwner } from "./ownerScope.js";
 import { seedForOwner } from "./seed.js";
 import type { Mission, MissionStatus } from "./missions.js";
@@ -259,19 +261,33 @@ export function inspectMissionExecution(mission: Mission): MissionExecutionState
         document.task_id === execution.final_task_id &&
         document.kind === "report",
     );
+    const latestFinalVerdict = finalTask
+      ? listVerdictsForTask(finalTask.id).at(-1) ?? null
+      : null;
+    const deliveryDecision = classifyFinalMissionDelivery({
+      taskStatus: finalTask?.status ?? null,
+      hasFinalArtifact: finalArtifacts.length > 0,
+      latestVerdict: latestFinalVerdict?.result ?? null,
+      mock: isMock(),
+    });
     const payload = {
       project_id: execution.project_id,
       task_ids: tasks.map((task) => task.id),
       final_task_id: execution.final_task_id,
       artifact_ids: finalArtifacts.map((artifact) => artifact.id),
       final_artifact_id: finalArtifacts[0]?.id ?? null,
+      quality_gate: deliveryDecision?.qualityGate ?? "pending",
+      final_verdict_id: latestFinalVerdict?.id ?? null,
+      final_verdict_reason:
+        latestFinalVerdict?.result === "revise"
+          ? latestFinalVerdict.reasons.slice(0, 2000)
+          : null,
     };
-    if (
-      finalTask &&
-      (finalTask.status === "review" || finalTask.status === "done") &&
-      finalArtifacts.length > 0
-    ) {
+    if (deliveryDecision?.status === "completed") {
       return { status: "completed", payload };
+    }
+    if (deliveryDecision?.status === "blocked") {
+      return { status: "blocked", payload };
     }
     if (tasks.some((task) => task.status === "blocked")) {
       return { status: "blocked", payload };
