@@ -295,9 +295,21 @@ components:
       required: [code, message]
       properties:
         code:
-          type: string
+          $ref: "#/components/schemas/MissionErrorCode"
         message:
           type: string
+    MissionErrorCode:
+      type: string
+      enum:
+        - MISSION_EVENT_CURSOR_INVALID
+        - MISSION_IDEMPOTENCY_CONFLICT
+        - MISSION_NOT_FOUND
+        - MISSION_ORGANIZATION_FORBIDDEN
+        - MISSION_REQUEST_INVALID
+        - MISSION_SCOPE_FORBIDDEN
+        - SERVICE_AUTH_INVALID
+        - SERVICE_AUTH_NOT_CONFIGURED
+        - SERVICE_AUTH_REQUIRED
     ErrorEnvelope:
       type: object
       required: [error]
