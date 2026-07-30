@@ -141,7 +141,8 @@ components:
       bearerFormat: JWT
       description: >-
         HS256 JWT with iss=coworker, aud=aiteam, sub=service:coworker,
-        organization_id, scope, iat and exp.
+        organization_id, scope, iat and exp. During keyring rotation the JOSE
+        header must include a configured kid.
   parameters:
     IdempotencyKey:
       name: Idempotency-Key

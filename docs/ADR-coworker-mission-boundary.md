@@ -13,7 +13,11 @@ Coworker 负责组织、人员、任务、审批和责任归属；AITeam 负责�
 
 - Coworker 是 Organization、发起人和业务任务的权威来源。
 - AITeam 为每个 Mission 保存执行状态和追加式事件流。
-- 服务调用使用独立 HS256 JWT；密钥为 `AITEAM_SERVICE_JWT_SECRET`，不得复用 `AUTH_SECRET` 或浏览器 Cookie。
+- 服务调用使用独立 HS256 JWT；单密钥兼容变量为
+  `AITEAM_SERVICE_JWT_SECRET`。轮换时 AITeam 使用
+  `AITEAM_SERVICE_JWT_KEYS` keyring，Coworker 通过
+  `AITEAM_SERVICE_JWT_KEY_ID` 写入 `kid`。这些密钥不得复用
+  `AUTH_SECRET` 或浏览器 Cookie。
 - JWT 固定校验 `iss=coworker`、`aud=aiteam`、`sub=service:coworker`、过期时间、组织和 scope。
 - 所有 Mission 查询都以 JWT 中的 `organization_id` 约束；跨组织读取返回 404，避免泄露资源是否存在。
 - 创建请求必须带 `Idempotency-Key`。同组织、同 key、同请求返回原 Mission（200）；同 key 不同请求返回 409。

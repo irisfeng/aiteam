@@ -31,6 +31,7 @@ const child = spawn(process.execPath, [join(root, "server/dist/index.js")], {
     AITEAM_DATA_DIR: dataDir,
     AITEAM_TEST_INSTANCE_ID: instanceId,
     AITEAM_SERVICE_JWT_SECRET: secret,
+    AITEAM_SERVICE_JWT_KEYS: "",
   },
   stdio: ["ignore", "pipe", "pipe"],
 });
