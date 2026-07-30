@@ -20,7 +20,7 @@ function assertIncludes(value, expected, label) {
   console.log(`✅ ${label}`);
 }
 
-assertIncludes(openapi, "version: 0.6.0", "OpenAPI publishes Mission API 0.6.0");
+assertIncludes(openapi, "version: 0.7.0", "OpenAPI publishes Mission API 0.7.0");
 
 const errorCodes = [
   ...new Set(

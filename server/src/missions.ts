@@ -13,6 +13,12 @@ import { missionActivityMetadata } from "./mission-activity.js";
 const DEFAULT_MISSION_TIMEOUT_MS = 60 * 60 * 1000;
 const MIN_MISSION_TIMEOUT_MS = 1000;
 const MAX_MISSION_TIMEOUT_MS = 7 * 24 * 60 * 60 * 1000;
+const DEFAULT_MISSION_MAX_ACTIVE_PER_ORGANIZATION = 2;
+const MIN_MISSION_MAX_ACTIVE_PER_ORGANIZATION = 1;
+const MAX_MISSION_MAX_ACTIVE_PER_ORGANIZATION = 32;
+const DEFAULT_MISSION_MAX_ACTIVE_GLOBAL = 4;
+const MIN_MISSION_MAX_ACTIVE_GLOBAL = 1;
+const MAX_MISSION_MAX_ACTIVE_GLOBAL = 64;
 
 function configuredMissionTimeoutMs(): number {
   const raw = process.env.AITEAM_MISSION_TIMEOUT_MS?.trim();
@@ -31,6 +37,47 @@ function configuredMissionTimeoutMs(): number {
 }
 
 const missionTimeoutMs = configuredMissionTimeoutMs();
+function configuredMissionMaxActivePerOrganization(): number {
+  const raw =
+    process.env.AITEAM_MISSION_MAX_ACTIVE_PER_ORGANIZATION?.trim();
+  if (!raw) return DEFAULT_MISSION_MAX_ACTIVE_PER_ORGANIZATION;
+  const parsed = Number(raw);
+  if (
+    !Number.isSafeInteger(parsed) ||
+    parsed < MIN_MISSION_MAX_ACTIVE_PER_ORGANIZATION ||
+    parsed > MAX_MISSION_MAX_ACTIVE_PER_ORGANIZATION
+  ) {
+    throw new Error(
+      `AITEAM_MISSION_MAX_ACTIVE_PER_ORGANIZATION must be an integer between ${MIN_MISSION_MAX_ACTIVE_PER_ORGANIZATION} and ${MAX_MISSION_MAX_ACTIVE_PER_ORGANIZATION}`,
+    );
+  }
+  return parsed;
+}
+
+const missionMaxActivePerOrganization =
+  configuredMissionMaxActivePerOrganization();
+function configuredMissionMaxActiveGlobal(): number {
+  const raw = process.env.AITEAM_MISSION_MAX_ACTIVE_GLOBAL?.trim();
+  if (!raw) return DEFAULT_MISSION_MAX_ACTIVE_GLOBAL;
+  const parsed = Number(raw);
+  if (
+    !Number.isSafeInteger(parsed) ||
+    parsed < MIN_MISSION_MAX_ACTIVE_GLOBAL ||
+    parsed > MAX_MISSION_MAX_ACTIVE_GLOBAL
+  ) {
+    throw new Error(
+      `AITEAM_MISSION_MAX_ACTIVE_GLOBAL must be an integer between ${MIN_MISSION_MAX_ACTIVE_GLOBAL} and ${MAX_MISSION_MAX_ACTIVE_GLOBAL}`,
+    );
+  }
+  return parsed;
+}
+
+const missionMaxActiveGlobal = configuredMissionMaxActiveGlobal();
+if (missionMaxActivePerOrganization > missionMaxActiveGlobal) {
+  throw new Error(
+    "AITEAM_MISSION_MAX_ACTIVE_PER_ORGANIZATION cannot exceed AITEAM_MISSION_MAX_ACTIVE_GLOBAL",
+  );
+}
 db.prepare(
   "UPDATE missions SET deadline_at = created_at + ? WHERE deadline_at = 0",
 ).run(missionTimeoutMs);
@@ -80,7 +127,8 @@ export interface MissionEvent {
 export type CreateMissionResult =
   | { outcome: "created"; mission: Mission }
   | { outcome: "replayed"; mission: Mission }
-  | { outcome: "conflict"; mission: Mission };
+  | { outcome: "conflict"; mission: Mission }
+  | { outcome: "capacity"; scope: "organization" | "global" };
 
 export type CancelMissionResult =
   | { outcome: "cancelled"; mission: Mission }
@@ -108,21 +156,8 @@ export function createMission(
   input: CreateMissionInput,
   idempotencyKey: string,
 ): CreateMissionResult {
+  expireOverdueMissions();
   const hash = requestHash(input);
-  const existing = db.prepare(
-    `SELECT id, organization_id, kind, title, brief, requested_by, status,
-            deadline_at, created_at, updated_at, request_hash
-     FROM missions WHERE organization_id = ? AND idempotency_key = ?`,
-  ).get(input.organization_id, idempotencyKey) as
-    | (Mission & { request_hash: string })
-    | undefined;
-  if (existing) {
-    const { request_hash: existingHash, ...mission } = existing;
-    return existingHash === hash
-      ? { outcome: "replayed", mission: reconcileMission(mission) }
-      : { outcome: "conflict", mission };
-  }
-
   const createdAt = Date.now();
   const createdEventId = nanoid(20);
   const mission: Mission = {
@@ -138,7 +173,45 @@ export function createMission(
     updated_at: createdAt,
   };
 
-  db.transaction(() => {
+  const stored = db.transaction((): CreateMissionResult => {
+    const existing = db.prepare(
+      `SELECT id, organization_id, kind, title, brief, requested_by, status,
+              deadline_at, created_at, updated_at, request_hash
+       FROM missions WHERE organization_id = ? AND idempotency_key = ?`,
+    ).get(input.organization_id, idempotencyKey) as
+      | (Mission & { request_hash: string })
+      | undefined;
+    if (existing) {
+      const { request_hash: existingHash, ...existingMission } = existing;
+      return existingHash === hash
+        ? { outcome: "replayed", mission: existingMission }
+        : { outcome: "conflict", mission: existingMission };
+    }
+
+    const activeForOrganization = db
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM missions
+         WHERE organization_id = ?
+           AND status IN ('queued', 'running', 'blocked')
+           AND deadline_at > ?`,
+      )
+      .get(input.organization_id, createdAt) as { count: number };
+    if (activeForOrganization.count >= missionMaxActivePerOrganization) {
+      return { outcome: "capacity", scope: "organization" };
+    }
+    const activeGlobal = db
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM missions
+         WHERE status IN ('queued', 'running', 'blocked')
+           AND deadline_at > ?`,
+      )
+      .get(createdAt) as { count: number };
+    if (activeGlobal.count >= missionMaxActiveGlobal) {
+      return { outcome: "capacity", scope: "global" };
+    }
+
     db.prepare(
       `INSERT INTO missions (
         id, organization_id, kind, title, brief, requested_by,
@@ -169,7 +242,13 @@ export function createMission(
       }),
       createdAt,
     );
-  })();
+    return { outcome: "created", mission };
+  }).immediate();
+
+  if (stored.outcome === "replayed") {
+    return { ...stored, mission: reconcileMission(stored.mission) };
+  }
+  if (stored.outcome !== "created") return stored;
 
   try {
     ensureMissionExecution(mission);

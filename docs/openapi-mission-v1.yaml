@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: AITeam Mission API
-  version: 0.6.0
+  version: 0.7.0
   description: Organization-scoped research execution and artifact contract used by Coworker.
 servers:
   - url: /aiteam/api/v1
@@ -45,6 +45,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/CapacityExceeded"
   /missions/{missionId}:
     parameters:
       - $ref: "#/components/parameters/MissionId"
@@ -410,6 +412,7 @@ components:
       type: string
       enum:
         - MISSION_CANCEL_REQUEST_INVALID
+        - MISSION_CAPACITY_EXCEEDED
         - MISSION_EVENT_CURSOR_INVALID
         - MISSION_IDEMPOTENCY_CONFLICT
         - MISSION_NOT_FOUND
@@ -448,6 +451,18 @@ components:
             $ref: "#/components/schemas/ErrorEnvelope"
     NotFound:
       description: Mission is absent or outside the token organization
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    CapacityExceeded:
+      description: Organization or service active-Mission capacity is full
+      headers:
+        Retry-After:
+          description: Minimum suggested delay before retrying the request, in seconds
+          schema:
+            type: integer
+            minimum: 1
       content:
         application/json:
           schema:

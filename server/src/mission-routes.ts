@@ -75,6 +75,18 @@ missionRoutes.post("/", (request, res) => {
       },
     });
   }
+  if (result.outcome === "capacity") {
+    res.setHeader("Retry-After", "5");
+    return res.status(429).json({
+      error: {
+        code: "MISSION_CAPACITY_EXCEEDED",
+        message:
+          result.scope === "organization"
+            ? "AITeam 当前组织的任务并发已满，请稍后重试"
+            : "AITeam 当前服务的任务并发已满，请稍后重试",
+      },
+    });
+  }
   return res
     .status(result.outcome === "created" ? 201 : 200)
     .json({ data: result.mission });

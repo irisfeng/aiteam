@@ -42,6 +42,10 @@ AITeam 已有按用户隔离的多智能体任务、依赖调度、独立复核�
   Event 和 Document 重新计算。
 - 同组织同幂等键重放不会新建第二个 Project 或第二组任务。
 - 执行初始化或检查失败会进入 `failed` 并留下可重放事件，不静默卡在 queued。
+- Mission 与首事件写入前，以 SQLite 立即事务检查组织和单实例活跃容量；
+  `queued/running/blocked` 占用名额，终态和已收口超时释放名额。相同幂等键
+  重放先于容量检查，超限的新请求返回
+  `429 / MISSION_CAPACITY_EXCEEDED` 且不留下半成品。
 
 ## 边界
 

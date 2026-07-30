@@ -129,6 +129,8 @@ Coworker 融合采用“控制面 + 执行面”边界：AITeam 把研究 Missio
 | `AITEAM_DAILY_TOKEN_BUDGET` | `0`（不限） | 每用户每日 token 预算硬切断（按加权计费 token） |
 | `AITEAM_TASK_TOKEN_BUDGET` | `0`（不限） | 单任务默认预算（加权计费 token）；任务累计触线自动暂停待批，批准即追加续跑（任务级 `budget_billable` 可覆盖） |
 | `AITEAM_MISSION_TIMEOUT_MS` | `3600000`（1 小时） | Mission 总执行期限；持久化到 Mission，超期后停止剩余任务并记录 `MISSION_TIMEOUT` |
+| `AITEAM_MISSION_MAX_ACTIVE_PER_ORGANIZATION` | `2` | 单组织同时处于 `queued/running/blocked` 的 Mission 上限（1–32） |
+| `AITEAM_MISSION_MAX_ACTIVE_GLOBAL` | `4` | 单 AITeam 实例的全局活跃 Mission 上限（1–64），不得小于单组织上限 |
 | `TASK_MAX_REVISIONS` | `1` | 验收未过的返工次数上限 |
 | `AITEAM_PROVIDER_BENCHMARK_BUDGET` | `20000` | 固定模型质量基准的计费 token 上限 |
 | `AITEAM_PROVIDER_BENCHMARK_REVIEW_RESERVE` | `6000` | 为独立强模型复核预留的计费 token；不足时先暂停待批 |
@@ -140,6 +142,11 @@ Coworker 融合采用“控制面 + 执行面”边界：AITeam 把研究 Missio
 | `AITEAM_MCP_CACHE_TTL_MS` | `600000` | MCP 同参调用结果缓存 TTL |
 | `AITEAM_MAX_MCP_TOOLS` | `40` | 注入工作循环的 MCP 工具数上限 |
 | `AITEAM_SKILL_INDEX_BUDGET` | `6000` | 技能索引（L1）注入上限（字）；正文按需 `read_skill` 拉取不计入 |
+
+默认准入值面向首轮单场景 Preview/灰度：每个研究 Mission 展开为四任务
+DAG，因此单组织 2 个、全局 4 个活跃 Mission 分别约束为 8/16 个执行任务。
+超限请求返回 `429 / MISSION_CAPACITY_EXCEEDED`，不会创建 Mission；相同
+幂等请求仍可重放，终态或超时 Mission 会释放名额。
 
 ---
 
