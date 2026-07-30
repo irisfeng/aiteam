@@ -25,6 +25,7 @@
     "test:credential-recovery": "node scripts/credential-recovery-regression.mjs",
     "test:mission-api": "npm run build --workspace server && node scripts/mission-quality-regression.mjs && node scripts/mission-api-regression.mjs",
     "test:coworker-authz": "npm run build --workspace server && node scripts/coworker-authz-regression.mjs",
+    "test:gray-runtime": "npm run build && node scripts/gray-runtime-regression.mjs",
     "credentials:recover": "node scripts/credential-recovery.mjs"
   },
   "devDependencies": {

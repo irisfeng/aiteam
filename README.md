@@ -115,6 +115,7 @@ Coworker 融合采用“控制面 + 执行面”边界：AITeam 把研究 Missio
 | `AITEAM_LIGHT_MODEL` | `claude-haiku-4-5` | 轻量模型（重复性/格式化任务降本） |
 | `PORT` | `8787` | 服务端口 |
 | `AITEAM_DATA_DIR` | `server/data` | sqlite 库与生成图资产目录（测试/多实例隔离用） |
+| `AITEAM_RELEASE_SHA` | `unknown` | 容器/灰度实例的不可变 Git release SHA；live/ready 探针会原样返回，生产容器入口要求显式配置 |
 | `AITEAM_USER_NAME` | `我` | 用户显示名回退值 |
 
 > 升级旧数据库前先备份。若库中已有 `enc:v1:`，必须同时提供原

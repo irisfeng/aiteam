@@ -9,10 +9,11 @@ import { requireUser } from "./auth.js";
 import { authRoutes } from "./auth-routes.js";
 import { attachBus } from "./bus.js";
 import { seedGlobalSkills } from "./seed.js";
-import { finalizeStaleStreaming } from "./db.js";
+import { db, finalizeStaleStreaming } from "./db.js";
 import { isMock, recoverInFlightTasks, startScheduler } from "./agents/engine.js";
 import { assetsDir } from "./agents/images.js";
 import { missionRoutes } from "./mission-routes.js";
+import { createHealthRoutes } from "./health.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 8787);
@@ -23,7 +24,7 @@ const HOST = process.env.AITEAM_HOST || "127.0.0.1";
 seedGlobalSkills();
 const healed = finalizeStaleStreaming(); // 收口上次遗留的 streaming 中断消息，避免界面永久卡住
 if (healed) console.log(`[aiteam] 收口 ${healed} 条中断的流式消息`);
-startScheduler();
+const stopScheduler = startScheduler();
 recoverInFlightTasks();
 
 const app = express();
@@ -34,6 +35,18 @@ if (process.env.AITEAM_TEST_INSTANCE_ID) {
     res.json({ instance_id: process.env.AITEAM_TEST_INSTANCE_ID });
   });
 }
+app.use(
+  "/aiteam/api",
+  createHealthRoutes({
+    databaseProbe: () => {
+      const row = db.prepare("SELECT 1 AS ok").get() as
+        | { ok: number }
+        | undefined;
+      if (row?.ok !== 1) throw new Error("database probe failed");
+    },
+    modelMode: () => (isMock() ? "mock" : "provider"),
+  }),
+);
 // 整合后所有 AiTeam 路由统一挂在 /aiteam/* 前缀下（由反向代理路由到本进程）。
 // 登录/注册路由公开（不经 requireUser，登出态也要能访问）；其余 API 一律需登录。
 app.use("/aiteam/api/auth", authRoutes);
@@ -57,3 +70,38 @@ attachBus(wss);
 server.listen(PORT, HOST, () => {
   console.log(`[aiteam] server on http://${HOST}:${PORT} ${isMock() ? "(mock mode — 未配置任何模型 key)" : ""}`);
 });
+
+let shuttingDown = false;
+function shutdown(signal: NodeJS.Signals): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[aiteam] ${signal} received, starting graceful shutdown`);
+  stopScheduler();
+  for (const client of wss.clients) {
+    try {
+      client.close(1012, "service restart");
+    } catch {
+      // Continue closing the remaining connections.
+    }
+  }
+  wss.close();
+  server.close((error) => {
+    try {
+      db.pragma("wal_checkpoint(PASSIVE)");
+    } catch (checkpointError) {
+      console.error("[aiteam] shutdown checkpoint failed:", checkpointError);
+    }
+    if (error) {
+      console.error("[aiteam] graceful shutdown failed:", error);
+      process.exitCode = 1;
+    }
+  });
+  const deadline = setTimeout(() => {
+    console.error("[aiteam] graceful shutdown deadline exceeded");
+    process.exit(1);
+  }, 25_000);
+  deadline.unref();
+}
+
+process.once("SIGTERM", () => shutdown("SIGTERM"));
+process.once("SIGINT", () => shutdown("SIGINT"));

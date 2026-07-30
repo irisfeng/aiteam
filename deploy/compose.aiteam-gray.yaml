@@ -1,0 +1,63 @@
+name: ${AITEAM_COMPOSE_PROJECT:-aiteam-gray}
+
+services:
+  aiteam-gray:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        NODE_IMAGE: ${AITEAM_NODE_IMAGE:-node:22.14.0-bookworm-slim}
+        AITEAM_RELEASE_SHA: ${AITEAM_RELEASE_SHA:?set the pinned Git release SHA}
+    image: ${AITEAM_IMAGE:?set an immutable local image tag}
+    container_name: ${AITEAM_CONTAINER_NAME:-aiteam-gray}
+    pull_policy: never
+    init: true
+    user: "10001:10001"
+    env_file:
+      - ${AITEAM_GRAY_SECRETS_FILE:?set a root-readable secrets env file}
+    environment:
+      NODE_ENV: production
+      PORT: "8787"
+      AITEAM_HOST: 0.0.0.0
+      AITEAM_DATA_DIR: /data
+      AITEAM_EXPECTED_RELEASE_SHA: ${AITEAM_RELEASE_SHA}
+      AITEAM_AUTH_MODE: coworker
+      AITEAM_ALLOW_SIGNUP: "0"
+      COWORKER_INTERNAL_URL: ${COWORKER_INTERNAL_URL:-http://coworker-web:3000}
+    ports:
+      - "127.0.0.1:${AITEAM_GRAY_HOST_PORT:-18787}:8787"
+    volumes:
+      - type: bind
+        source: ${AITEAM_GRAY_DATA_DIR:?set the dedicated host data directory}
+        target: /data
+    networks:
+      fusion-gray:
+        aliases:
+          - aiteam-gray
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: 2.0
+    stop_grace_period: 30s
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "scripts/container-healthcheck.mjs"]
+      interval: 10s
+      timeout: 3s
+      start_period: 20s
+      retries: 6
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+networks:
+  fusion-gray:
+    name: ${AITEAM_GRAY_NETWORK:-coworker-aiteam-gray}

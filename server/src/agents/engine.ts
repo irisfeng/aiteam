@@ -3058,8 +3058,8 @@ function shanghaiNow(): { hhmm: string; date: string } {
   return { hhmm: `${get("hour")}:${get("minute")}`, date: `${get("year")}-${get("month")}-${get("day")}` };
 }
 
-export function startScheduler() {
-  setInterval(() => {
+export function startScheduler(): () => void {
+  const timer = setInterval(() => {
     const { hhmm, date } = shanghaiNow();
     // 跨 owner 清扫，每条到点的例行任务在各自 owner 上下文里执行
     for (const routine of listRoutinesAllOwners()) {
@@ -3070,6 +3070,8 @@ export function startScheduler() {
       });
     }
   }, 30_000);
+  timer.unref();
+  return () => clearInterval(timer);
 }
 
 async function runRoutine(routine: Routine) {

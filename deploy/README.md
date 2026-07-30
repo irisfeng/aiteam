@@ -1,5 +1,9 @@
 # 统一 Web App 部署（Coworker + AiTeam · 单主机 · 双空间）
 
+> 天翼云共享 VPS 的隔离灰度不要直接照搬本页的单机公网拓扑。请先执行
+> [`AITEAM_GRAY_RUNBOOK.md`](./AITEAM_GRAY_RUNBOOK.md)：空库、Mock、回环端口、
+> 独立 Docker 网络，且不修改现有入口或生产流量。
+
 把「人的办公协作（Coworker）」与「AI 工具空间（AiTeam）」整合到**一个域名入口**下：
 Coworker 在 `/`，AiTeam 在 `/aiteam/*`，前面一个 Caddy 统一对外（自动 HTTPS + WebSocket）。
 两个空间**不共享数据库**；浏览器入口复用 Coworker 登录态，研究任务则由
