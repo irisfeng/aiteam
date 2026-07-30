@@ -321,6 +321,39 @@ npm start
 > runtime 目录；若现有 systemd `NoNewPrivileges`/`ProtectHome` 令 preflight
 > 失败，不得削弱主服务单元来硬开，应改用单独受限 runner 服务并重新评审。
 
+### MarkItDown 首个真实 local 镜像
+
+仓库已包含 `containers/markitdown-mcp/`：基础镜像按 OCI digest 固定，
+`markitdown-mcp==0.0.1a4`、`markitdown==0.1.6` 与 65 个传递依赖全部精确
+版本并校验分发包 SHA-256。先预拉固定基础镜像，再构建：
+
+```bash
+podman pull docker.io/library/python@sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7
+npm run mcp:image:markitdown:build
+```
+
+构建脚本使用 `--pull=never`，并在无网络、只读 rootfs、drop capabilities、
+非 root 的实际容器中核对锁定包和 `pip check`。输出
+`output/markitdown-mcp-image-evidence.json` 与 CycloneDX 1.6 SBOM；二者默认
+被 Git 忽略，晋级时必须另存到发布证据库。把证据中的 `digest_reference`
+填入 MarkItDown MCP 的 OCI 镜像字段。
+
+随后跑真实生产业务链：
+
+```bash
+AITEAM_MARKITDOWN_TEST_IMAGE='localhost/aiteam/markitdown-mcp@sha256:...' \
+  npm run test:stdio-sandbox:markitdown-real
+```
+
+它实际覆盖生产服务启动、管理员注册、MCP 注册/握手、任务演练、真 `.docx`
+上传、Mission 工作区 staging、Markdown 来源文档入库与 staging 文件清理。
+MarkItDown 官方工具虽接受 `http(s)` URI，本生产镜像固定 `--network=none`，
+只支持 AITeam 已 staging 的本地 `file:///workspace/...` 输入。
+
+镜像 digest 与架构绑定。本机 arm64 通过不等于目标 amd64 Linux 通过；目标
+Preview 必须重建/导入对应架构镜像，重新生成 digest 与 SBOM，并在精确
+service user + systemd unit 下重跑真实业务链和通用逃逸套件。运行时仍禁止拉取。
+
 > 更多业务/治理开关见 GUIDE.md「治理开关（环境变量）」。
 
 ---

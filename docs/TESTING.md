@@ -19,6 +19,12 @@
 >   在桌面/移动视口真实渲染 Focus Composer，提交一条隔离 Mock 任务并打开任务详情、复核清单和活动日志，把截图写到
 >   `output/ui-smoke/`。可用 `AITEAM_UI_OUTPUT=/tmp/aiteam-ui-smoke` 把截图隔离到临时目录；
 >   若 Chrome 不在默认路径，可设置 `AITEAM_UI_CHROME=/path/to/chrome`。
+> - **生产 local stdio（需 rootless Podman）**：`npm run test:markitdown-image`
+>   先校验固定基础镜像、哈希锁与非 root 配方；`npm run mcp:image:markitdown:build`
+>   生成实际镜像证据和 CycloneDX SBOM；再把输出的 digest 传给
+>   `AITEAM_MARKITDOWN_TEST_IMAGE=... npm run test:stdio-sandbox:markitdown-real`，
+>   验证 MCP 握手、任务演练和真 `.docx` 上传转来源文档。该证据按架构和主机
+>   分层，本机通过不能替代目标 Linux/systemd 验收。
 > - **智能层（需真实 key 人工执行）**：即本清单的 B2、C1-C4 的质量观察项、D1、G1/G3/G5
 >   的行为观察项——机器只能验证"流程对不对"，"干得好不好"要靠你按 F 段回报。
 
