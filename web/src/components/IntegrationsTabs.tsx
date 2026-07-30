@@ -29,6 +29,8 @@ interface McpServerInfo {
   env_keys?: string[];
   enabled: number;
   has_token: boolean;
+  runtime_available?: boolean;
+  runtime_blocked_code?: string | null;
 }
 
 interface TaskTestState {
@@ -69,6 +71,7 @@ export function McpTab({ onOpenTask }: { onOpenTask?: (taskId: string) => void }
   const [taskTestResult, setTaskTestResult] = useState<Record<string, TaskTestState>>({});
   const [taskTestBusy, setTaskTestBusy] = useState<Record<string, boolean>>({});
   const [presets, setPresets] = useState<McpPreset[]>([]);
+  const [stdioAvailable, setStdioAvailable] = useState(true);
   const [showCatalog, setShowCatalog] = useState(false);
 
   const load = () =>
@@ -80,12 +83,20 @@ export function McpTab({ onOpenTask }: { onOpenTask?: (taskId: string) => void }
     void load();
     fetch(`${API_BASE}/registry`)
       .then((r) => r.json())
-      .then((d) => setPresets(d.mcp ?? []))
+      .then((d) => {
+        setPresets(d.mcp ?? []);
+        setStdioAvailable(d.runtime?.stdio_available !== false);
+      })
       .catch(() => undefined);
   }, []);
 
   /** 一键预填：把预设填进下方添加表单（仍需 admin 确认/补 token，且 stdio 需宿主先按 install 装好依赖）。 */
   function prefill(p: McpPreset) {
+    if (p.runtime_available === false) {
+      setError("生产环境未配置独立 stdio 沙箱运行器，本地 MCP 暂不可用。");
+      setShowCatalog(false);
+      return;
+    }
     setName(p.key);
     setKind(p.kind);
     setUrl(p.url ?? "");
@@ -179,7 +190,12 @@ export function McpTab({ onOpenTask }: { onOpenTask?: (taskId: string) => void }
       <div className="text-[12.5px] leading-relaxed text-ink-2">
         接入 <span className="font-medium">MCP server</span> 后，其工具会自动注入所有 AI
         同事的工作循环（工具名带 <code className="rounded bg-sel px-1 font-mono text-[11px]">mcp__</code> 前缀）。
-        支持远程 HTTP 端点（可带 Bearer 认证）与本地 stdio 命令（如 <code className="rounded bg-sel px-1 font-mono text-[11px]">npx -y @modelcontextprotocol/server-filesystem /data</code>）。
+        支持远程 HTTP 端点（可带 Bearer 认证）
+        {stdioAvailable ? (
+          <>与开发环境本地 stdio 命令（如 <code className="rounded bg-sel px-1 font-mono text-[11px]">npx -y @modelcontextprotocol/server-filesystem /data</code>）</>
+        ) : (
+          <>；当前生产运行时在独立沙箱落地前已禁用本地 stdio</>
+        )}。
         高风险动作仍受审批门约束。
       </div>
 
@@ -209,9 +225,15 @@ export function McpTab({ onOpenTask }: { onOpenTask?: (taskId: string) => void }
                     <span className={`rounded px-1 text-[10px] ${p.safety === "local" ? "bg-sel text-ink-3" : "bg-accent-soft text-ink-2"}`}>
                       {SAFETY_LABEL[p.safety]}
                     </span>
+                    {p.runtime_available === false && (
+                      <span className="rounded bg-red-50 px-1 text-[10px] text-red-600">
+                        生产禁用
+                      </span>
+                    )}
                     <button
                       onClick={() => prefill(p)}
-                      className="ml-auto rounded border border-accent/50 px-2 py-0.5 text-[11.5px] text-accent hover:bg-accent-soft"
+                      disabled={p.runtime_available === false}
+                      className="ml-auto rounded border border-accent/50 px-2 py-0.5 text-[11.5px] text-accent hover:bg-accent-soft disabled:cursor-not-allowed disabled:opacity-40"
                     >
                       预填
                     </button>
@@ -230,7 +252,13 @@ export function McpTab({ onOpenTask }: { onOpenTask?: (taskId: string) => void }
           {servers.map((s) => (
             <div key={s.id} className="rounded-lg border border-line px-3 py-2 text-[13px]">
               <div className="flex items-center gap-2">
-                <input type="checkbox" checked={Boolean(s.enabled)} onChange={() => void toggle(s)} title="启用/停用" />
+                <input
+                  type="checkbox"
+                  checked={Boolean(s.enabled)}
+                  onChange={() => void toggle(s)}
+                  disabled={s.runtime_available === false}
+                  title={s.runtime_available === false ? "生产运行时已禁用 stdio" : "启用/停用"}
+                />
                 <span className="font-medium">{s.name}</span>
                 <span className="rounded bg-sel px-1 font-mono text-[10px] text-ink-3">{s.kind}</span>
                 {s.safety && s.safety !== "local" && (
@@ -244,15 +272,24 @@ export function McpTab({ onOpenTask }: { onOpenTask?: (taskId: string) => void }
                 {s.env_keys && s.env_keys.length > 0 && (
                   <span className="rounded bg-sel px-1 text-[10px] text-ink-3" title={`已设环境变量：${s.env_keys.join(", ")}`}>🔑{s.env_keys.length}</span>
                 )}
+                {s.runtime_available === false && (
+                  <span className="rounded bg-red-50 px-1 text-[10px] text-red-600">
+                    生产禁用
+                  </span>
+                )}
                 <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-3">
                   {s.kind === "stdio" ? `${s.command} ${JSON.parse(s.args_json || "[]").join(" ")}` : s.url}
                 </span>
-                <button onClick={() => void test(s)} className="rounded px-1.5 text-[12px] text-ink-2 hover:bg-sel">
+                <button
+                  onClick={() => void test(s)}
+                  disabled={s.runtime_available === false}
+                  className="rounded px-1.5 text-[12px] text-ink-2 hover:bg-sel disabled:cursor-not-allowed disabled:opacity-40"
+                >
                   测试
                 </button>
                 <button
                   onClick={() => void runTaskTest(s)}
-                  disabled={Boolean(taskTestBusy[s.id])}
+                  disabled={Boolean(taskTestBusy[s.id]) || s.runtime_available === false}
                   className="rounded px-1.5 text-[12px] text-ink-2 hover:bg-sel disabled:opacity-40"
                   title="创建一条 MCP 能力演练任务，记录工具、交付、验收事件；markitdown 会生成来源文档"
                 >
@@ -294,7 +331,8 @@ export function McpTab({ onOpenTask }: { onOpenTask?: (taskId: string) => void }
           <button
             key={k}
             onClick={() => setKind(k)}
-            className={`rounded-lg border px-3 py-1.5 text-[12.5px] ${kind === k ? "border-accent bg-accent-soft text-ink" : "border-line text-ink-2"}`}
+            disabled={k === "stdio" && !stdioAvailable}
+            className={`rounded-lg border px-3 py-1.5 text-[12.5px] disabled:cursor-not-allowed disabled:opacity-40 ${kind === k ? "border-accent bg-accent-soft text-ink" : "border-line text-ink-2"}`}
           >
             {k === "http" ? "远程 HTTP" : "本地 stdio"}
           </button>
@@ -332,7 +370,7 @@ export function McpTab({ onOpenTask }: { onOpenTask?: (taskId: string) => void }
       {error && <div className="mt-2 text-[12px] text-red-500">{error}</div>}
       <button
         onClick={() => void add()}
-        disabled={!name.trim() || busy}
+        disabled={!name.trim() || busy || (kind === "stdio" && !stdioAvailable)}
         className="mt-4 w-full rounded-lg bg-accent py-2 text-[13.5px] font-medium text-white disabled:opacity-40"
       >
         添加 MCP server

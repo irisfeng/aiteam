@@ -133,8 +133,9 @@ AI 之间也会互相 `@` 接力讨论（链深限制防雪崩）。悬浮消息
    - URL：`https://mcp.tavily.com/mcp/?tavilyApiKey=tvly-你的key`（以 Tavily 控制台展示的为准）
 3. 点「测试」确认返回工具数 → 完成。所有同事获得 `mcp__tavily__*` 搜索/抓取工具。
 
-**零依赖备选：文件系统（本地 stdio）** —— 让同事能读写你指定目录里的文件
-（喂材料、产出落盘）：
+**开发环境备选：文件系统（本地 stdio）** —— 让同事能读写你指定目录里的文件
+（喂材料、产出落盘）。生产环境在独立沙箱 runner 落地前会 fail-closed 拒绝
+所有 stdio MCP，不能把下面的开发配置直接用于 Preview/Production：
 
 ```
 名称：files

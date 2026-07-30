@@ -22,6 +22,40 @@ interface Connection {
 const connections = new Map<string, Connection>(); // serverId -> 连接（懒建立）
 const failed = new Map<string, number>(); // serverId -> 失败时间（5 分钟内不重试）
 
+export const STDIO_PRODUCTION_DISABLED_CODE =
+  "MCP_STDIO_PRODUCTION_DISABLED";
+
+export function stdioRuntimeAllowed(kind: McpServer["kind"]): boolean {
+  return kind !== "stdio" || process.env.NODE_ENV !== "production";
+}
+
+/**
+ * 生产进程在没有独立 OS/container sandbox runner 前禁止派生 stdio MCP。
+ *
+ * command basename 白名单不能约束 node -e / python -c / npx package 等参数，
+ * cwd 也不是文件系统边界；审批只表达用户意图，不能代替进程隔离。因此生产
+ * 必须在唯一真实 spawn 边界 fail-closed。开发/测试仍保留 stdio 便于本地验收。
+ */
+export function assertStdioServerRuntimeAllowed(server: McpServer): void {
+  if (!stdioRuntimeAllowed(server.kind)) {
+    throw new Error(
+      `${STDIO_PRODUCTION_DISABLED_CODE}: 生产环境未配置独立 stdio 沙箱运行器，拒绝启动本地 MCP 子进程`,
+    );
+  }
+}
+
+export function assertProductionStdioConfiguration(): void {
+  if (process.env.NODE_ENV !== "production") return;
+  const enabledStdioCount = listMcpServers().filter(
+    (server) => server.kind === "stdio" && Boolean(server.enabled),
+  ).length;
+  if (enabledStdioCount > 0) {
+    throw new Error(
+      `${STDIO_PRODUCTION_DISABLED_CODE}: 生产数据库中存在 ${enabledStdioCount} 个已启用的 stdio MCP；请在隔离环境中停用后再启动`,
+    );
+  }
+}
+
 /** MCP 连接/调用超时：防一个挂死的插件把整个 agent 运行（消息）永久卡在 streaming。 */
 const MCP_TIMEOUT_MS = Number(process.env.AITEAM_MCP_TIMEOUT_MS ?? 45000);
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
@@ -36,11 +70,10 @@ function sanitizeName(s: string): string {
 }
 
 /**
- * stdio MCP 启动命令白名单：stdio 插件本质是"以服务进程身份跑任意子进程"，不设白名单就是
- * 任意命令执行面（VPS 多用户下即提权通道）。默认覆盖 registry 全部预设所需的运行器；
- * 自部署要跑别的命令用 AITEAM_MCP_STDIO_ALLOW（逗号分隔）扩展，而不是放开校验。
- * 按 basename 匹配（容许绝对路径如 /usr/bin/python3；Windows 去 .exe），不匹配参数——
- * 参数注入（如 npx 装任意包）由 safety=exec 审批门兜底，白名单只收窄"能被启动的程序"。
+ * 开发/测试 stdio MCP 启动命令白名单。它只收窄误配置面，不是进程沙箱：
+ * node -e / python -c / npx package 仍可通过参数执行代码。生产因此由上面的
+ * fail-closed 门完全禁用 stdio，AITEAM_MCP_STDIO_ALLOW 不能改变该结论。
+ * 按 basename 匹配（容许绝对路径如 /usr/bin/python3；Windows 去 .exe）。
  */
 const STDIO_ALLOWED_DEFAULT = ["npx", "uvx", "uv", "node", "python", "python3", "markitdown-mcp"];
 export function stdioAllowedCommands(): string[] {
@@ -63,6 +96,7 @@ export function mcpToolName(serverName: string, tool: string): string {
 async function connect(server: McpServer): Promise<Connection> {
   const client = new Client({ name: "aiteam", version: "1.0.0" });
   if (server.kind === "stdio") {
+    assertStdioServerRuntimeAllowed(server);
     // 二次防御：路由层建档时已校验，但存量行/直接写库的行也必须在启动点被拦下
     if (!stdioCommandAllowed(server.command)) {
       throw new Error(
@@ -168,7 +202,7 @@ export function mcpToolPrefixReady(prefix: string): boolean {
   if (!m) return false;
   const key = m[1];
   const server = listMcpServers().find((s) => Boolean(s.enabled) && sanitizeName(s.name) === key);
-  if (!server) return false;
+  if (!server || !stdioRuntimeAllowed(server.kind)) return false;
   const conn = connections.get(server.id);
   if (!conn) return true; // 懒连接：启用即视为就绪
   const wildcard = prefix.endsWith("*");
@@ -180,7 +214,14 @@ export function mcpToolPrefixReady(prefix: string): boolean {
 export function mcpServerForTool(name: string): McpServer | null {
   const mt = name.match(/^mcp__(.+?)__(.+)$/);
   if (!mt) return null;
-  return listMcpServers().find((s) => sanitizeName(s.name) === mt[1] && Boolean(s.enabled)) ?? null;
+  return (
+    listMcpServers().find(
+      (server) =>
+        sanitizeName(server.name) === mt[1] &&
+        Boolean(server.enabled) &&
+        stdioRuntimeAllowed(server.kind),
+    ) ?? null
+  );
 }
 
 /**

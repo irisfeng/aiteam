@@ -198,6 +198,8 @@ export interface McpPreset {
   install: string;
   phase: "P1-install" | "P1" | "P2";
   env_keys?: string[];
+  runtime_available?: boolean;
+  runtime_blocked_code?: string | null;
 }
 export interface AgentStatus {
   agent_id: string;

@@ -48,6 +48,7 @@ import {
   createVerdict,
   listVerdictsForTask,
   qualitySummary,
+  type McpServer,
 } from "./db.js";
 import { broadcast } from "./bus.js";
 import { requireAdmin, type AuthedRequest } from "./auth.js";
@@ -56,7 +57,17 @@ import { seedForOwner } from "./seed.js";
 import { AGENT_TEMPLATES, getTemplate } from "./agents/templates.js";
 import multer from "multer";
 import { withOwner, ownerFromUserId } from "./ownerScope.js";
-import { dropConnection, testMcpServer, callMcpTool, mcpToolPrefixReady, mcpToolName, stdioAllowedCommands, stdioCommandAllowed } from "./agents/mcp.js";
+import {
+  STDIO_PRODUCTION_DISABLED_CODE,
+  callMcpTool,
+  dropConnection,
+  mcpToolName,
+  mcpToolPrefixReady,
+  stdioAllowedCommands,
+  stdioCommandAllowed,
+  stdioRuntimeAllowed,
+  testMcpServer,
+} from "./agents/mcp.js";
 import { UPLOAD_MAX_BYTES, TEXT_EXTS, DOC_EXTS, extOf, withTempFile, persistTemplateBinary, readTemplateBinary, removeTemplateBinary } from "./uploads.js";
 import { parseTemplate, applyTemplateEdits, type TemplateEdit, type ImageEdit } from "./pptx-template.js";
 import {
@@ -251,6 +262,30 @@ function emitTaskEvent(input: Parameters<typeof createTaskEvent>[0]) {
   return event;
 }
 
+function runtimeMcpPresetRegistry() {
+  return MCP_REGISTRY.map((preset) => {
+    const runtimeAvailable = stdioRuntimeAllowed(preset.kind);
+    return {
+      ...preset,
+      runtime_available: runtimeAvailable,
+      runtime_blocked_code: runtimeAvailable
+        ? null
+        : STDIO_PRODUCTION_DISABLED_CODE,
+    };
+  });
+}
+
+function runtimeMcpServer(server: McpServer) {
+  const runtimeAvailable = stdioRuntimeAllowed(server.kind);
+  return {
+    ...sanitizeMcpServer(server),
+    runtime_available: runtimeAvailable,
+    runtime_blocked_code: runtimeAvailable
+      ? null
+      : STDIO_PRODUCTION_DISABLED_CODE,
+  };
+}
+
 api.get("/bootstrap", async (req, res) => {
   seedForOwner(); // 首次进入：为当前用户播种私有工作区（幂等）
   const userId = (req as AuthedRequest).userId;
@@ -274,14 +309,34 @@ api.get("/bootstrap", async (req, res) => {
     documents: listDocuments(),
     projects: listProjects(),
     skills: listSkills(),
-    mcp_servers: listMcpServers().map(sanitizeMcpServer),
+    mcp_servers: listMcpServers().map(runtimeMcpServer),
     image_provider: sanitizeImageProvider(getImageProvider()),
-    registry: { mcp: MCP_REGISTRY, skills: SKILL_PACK_REGISTRY }, // 静态预设目录，无实例 token
+    registry: {
+      mcp: runtimeMcpPresetRegistry(),
+      skills: SKILL_PACK_REGISTRY,
+      runtime: {
+        stdio_available: stdioRuntimeAllowed("stdio"),
+        stdio_blocked_code: stdioRuntimeAllowed("stdio")
+          ? null
+          : STDIO_PRODUCTION_DISABLED_CODE,
+      },
+    }, // 静态预设目录，无实例 token
   });
 });
 
 /** 预设目录（Skill/MCP 一键浏览推荐）：静态、无 token，member 可读；安装走 /mcp-servers（requireAdmin）。 */
-api.get("/registry", (_req, res) => res.json({ mcp: MCP_REGISTRY, skills: SKILL_PACK_REGISTRY }));
+api.get("/registry", (_req, res) =>
+  res.json({
+    mcp: runtimeMcpPresetRegistry(),
+    skills: SKILL_PACK_REGISTRY,
+    runtime: {
+      stdio_available: stdioRuntimeAllowed("stdio"),
+      stdio_blocked_code: stdioRuntimeAllowed("stdio")
+        ? null
+        : STDIO_PRODUCTION_DISABLED_CODE,
+    },
+  }),
+);
 
 api.get("/channels/:id/messages", (req, res) => {
   const channel = getChannel(req.params.id);
@@ -364,12 +419,20 @@ api.post("/agents", (req, res) => {
   }
 });
 
-api.get("/mcp-servers", (_req, res) => res.json(listMcpServers().map(sanitizeMcpServer)));
+api.get("/mcp-servers", (_req, res) =>
+  res.json(listMcpServers().map(runtimeMcpServer)),
+);
 
 api.post("/mcp-servers", requireAdmin, (req, res) => {
   const { name, kind, url, auth_token, command, args, safety, env } = req.body ?? {};
   if (!name) return res.status(400).json({ error: "name required" });
   if (kind === "stdio" && !command) return res.status(400).json({ error: "command required for stdio" });
+  if (!stdioRuntimeAllowed(kind === "stdio" ? "stdio" : "http")) {
+    return res.status(409).json({
+      error: "生产环境未配置独立 stdio 沙箱运行器，不能创建本地 MCP",
+      code: STDIO_PRODUCTION_DISABLED_CODE,
+    });
+  }
   // stdio = 以服务进程身份起子进程，命令必须过白名单（连接层还有二次防御，这里提前给可读报错）
   if (kind === "stdio" && !stdioCommandAllowed(String(command))) {
     return res.status(400).json({
@@ -400,7 +463,15 @@ api.post("/mcp-servers", requireAdmin, (req, res) => {
 });
 
 api.post("/mcp-servers/:id/toggle", requireAdmin, (req, res) => {
-  const server = setMcpServerEnabled(req.params.id, Boolean(req.body?.enabled));
+  const current = getMcpServer(req.params.id);
+  if (!current) return res.status(404).json({ error: "not found" });
+  if (Boolean(req.body?.enabled) && !stdioRuntimeAllowed(current.kind)) {
+    return res.status(409).json({
+      error: "生产环境未配置独立 stdio 沙箱运行器，不能启用本地 MCP",
+      code: STDIO_PRODUCTION_DISABLED_CODE,
+    });
+  }
+  const server = setMcpServerEnabled(current.id, Boolean(req.body?.enabled));
   if (!server) return res.status(404).json({ error: "not found" });
   if (!server.enabled) dropConnection(server.id);
   res.json(sanitizeMcpServer(server));
@@ -411,6 +482,12 @@ api.post("/mcp-servers/:id/test", requireAdmin, (req, res) => {
   // 与 create/toggle/delete 同级别风险，不能只 requireUser 让普通成员触发子进程派生。
   const server = getMcpServer(req.params.id);
   if (!server) return res.status(404).json({ error: "not found" });
+  if (!stdioRuntimeAllowed(server.kind)) {
+    return res.status(409).json({
+      error: "生产环境未配置独立 stdio 沙箱运行器，不能测试本地 MCP",
+      code: STDIO_PRODUCTION_DISABLED_CODE,
+    });
+  }
   testMcpServer(server)
     .then((count) => res.json({ ok: true, tools: count }))
     .catch((err) => res.status(502).json({ error: String(err?.message ?? err) }));
@@ -419,6 +496,12 @@ api.post("/mcp-servers/:id/test", requireAdmin, (req, res) => {
 api.post("/mcp-servers/:id/task-test", requireAdmin, async (req, res) => {
   const server = getMcpServer(req.params.id);
   if (!server) return res.status(404).json({ error: "not found" });
+  if (!stdioRuntimeAllowed(server.kind)) {
+    return res.status(409).json({
+      error: "生产环境未配置独立 stdio 沙箱运行器，不能运行本地 MCP 演练",
+      code: STDIO_PRODUCTION_DISABLED_CODE,
+    });
+  }
   const startedAt = Date.now();
   try {
     let channel = req.body?.channel_id ? getChannel(String(req.body.channel_id)) : undefined;

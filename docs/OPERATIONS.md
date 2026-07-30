@@ -260,7 +260,7 @@ npm start
 | 任务长时间停在 `doing` | 富方案（检索 + 配图 + 强模型验收 + 返工）端到端常 3–5 分钟，属正常；看 audit 进度，真卡死再排查 |
 | audit 出现「联网工具适配…400 Failed to deserialize…降级为仅搜索」 | 国内端点不接受官方 web_search 工具组合，引擎已自动降级用检索插件，**非致命** |
 | 智谱 `web_search_prime` 报 1309 | GLM Coding 套餐过期 / 额度问题 |
-| MCP 首次调用慢（~20–30s） | stdio MCP 冷启动，之后走缓存连接 |
+| 开发环境 MCP 首次调用慢（~20–30s） | stdio MCP 冷启动，之后走缓存连接；生产候选已禁用 stdio |
 | 导出的 PPT 中文在别的电脑变样 | .pptx 写的是字体名；默认 `PingFang SC` 适配 Mac，面向 Windows/WPS 客户设 `AITEAM_PPTX_FONT=Microsoft YaHei` 后重启 |
 
 ---
@@ -297,7 +297,15 @@ npm start
 | `AITEAM_IMAGES_PER_RUN` | `2` | 单次运行配图张数上限（工具每次只采用 1 张；Seedream 5.0 Pro 默认单图） |
 | `AITEAM_UPLOAD_MAX_BYTES` | `20971520`（20MB） | 上传单文件大小上限 |
 | `AITEAM_SEARCH_DEDUP` | `1`（开） | 跨插件检索去重；`0`=关 |
-| `AITEAM_MCP_STDIO_ALLOW` | 空 | stdio MCP 启动命令白名单扩展（逗号分隔）；默认仅允许 `npx/uvx/uv/node/python/python3/markitdown-mcp` |
+| `AITEAM_MCP_STDIO_ALLOW` | 空 | 仅开发/测试使用的 stdio 命令白名单扩展（逗号分隔）；生产在独立沙箱 runner 落地前一律拒绝 stdio，设置本变量也不能绕过 |
+
+> **生产 stdio fail-closed**：`NODE_ENV=production` 时，服务会在任何
+> `StdioClientTransport` 派生子进程前拒绝调用；如果数据库里已有启用的 stdio
+> MCP，服务会在监听端口前拒绝启动。管理员 API 也不能新建、启用、测试或演练
+> stdio MCP，HTTP MCP 不受影响。原因是 `node -e`、`python -c` 和 `npx <package>`
+> 可借参数绕过 basename 白名单，而 `cwd` 和人工审批都不是文件系统沙箱。
+> 首个生产/Preview 候选只使用 HTTP MCP；需要本地文档或代码工具时，必须先实现
+> 独立 OS/container runner、每 Mission 工作区和资源限额。
 
 > 更多业务/治理开关见 GUIDE.md「治理开关（环境变量）」。
 
