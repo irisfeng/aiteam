@@ -263,6 +263,7 @@ export function createMission(
     return {
       outcome: "created",
       mission: transitionMission(mission, "failed", {
+        error_code: "MISSION_EXECUTION_FAILED",
         error:
           error instanceof Error
             ? error.message.slice(0, 500)
@@ -345,6 +346,7 @@ function reconcileMission(mission: Mission): Mission {
       return retryableMissionError(mission, "inspection", error);
     }
     return transitionMission(mission, "failed", {
+      error_code: "MISSION_EXECUTION_FAILED",
       error:
         error instanceof Error
           ? error.message.slice(0, 500)

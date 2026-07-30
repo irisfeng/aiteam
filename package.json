@@ -23,7 +23,7 @@
     "test": "npm run test:secrets && npm run test:credential-recovery && npm run test:stdio-guard && npm run test:stdio-sandbox && npm run test:markitdown-image && npm run test:preview-host && npm run test:mission-api && npm run test:coworker-authz && node scripts/regression.mjs",
     "test:secrets": "node scripts/secret-regression.mjs",
     "test:credential-recovery": "node scripts/credential-recovery-regression.mjs",
-    "test:mission-api": "npm run build --workspace server && node scripts/mission-quality-regression.mjs && node scripts/mission-activity-metadata-regression.mjs && node scripts/mission-contract-regression.mjs && node scripts/mission-event-migration-regression.mjs && node scripts/mission-api-regression.mjs && node scripts/mission-admission-regression.mjs && node scripts/mission-restart-regression.mjs && node scripts/service-auth-rotation-regression.mjs",
+    "test:mission-api": "npm run build --workspace server && node scripts/mission-quality-regression.mjs && node scripts/mission-activity-metadata-regression.mjs && node scripts/mission-observability-regression.mjs && node scripts/mission-contract-regression.mjs && node scripts/mission-event-migration-regression.mjs && node scripts/mission-api-regression.mjs && node scripts/mission-admission-regression.mjs && node scripts/mission-restart-regression.mjs && node scripts/service-auth-rotation-regression.mjs",
     "test:coworker-authz": "npm run build --workspace server && node scripts/coworker-authz-regression.mjs",
     "test:stdio-guard": "npm run build --workspace server && node scripts/stdio-production-guard-regression.mjs",
     "test:stdio-sandbox": "npm run build --workspace server && node scripts/stdio-sandbox-runner-regression.mjs",

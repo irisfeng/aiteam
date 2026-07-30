@@ -14,6 +14,7 @@ import {
   listTaskEvents,
   listTasks,
   listVerdictsForTask,
+  readUsage,
   updateProject,
   updateTask,
   type Task,
@@ -27,6 +28,7 @@ import {
   missionActivityMetadata,
   type MissionStageKey,
 } from "./mission-activity.js";
+import { summarizeMissionObservability } from "./mission-observability.js";
 import { ownerFromUserId, withOwner } from "./ownerScope.js";
 import { seedForOwner } from "./seed.js";
 import type { Mission, MissionStatus } from "./missions.js";
@@ -412,6 +414,28 @@ export function inspectMissionExecution(mission: Mission): MissionExecutionState
       activityStage = "cancelled";
       activityAgentId = null;
     }
+    const missionTaskIds = new Set(tasks.map((task) => task.id));
+    const observability = summarizeMissionObservability({
+      missionCreatedAt: mission.created_at,
+      observedAt: Date.now(),
+      usageSamples: tasks.map((task) => {
+        const usage = readUsage(task.usage_json);
+        return {
+          inputTokens: usage.input,
+          outputTokens: usage.output,
+          cacheReadTokens: usage.cacheRead,
+          cacheCreationTokens: usage.cacheCreation,
+          billableTokens: usage.billable,
+        };
+      }),
+      approvalStatuses: listApprovals()
+        .filter(
+          (approval) =>
+            approval.kind === "network" &&
+            Boolean(approval.ref_id && missionTaskIds.has(approval.ref_id)),
+        )
+        .map((approval) => approval.status),
+    });
     const payload = {
       project_id: execution.project_id,
       task_ids: tasks.map((task) => task.id),
@@ -424,6 +448,7 @@ export function inspectMissionExecution(mission: Mission): MissionExecutionState
         latestFinalVerdict?.result === "revise"
           ? latestFinalVerdict.reasons.slice(0, 2000)
           : null,
+      observability,
       activity: missionActivityMetadata(
         activityStage,
         activityAgentId ? getAgent(activityAgentId)?.name : null,
@@ -451,7 +476,11 @@ export function inspectMissionExecution(mission: Mission): MissionExecutionState
     if (failedTask) {
       return {
         status: "failed",
-        payload: { ...payload, failed_task_id: failedTask.id },
+        payload: {
+          ...payload,
+          error_code: "MISSION_TASK_FAILED",
+          failed_task_id: failedTask.id,
+        },
       };
     }
     return { status: "running", payload };

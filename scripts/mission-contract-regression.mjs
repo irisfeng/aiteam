@@ -20,7 +20,7 @@ function assertIncludes(value, expected, label) {
   console.log(`✅ ${label}`);
 }
 
-assertIncludes(openapi, "version: 0.8.0", "OpenAPI publishes Mission API 0.8.0");
+assertIncludes(openapi, "version: 0.9.0", "OpenAPI publishes Mission API 0.9.0");
 assertIncludes(
   openapi,
   "/missions/{missionId}/approvals:",
@@ -82,5 +82,37 @@ for (const field of ["activity", "stage", "actor", "role", "label"]) {
     openapi,
     field,
     `OpenAPI publishes Mission activity metadata field ${field}`,
+  );
+}
+
+for (const field of [
+  "observability",
+  "latency_ms",
+  "input_tokens",
+  "output_tokens",
+  "cache_read_tokens",
+  "cache_creation_tokens",
+  "billable_tokens",
+  "currency_estimate",
+  "currency_status",
+  "network_approval_decisions",
+  "error_code",
+]) {
+  assertIncludes(
+    openapi,
+    field,
+    `OpenAPI publishes Mission observability field ${field}`,
+  );
+}
+
+for (const code of [
+  "MISSION_EXECUTION_FAILED",
+  "MISSION_TASK_FAILED",
+  "MISSION_TIMEOUT",
+]) {
+  assertIncludes(
+    openapi,
+    `- ${code}`,
+    `OpenAPI publishes Mission failure reason ${code}`,
   );
 }

@@ -23,6 +23,11 @@ Coworker 负责组织、人员、任务、审批和责任归属；AITeam 负责�
 - 创建请求必须带 `Idempotency-Key`。同组织、同 key、同请求返回原 Mission（200）；同 key 不同请求返回 409。
 - Mission 与首条 `mission.created` 事件在一个 SQLite 事务内写入。
 - Coworker 通过 `after` 游标增量拉取事件；序列号从 1 开始、在单个 Mission 内单调递增。
+- Mission API `0.9.0` 在可重放事件中提供脱敏可观测性：执行延迟、
+  input/output/cache/billable token 汇总、联网审批决策数，以及稳定的
+  `MISSION_EXECUTION_FAILED`、`MISSION_TASK_FAILED`、`MISSION_TIMEOUT`
+  失败码。成本单位固定为 `billable_tokens`；没有供应商账单时货币估算
+  明确为 unavailable，不得伪造金额。
 
 ## 初始范围
 

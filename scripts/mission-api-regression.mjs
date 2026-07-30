@@ -900,6 +900,37 @@ try {
     "Mock completion is not presented as a passed quality review",
   );
   assertEqual(
+    Number.isSafeInteger(completedEvent?.payload?.observability?.latency_ms) &&
+      completedEvent.payload.observability.latency_ms >= 0,
+    true,
+    "Mission completion publishes a bounded execution latency",
+  );
+  assertEqual(
+    completedEvent?.payload?.observability?.usage?.billable_tokens,
+    0,
+    "Mock Mission completion publishes its zero billable-token cost",
+  );
+  assertEqual(
+    completedEvent?.payload?.observability?.cost?.unit,
+    "billable_tokens",
+    "Mission completion uses the native billable-token cost unit",
+  );
+  assertEqual(
+    completedEvent?.payload?.observability?.cost?.amount,
+    completedEvent?.payload?.observability?.usage?.billable_tokens,
+    "Mission cost amount is bound to the persisted usage total",
+  );
+  assertEqual(
+    completedEvent?.payload?.observability?.cost?.currency_status,
+    "unavailable",
+    "Mission completion does not invent an unprovable currency estimate",
+  );
+  assertEqual(
+    completedEvent?.payload?.observability?.network_approval_decisions,
+    0,
+    "Mission completion publishes its human network-approval interventions",
+  );
+  assertEqual(
     completedEvent?.payload?.activity?.stage?.key,
     "delivery",
     "Mission completion publishes the delivery stage",

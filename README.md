@@ -107,6 +107,9 @@ Coworker 融合采用“控制面 + 执行面”边界：AITeam 把研究 Missio
 接口契约见 [`docs/openapi-mission-v1.yaml`](docs/openapi-mission-v1.yaml)，
 执行与恢复决策见
 [`docs/ADR-coworker-mission-execution.md`](docs/ADR-coworker-mission-execution.md)。
+Mission API `0.9.0` 的可重放活动会携带脱敏的执行延迟、token 用量、
+以 `billable_tokens` 为单位的成本观测、联网审批决策数和稳定失败码。
+它不暴露内部任务标识，也不在缺少供应商账单时推算货币成本。
 
 ### 模型与运行
 | 变量 | 默认 | 说明 |
