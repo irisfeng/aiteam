@@ -69,11 +69,23 @@ export async function requireAdmin(
   next: NextFunction,
 ): Promise<void> {
   if (AUTH_MODE === "coworker") {
-    const coworkerMe = await fetchCoworkerMe(req.userId, req.headers.cookie);
-    if (!coworkerMeIsAdmin(coworkerMe)) {
-      res.status(403).json({ error: "需要 Coworker 部门管理员或超级管理员权限" });
-      return;
+    try {
+      const coworkerMe = await fetchCoworkerMe(
+        req.userId,
+        req.headers.cookie,
+        { useCache: false },
+      );
+      if (coworkerMeIsAdmin(coworkerMe)) {
+        next();
+        return;
+      }
+    } catch {
+      // Authorization lookups fail closed, including unexpected parsing errors.
     }
+    if (!res.headersSent) {
+      res.status(403).json({ error: "需要 Coworker 部门管理员或超级管理员权限" });
+    }
+    return;
   } else {
     const u = req.userId ? getUserById(req.userId) : undefined;
     if (!u || u.role !== "admin") {

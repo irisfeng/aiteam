@@ -38,14 +38,14 @@ export function classifyFinalMissionDelivery(input: {
   ) {
     return null;
   }
-  if (input.taskStatus === "done") {
-    return { status: "completed", qualityGate: "human_override" };
-  }
   if (input.mock) {
     return { status: "completed", qualityGate: "mock_skipped" };
   }
   if (input.latestVerdict === "pass") {
     return { status: "completed", qualityGate: "passed" };
+  }
+  if (input.taskStatus === "done") {
+    return { status: "completed", qualityGate: "human_override" };
   }
   return {
     status: "blocked",

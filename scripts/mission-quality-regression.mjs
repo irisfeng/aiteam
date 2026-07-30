@@ -38,6 +38,17 @@ assertEqual(
   "completed",
   "A final report that passed machine review completes the Mission",
 );
+const closedPassedReview = classifyFinalMissionDelivery({
+  taskStatus: "done",
+  hasFinalArtifact: true,
+  latestVerdict: "pass",
+  mock: false,
+});
+assertEqual(
+  closedPassedReview?.qualityGate,
+  "passed",
+  "Closing a machine-passed report preserves its passed quality gate",
+);
 
 const humanOverride = classifyFinalMissionDelivery({
   taskStatus: "done",
@@ -71,6 +82,17 @@ assertEqual(
   mockDelivery?.qualityGate,
   "mock_skipped",
   "Mock completion is explicitly distinguished from a passed review",
+);
+const closedMockDelivery = classifyFinalMissionDelivery({
+  taskStatus: "done",
+  hasFinalArtifact: true,
+  latestVerdict: "pass",
+  mock: true,
+});
+assertEqual(
+  closedMockDelivery?.qualityGate,
+  "mock_skipped",
+  "Closing a Mock report does not relabel it as a verified pass",
 );
 
 const missingArtifact = classifyFinalMissionDelivery({

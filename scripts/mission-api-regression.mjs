@@ -312,7 +312,11 @@ try {
   );
   assertEqual(
     completedEvent?.payload?.final_artifact_id,
-    artifactsBody.data?.at(-1)?.id,
+    artifactsBody.data?.find(
+      (artifact) =>
+        artifact.kind === "report" &&
+        artifact.task_id === completedEvent?.payload?.final_task_id,
+    )?.id,
     "The completion event points to the final report artifact",
   );
   assertEqual(

@@ -41,3 +41,11 @@ assertEqual(
   true,
   "A Coworker superadministrator can use AITeam admin routes",
 );
+
+assertEqual(
+  coworkerMeIsAdmin({
+    ...baseUser,
+  }),
+  false,
+  "A malformed Coworker profile without departments fails closed",
+);

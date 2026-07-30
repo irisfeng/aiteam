@@ -4,6 +4,7 @@ import { db } from "./db.js";
 import {
   ensureMissionExecution,
   inspectMissionExecution,
+  MissionExecutionDomainError,
 } from "./mission-execution.js";
 
 export type MissionStatus =
@@ -51,6 +52,19 @@ export type CreateMissionResult =
 
 function requestHash(input: CreateMissionInput): string {
   return createHash("sha256").update(JSON.stringify(input)).digest("hex");
+}
+
+function retryableMissionError(
+  mission: Mission,
+  stage: "setup" | "inspection",
+  error: unknown,
+): Mission {
+  const message =
+    error instanceof Error ? error.message.slice(0, 500) : "unknown error";
+  console.warn(
+    `[aiteam] Mission ${mission.id} ${stage} failed transiently; reconciliation will retry: ${message}`,
+  );
+  return mission;
 }
 
 export function createMission(
@@ -114,6 +128,12 @@ export function createMission(
     ensureMissionExecution(mission);
     return { outcome: "created", mission: reconcileMission(mission) };
   } catch (error) {
+    if (!(error instanceof MissionExecutionDomainError)) {
+      return {
+        outcome: "created",
+        mission: retryableMissionError(mission, "setup", error),
+      };
+    }
     return {
       outcome: "created",
       mission: transitionMission(mission, "failed", {
@@ -179,6 +199,9 @@ function reconcileMission(mission: Mission): Mission {
     const execution = inspectMissionExecution(mission);
     return transitionMission(mission, execution.status, execution.payload);
   } catch (error) {
+    if (!(error instanceof MissionExecutionDomainError)) {
+      return retryableMissionError(mission, "inspection", error);
+    }
     return transitionMission(mission, "failed", {
       error:
         error instanceof Error

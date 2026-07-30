@@ -46,14 +46,26 @@ export interface MissionArtifact {
   updated_at: number;
 }
 
-function executionFor(missionId: string): MissionExecution | undefined {
+export class MissionExecutionDomainError extends Error {
+  override name = "MissionExecutionDomainError";
+}
+
+export class MissionExecutionInfrastructureError extends Error {
+  override name = "MissionExecutionInfrastructureError";
+}
+
+function executionFor(
+  missionId: string,
+  organizationId: string,
+): MissionExecution | undefined {
   return db
     .prepare(
       `SELECT mission_id, organization_id, owner_id, project_id,
               final_task_id, task_ids_json, created_at
-       FROM mission_executions WHERE mission_id = ?`,
+       FROM mission_executions
+       WHERE mission_id = ? AND organization_id = ?`,
     )
-    .get(missionId) as MissionExecution | undefined;
+    .get(missionId, organizationId) as MissionExecution | undefined;
 }
 
 function pickAgent(
@@ -71,7 +83,7 @@ function pickAgent(
 }
 
 export function ensureMissionExecution(mission: Mission): MissionExecution {
-  const existing = executionFor(mission.id);
+  const existing = executionFor(mission.id, mission.organization_id);
   if (existing) return existing;
 
   const ownerId = ownerFromUserId(mission.requested_by);
@@ -82,7 +94,9 @@ export function ensureMissionExecution(mission: Mission): MissionExecution {
       listChannels().find((candidate) => candidate.kind === "channel") ??
       listChannels()[0];
     if (!channel || agents.length === 0) {
-      throw new Error("AITeam execution workspace is unavailable");
+      throw new MissionExecutionInfrastructureError(
+        "AITeam execution workspace is unavailable",
+      );
     }
     const lead = pickAgent(agents, [/产品|PM|经理|规划|product/i], 0);
     const researcher = pickAgent(
@@ -151,6 +165,13 @@ export function ensureMissionExecution(mission: Mission): MissionExecution {
     ];
 
     const initialized = db.transaction(() => {
+      const concurrentExisting = executionFor(
+        mission.id,
+        mission.organization_id,
+      );
+      if (concurrentExisting) {
+        return { execution: concurrentExisting, tasks: [] as Task[] };
+      }
       const project = createProject({
         channel_id: channel.id,
         lead_agent_id: lead.id,
@@ -199,7 +220,11 @@ export function ensureMissionExecution(mission: Mission): MissionExecution {
         return task;
       });
       const finalTask = tasks.at(-1);
-      if (!finalTask) throw new Error("AITeam failed to create Mission tasks");
+      if (!finalTask) {
+        throw new MissionExecutionDomainError(
+          "AITeam failed to create Mission tasks",
+        );
+      }
       const execution: MissionExecution = {
         mission_id: mission.id,
         organization_id: mission.organization_id,
@@ -219,7 +244,7 @@ export function ensureMissionExecution(mission: Mission): MissionExecution {
         )`,
       ).run(execution);
       return { execution, tasks };
-    })();
+    }).immediate();
     for (const task of initialized.tasks) onTaskAssigned(task);
     return initialized.execution;
   });
@@ -238,6 +263,7 @@ function executionTasks(execution: MissionExecution): Task[] {
       .filter((task) => task.project_id === execution.project_id)
       .map((task) => [task.id, task]),
   );
+  if (taskIds.length === 0) return [...byId.values()];
   return taskIds
     .map((taskId) => byId.get(taskId))
     .filter((task): task is Task => Boolean(task));
