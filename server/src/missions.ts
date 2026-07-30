@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { nanoid } from "nanoid";
 import { db } from "./db.js";
 import {
+  cancelMissionExecution,
   ensureMissionExecution,
   inspectMissionExecution,
   MissionExecutionDomainError,
@@ -53,6 +54,11 @@ export type CreateMissionResult =
   | { outcome: "created"; mission: Mission }
   | { outcome: "replayed"; mission: Mission }
   | { outcome: "conflict"; mission: Mission };
+
+export type CancelMissionResult =
+  | { outcome: "cancelled"; mission: Mission }
+  | { outcome: "replayed"; mission: Mission }
+  | { outcome: "terminal"; mission: Mission };
 
 function requestHash(input: CreateMissionInput): string {
   return createHash("sha256").update(JSON.stringify(input)).digest("hex");
@@ -241,6 +247,26 @@ export function getMission(
      FROM missions WHERE id = ? AND organization_id = ?`,
   ).get(missionId, organizationId) as Mission | undefined;
   return mission ? reconcileMission(mission) : undefined;
+}
+
+export function cancelMission(
+  organizationId: string,
+  missionId: string,
+  input: { cancelledBy: string; reason: string },
+): CancelMissionResult | undefined {
+  const mission = getMission(organizationId, missionId);
+  if (!mission) return undefined;
+  if (mission.status === "cancelled") {
+    return { outcome: "replayed", mission };
+  }
+  if (mission.status === "completed" || mission.status === "failed") {
+    return { outcome: "terminal", mission };
+  }
+  const payload = cancelMissionExecution(mission, input);
+  return {
+    outcome: "cancelled",
+    mission: transitionMission(mission, "cancelled", payload),
+  };
 }
 
 export function listMissionEvents(

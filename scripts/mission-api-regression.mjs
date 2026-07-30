@@ -146,6 +146,140 @@ try {
   assertEqual(createMission.status, 201, "A valid service request creates a mission");
   const createdBody = await createMission.json();
 
+  const cancellableMission = await fetch(`${base}/missions`, {
+    method: "POST",
+    headers: {
+      ...missionHeaders,
+      "Idempotency-Key": "mission-cancel-alpha",
+    },
+    body: JSON.stringify({
+      ...missionBody,
+      title: "Mission that will be cancelled",
+    }),
+  });
+  assertEqual(
+    cancellableMission.status,
+    201,
+    "A cancellable Mission is created",
+  );
+  const cancellableBody = await cancellableMission.json();
+  const cancelMission = await fetch(
+    `${base}/missions/${cancellableBody.data.id}/cancel`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${serviceToken("org-alpha", [
+          "mission:create",
+          "mission:read",
+          "mission:cancel",
+        ])}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        cancelled_by: "user-123",
+        reason: "The requester no longer needs this report.",
+      }),
+    },
+  );
+  const cancelledBody = await cancelMission.json();
+  assertEqual(
+    cancelMission.status,
+    200,
+    "An authorized service request cancels an active Mission",
+  );
+  assertEqual(
+    cancelledBody.data?.status,
+    "cancelled",
+    "Mission cancellation returns the cancelled terminal state",
+  );
+  const replayCancel = await fetch(
+    `${base}/missions/${cancellableBody.data.id}/cancel`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${serviceToken("org-alpha", [
+          "mission:cancel",
+          "mission:read",
+        ])}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        cancelled_by: "user-123",
+        reason: "The requester no longer needs this report.",
+      }),
+    },
+  );
+  assertEqual(
+    replayCancel.status,
+    200,
+    "Repeating the same cancellation is idempotent",
+  );
+  const cancelledEvents = await fetch(
+    `${base}/missions/${cancellableBody.data.id}/events?after=0`,
+    {
+      headers: {
+        Authorization: `Bearer ${serviceToken("org-alpha")}`,
+      },
+    },
+  );
+  const cancelledEventsBody = await cancelledEvents.json();
+  const cancellationEvents = cancelledEventsBody.data?.filter(
+    (event) => event.type === "mission.cancelled",
+  );
+  assertEqual(
+    cancellationEvents?.length,
+    1,
+    "Repeated cancellation records exactly one Mission cancellation event",
+  );
+  assertEqual(
+    cancellationEvents?.[0]?.payload?.activity?.actor?.type,
+    "human",
+    "Mission cancellation identifies a human actor",
+  );
+  assertEqual(
+    cancellationEvents?.[0]?.payload?.activity?.actor?.role,
+    "requester",
+    "Mission cancellation attributes the action to a Coworker requester",
+  );
+  const readOnlyCancel = await fetch(
+    `${base}/missions/${cancellableBody.data.id}/cancel`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${serviceToken("org-alpha", ["mission:read"])}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        cancelled_by: "user-123",
+        reason: "This token must not be allowed to cancel.",
+      }),
+    },
+  );
+  assertEqual(
+    readOnlyCancel.status,
+    403,
+    "A read-only service token cannot cancel a Mission",
+  );
+  const crossOrganizationCancel = await fetch(
+    `${base}/missions/${cancellableBody.data.id}/cancel`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${serviceToken("org-beta", ["mission:cancel"])}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        cancelled_by: "user-456",
+        reason: "Another organization must not observe this Mission.",
+      }),
+    },
+  );
+  assertEqual(
+    crossOrganizationCancel.status,
+    404,
+    "Mission cancellation is hidden from another organization",
+  );
+
   let completedMission;
   const completionDeadline = Date.now() + 15_000;
   while (Date.now() < completionDeadline) {
@@ -170,6 +304,31 @@ try {
     completedMission?.status,
     "completed",
     "A research Mission reaches completed through the real task engine",
+  );
+  const completedCancel = await fetch(
+    `${base}/missions/${createdBody.data.id}/cancel`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${serviceToken("org-alpha", ["mission:cancel"])}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        cancelled_by: "user-123",
+        reason: "Completed delivery must remain immutable.",
+      }),
+    },
+  );
+  assertEqual(
+    completedCancel.status,
+    409,
+    "A completed Mission cannot be relabelled as cancelled",
+  );
+  const completedCancelBody = await completedCancel.json();
+  assertEqual(
+    completedCancelBody.error?.code,
+    "MISSION_TERMINAL",
+    "Terminal cancellation returns a stable machine error code",
   );
   const missionArtifacts = await fetch(
     `${base}/missions/${createdBody.data.id}/artifacts`,

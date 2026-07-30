@@ -1615,6 +1615,31 @@ export function invalidateNetworkApprovalsForTask(taskId: string): number {
 }
 
 /**
+ * Mission 取消时关闭任务上下文中的全部未结束审批。
+ * pending → rejected，approved+未消费 → consumed，防止取消后由旧审批恢复执行。
+ */
+export function invalidateApprovalsForTask(taskId: string): number {
+  const closedAt = now();
+  const result = db.prepare(`
+    UPDATE approvals
+    SET
+      status = CASE WHEN status = 'pending' THEN 'rejected' ELSE status END,
+      resolved_at = CASE WHEN status = 'pending' THEN ? ELSE resolved_at END,
+      consumed_at = CASE
+        WHEN status = 'approved' AND consumed_at IS NULL THEN ?
+        ELSE consumed_at
+      END
+    WHERE owner_id = ?
+      AND ref_id = ?
+      AND (
+        status = 'pending'
+        OR (status = 'approved' AND consumed_at IS NULL)
+      )
+  `).run(closedAt, closedAt, currentOwner(), taskId);
+  return result.changes;
+}
+
+/**
  * network MCP 审批的服务端签发点：审批插入和 doing→blocked 必须同一事务完成。
  * 任务已停止、改派、重复阻塞或状态已变化时不创建孤立审批。
  */

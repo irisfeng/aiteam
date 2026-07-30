@@ -1,5 +1,6 @@
 import { Router } from "express";
 import {
+  cancelMission,
   createMission,
   getMission,
   listMissionEvents,
@@ -100,6 +101,59 @@ missionRoutes.get("/:missionId", (request, res) => {
     });
   }
   return res.json({ data: mission });
+});
+
+missionRoutes.post("/:missionId/cancel", (request, res) => {
+  const req = request as ServiceRequest;
+  const claims = req.serviceClaims;
+  if (!claims?.scopes.includes("mission:cancel")) {
+    return res.status(403).json({
+      error: {
+        code: "MISSION_SCOPE_FORBIDDEN",
+        message: "The token does not allow mission cancellation",
+      },
+    });
+  }
+  const cancelledBy = String(req.body?.cancelled_by ?? "").trim();
+  const reason = String(req.body?.reason ?? "").trim();
+  if (
+    !cancelledBy ||
+    cancelledBy.length > 160 ||
+    reason.length < 3 ||
+    reason.length > 500
+  ) {
+    return res.status(400).json({
+      error: {
+        code: "MISSION_CANCEL_REQUEST_INVALID",
+        message: "The mission cancellation request is invalid",
+      },
+    });
+  }
+  const result = cancelMission(
+    claims.organizationId,
+    req.params.missionId,
+    {
+      cancelledBy,
+      reason,
+    },
+  );
+  if (!result) {
+    return res.status(404).json({
+      error: {
+        code: "MISSION_NOT_FOUND",
+        message: "Mission not found",
+      },
+    });
+  }
+  if (result.outcome === "terminal") {
+    return res.status(409).json({
+      error: {
+        code: "MISSION_TERMINAL",
+        message: "A completed or failed Mission cannot be cancelled",
+      },
+    });
+  }
+  return res.json({ data: result.mission });
 });
 
 missionRoutes.get("/:missionId/events", (request, res) => {

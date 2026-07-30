@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: AITeam Mission API
-  version: 0.4.0
+  version: 0.5.0
   description: Organization-scoped research execution and artifact contract used by Coworker.
 servers:
   - url: /aiteam/api/v1
@@ -64,6 +64,39 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+  /missions/{missionId}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/MissionId"
+    post:
+      operationId: cancelMission
+      summary: Cancel an active Mission and its remaining execution tasks
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CancelMissionRequest"
+      responses:
+        "200":
+          description: Mission cancelled or an identical terminal cancellation replayed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MissionEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Mission already completed or failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
   /missions/{missionId}/events:
     parameters:
       - $ref: "#/components/parameters/MissionId"
@@ -141,8 +174,9 @@ components:
       bearerFormat: JWT
       description: >-
         HS256 JWT with iss=coworker, aud=aiteam, sub=service:coworker,
-        organization_id, scope, iat and exp. During keyring rotation the JOSE
-        header must include a configured kid.
+        organization_id, scope (mission:create, mission:read and/or
+        mission:cancel), iat and exp. During keyring rotation the JOSE header
+        must include a configured kid.
   parameters:
     IdempotencyKey:
       name: Idempotency-Key
@@ -183,6 +217,21 @@ components:
         requested_by:
           type: string
           minLength: 1
+    CancelMissionRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - cancelled_by
+        - reason
+      properties:
+        cancelled_by:
+          type: string
+          minLength: 1
+          maxLength: 160
+        reason:
+          type: string
+          minLength: 3
+          maxLength: 500
     Mission:
       type: object
       required:
@@ -355,12 +404,14 @@ components:
     MissionErrorCode:
       type: string
       enum:
+        - MISSION_CANCEL_REQUEST_INVALID
         - MISSION_EVENT_CURSOR_INVALID
         - MISSION_IDEMPOTENCY_CONFLICT
         - MISSION_NOT_FOUND
         - MISSION_ORGANIZATION_FORBIDDEN
         - MISSION_REQUEST_INVALID
         - MISSION_SCOPE_FORBIDDEN
+        - MISSION_TERMINAL
         - SERVICE_AUTH_INVALID
         - SERVICE_AUTH_NOT_CONFIGURED
         - SERVICE_AUTH_REQUIRED

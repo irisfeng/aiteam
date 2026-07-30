@@ -5,17 +5,22 @@ import {
   db,
   getAgent,
   getTask,
+  invalidateApprovalsForTask,
   listAgents,
   listChannels,
   listDocuments,
   listTaskEvents,
   listTasks,
   listVerdictsForTask,
+  updateProject,
+  updateTask,
   type Task,
 } from "./db.js";
-import { isMock, onTaskAssigned } from "./agents/engine.js";
+import { isMock, onTaskAssigned, stopTask } from "./agents/engine.js";
+import { broadcast } from "./bus.js";
 import { classifyFinalMissionDelivery } from "./mission-quality.js";
 import {
+  missionCancellationActivityMetadata,
   missionActivityMetadata,
   type MissionStageKey,
 } from "./mission-activity.js";
@@ -48,6 +53,11 @@ export interface MissionArtifact {
   version: number;
   created_at: number;
   updated_at: number;
+}
+
+export interface CancelMissionExecutionInput {
+  cancelledBy: string;
+  reason: string;
 }
 
 export class MissionExecutionDomainError extends Error {
@@ -381,6 +391,61 @@ export function inspectMissionExecution(mission: Mission): MissionExecutionState
       };
     }
     return { status: "running", payload };
+  });
+}
+
+export function cancelMissionExecution(
+  mission: Mission,
+  input: CancelMissionExecutionInput,
+): Record<string, unknown> {
+  const execution = ensureMissionExecution(mission);
+  return withOwner(execution.owner_id, () => {
+    const tasks = executionTasks(execution);
+    const cancelledTasks: Task[] = [];
+    const reason = input.reason.trim().slice(0, 500);
+    const cancelledBy = input.cancelledBy.trim().slice(0, 160);
+
+    const project = db.transaction(() => {
+      for (const task of tasks) {
+        if (task.status === "done" || task.status === "cancelled") continue;
+        if (task.status === "doing") stopTask(task.id);
+        invalidateApprovalsForTask(task.id);
+        const cancelled =
+          updateTask(task.id, {
+            status: "cancelled",
+            blocked_approval_id: null,
+          }) ?? task;
+        createTaskEvent({
+          task_id: cancelled.id,
+          channel_id: cancelled.channel_id,
+          project_id: cancelled.project_id,
+          agent_id: null,
+          type: "cancelled",
+          summary: "Coworker 请求取消 Mission 执行",
+          metadata: {
+            mission_id: mission.id,
+            cancelled_by: cancelledBy,
+            reason,
+          },
+        });
+        cancelledTasks.push(cancelled);
+      }
+      return updateProject(execution.project_id, { status: "done" });
+    }).immediate();
+
+    for (const task of cancelledTasks) {
+      broadcast({ type: "task:upsert", payload: task });
+    }
+    if (project) broadcast({ type: "project:upsert", payload: project });
+
+    return {
+      project_id: execution.project_id,
+      task_ids: tasks.map((task) => task.id),
+      cancelled_task_ids: cancelledTasks.map((task) => task.id),
+      cancelled_by: cancelledBy,
+      reason,
+      activity: missionCancellationActivityMetadata(),
+    };
   });
 }
 

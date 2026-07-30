@@ -104,3 +104,17 @@ export function missionActivityMetadata(
     },
   };
 }
+
+export function missionCancellationActivityMetadata(): MissionActivityMetadata {
+  return {
+    stage: {
+      key: "cancelled",
+      label: STAGES.cancelled.label,
+    },
+    actor: {
+      type: "human",
+      role: "requester",
+      label: "Coworker 任务相关人",
+    },
+  };
+}
