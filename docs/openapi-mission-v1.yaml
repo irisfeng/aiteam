@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: AITeam Mission API
-  version: 0.3.0
+  version: 0.4.0
   description: Organization-scoped research execution and artifact contract used by Coworker.
 servers:
   - url: /aiteam/api/v1
@@ -246,6 +246,57 @@ components:
           type: integer
         updated_at:
           type: integer
+    MissionActivityStage:
+      type: object
+      additionalProperties: false
+      required: [key, label]
+      properties:
+        key:
+          type: string
+          enum:
+            - intake
+            - scope
+            - research
+            - analysis
+            - report
+            - quality_review
+            - delivery
+            - cancelled
+        label:
+          type: string
+          minLength: 1
+          maxLength: 80
+    MissionActivityActor:
+      type: object
+      additionalProperties: false
+      required: [type, role, label]
+      properties:
+        type:
+          type: string
+          enum: [human, agent, system]
+        role:
+          type: string
+          enum:
+            - requester
+            - mission_lead
+            - researcher
+            - analyst
+            - writer
+            - reviewer
+            - system
+        label:
+          type: string
+          minLength: 1
+          maxLength: 80
+    MissionActivityMetadata:
+      type: object
+      additionalProperties: false
+      required: [stage, actor]
+      properties:
+        stage:
+          $ref: "#/components/schemas/MissionActivityStage"
+        actor:
+          $ref: "#/components/schemas/MissionActivityActor"
     MissionEvent:
       type: object
       required:
@@ -281,6 +332,9 @@ components:
           type: string
         payload:
           type: object
+          properties:
+            activity:
+              $ref: "#/components/schemas/MissionActivityMetadata"
           additionalProperties: true
         created_at:
           type: integer

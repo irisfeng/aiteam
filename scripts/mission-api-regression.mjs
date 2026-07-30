@@ -319,6 +319,18 @@ try {
     "mission.created",
     "Mission creation is recorded as the first event",
   );
+  assertEqual(
+    JSON.stringify(eventsBody.data?.[0]?.payload?.activity),
+    JSON.stringify({
+      stage: { key: "intake", label: "任务受理" },
+      actor: {
+        type: "human",
+        role: "requester",
+        label: "Coworker 任务发起人",
+      },
+    }),
+    "Mission creation publishes explicit requester and intake metadata",
+  );
   const completedEvent = eventsBody.data?.find(
     (event) => event.type === "mission.completed",
   );
@@ -340,6 +352,32 @@ try {
     completedEvent?.payload?.quality_gate,
     "mock_skipped",
     "Mock completion is not presented as a passed quality review",
+  );
+  assertEqual(
+    completedEvent?.payload?.activity?.stage?.key,
+    "delivery",
+    "Mission completion publishes the delivery stage",
+  );
+  assertEqual(
+    completedEvent?.payload?.activity?.actor?.role,
+    "reviewer",
+    "Mission completion identifies the reviewer role",
+  );
+  assertEqual(
+    completedEvent?.payload?.activity?.actor?.type,
+    "agent",
+    "Mission completion identifies an agent actor",
+  );
+  assertEqual(
+    typeof completedEvent?.payload?.activity?.actor?.label === "string" &&
+      completedEvent.payload.activity.actor.label.length > 0,
+    true,
+    "Mission completion publishes a bounded public actor label",
+  );
+  assertEqual(
+    Object.hasOwn(completedEvent?.payload?.activity?.actor ?? {}, "id"),
+    false,
+    "Mission activity metadata does not expose an internal agent id",
   );
   const completedEventIndex = eventsBody.data?.findIndex(
     (event) => event.event_id === completedEvent?.event_id,

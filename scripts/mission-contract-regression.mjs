@@ -20,7 +20,7 @@ function assertIncludes(value, expected, label) {
   console.log(`✅ ${label}`);
 }
 
-assertIncludes(openapi, "version: 0.3.0", "OpenAPI publishes Mission API 0.3.0");
+assertIncludes(openapi, "version: 0.4.0", "OpenAPI publishes Mission API 0.4.0");
 
 const errorCodes = [
   ...new Set(
@@ -59,5 +59,13 @@ for (const field of [
     openapi,
     `- ${field}`,
     `OpenAPI requires Mission event field ${field}`,
+  );
+}
+
+for (const field of ["activity", "stage", "actor", "role", "label"]) {
+  assertIncludes(
+    openapi,
+    field,
+    `OpenAPI publishes Mission activity metadata field ${field}`,
   );
 }

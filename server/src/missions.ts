@@ -6,6 +6,7 @@ import {
   inspectMissionExecution,
   MissionExecutionDomainError,
 } from "./mission-execution.js";
+import { missionActivityMetadata } from "./mission-activity.js";
 
 export type MissionStatus =
   | "queued"
@@ -126,7 +127,11 @@ export function createMission(
       mission.id,
       mission.id,
       mission.organization_id,
-      JSON.stringify({ kind: mission.kind, requested_by: mission.requested_by }),
+      JSON.stringify({
+        kind: mission.kind,
+        requested_by: mission.requested_by,
+        activity: missionActivityMetadata("intake"),
+      }),
       createdAt,
     );
   })();

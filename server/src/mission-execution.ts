@@ -15,6 +15,10 @@ import {
 } from "./db.js";
 import { isMock, onTaskAssigned } from "./agents/engine.js";
 import { classifyFinalMissionDelivery } from "./mission-quality.js";
+import {
+  missionActivityMetadata,
+  type MissionStageKey,
+} from "./mission-activity.js";
 import { ownerFromUserId, withOwner } from "./ownerScope.js";
 import { seedForOwner } from "./seed.js";
 import type { Mission, MissionStatus } from "./missions.js";
@@ -296,6 +300,44 @@ export function inspectMissionExecution(mission: Mission): MissionExecutionState
       latestVerdict: latestFinalVerdict?.result ?? null,
       mock: isMock(),
     });
+    const workflowStageKeys = [
+      "scope",
+      "research",
+      "analysis",
+      "report",
+    ] as const satisfies readonly MissionStageKey[];
+    const activeTaskIndex = tasks.findIndex(
+      (task) => !["done", "cancelled"].includes(task.status),
+    );
+    const activeTask =
+      activeTaskIndex >= 0 ? tasks[activeTaskIndex] : finalTask ?? tasks.at(-1);
+    let activityStage: MissionStageKey =
+      workflowStageKeys[
+        Math.min(
+          Math.max(activeTaskIndex, 0),
+          workflowStageKeys.length - 1,
+        )
+      ] ?? "report";
+    let activityAgentId = activeTask?.assignee_agent_id ?? null;
+    if (
+      deliveryDecision?.status === "blocked" ||
+      finalTask?.status === "review" ||
+      latestFinalVerdict
+    ) {
+      activityStage = "quality_review";
+      activityAgentId = finalTask?.reviewer_agent_id ?? null;
+    }
+    if (deliveryDecision?.status === "completed") {
+      activityStage = "delivery";
+      activityAgentId = finalTask?.reviewer_agent_id ?? null;
+    }
+    if (
+      tasks.length > 0 &&
+      tasks.every((task) => task.status === "cancelled")
+    ) {
+      activityStage = "cancelled";
+      activityAgentId = null;
+    }
     const payload = {
       project_id: execution.project_id,
       task_ids: tasks.map((task) => task.id),
@@ -308,6 +350,10 @@ export function inspectMissionExecution(mission: Mission): MissionExecutionState
         latestFinalVerdict?.result === "revise"
           ? latestFinalVerdict.reasons.slice(0, 2000)
           : null,
+      activity: missionActivityMetadata(
+        activityStage,
+        activityAgentId ? getAgent(activityAgentId)?.name : null,
+      ),
     };
     if (deliveryDecision?.status === "completed") {
       return { status: "completed", payload };
