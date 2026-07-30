@@ -1,0 +1,319 @@
+openapi: 3.1.0
+info:
+  title: AITeam Mission API
+  version: 0.2.0
+  description: Organization-scoped research execution and artifact contract used by Coworker.
+servers:
+  - url: /aiteam/api/v1
+security:
+  - serviceJwt: []
+paths:
+  /missions:
+    post:
+      operationId: createMission
+      summary: Create or replay a research-report Mission
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateMissionRequest"
+      responses:
+        "201":
+          description: Mission created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MissionEnvelope"
+        "200":
+          description: Identical idempotent request replayed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MissionEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: Idempotency key reused for a different request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+  /missions/{missionId}:
+    parameters:
+      - $ref: "#/components/parameters/MissionId"
+    get:
+      operationId: getMission
+      summary: Get a Mission in the token organization
+      responses:
+        "200":
+          description: Mission found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MissionEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /missions/{missionId}/events:
+    parameters:
+      - $ref: "#/components/parameters/MissionId"
+      - name: after
+        in: query
+        description: Return events with sequence greater than this cursor.
+        schema:
+          type: integer
+          minimum: 0
+          default: 0
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 500
+          default: 100
+    get:
+      operationId: listMissionEvents
+      summary: Incrementally replay Mission events
+      responses:
+        "200":
+          description: Ordered event page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, next_after]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/MissionEvent"
+                  next_after:
+                    type: integer
+                    minimum: 0
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /missions/{missionId}/artifacts:
+    parameters:
+      - $ref: "#/components/parameters/MissionId"
+    get:
+      operationId: listMissionArtifacts
+      summary: List current deliverables produced by a Mission
+      responses:
+        "200":
+          description: Ordered Mission artifact list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/MissionArtifact"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+components:
+  securitySchemes:
+    serviceJwt:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        HS256 JWT with iss=coworker, aud=aiteam, sub=service:coworker,
+        organization_id, scope, iat and exp.
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 160
+    MissionId:
+      name: missionId
+      in: path
+      required: true
+      schema:
+        type: string
+  schemas:
+    CreateMissionRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - organization_id
+        - kind
+        - title
+        - brief
+        - requested_by
+      properties:
+        organization_id:
+          type: string
+          minLength: 1
+        kind:
+          const: research_report
+        title:
+          type: string
+          minLength: 1
+        brief:
+          type: string
+          minLength: 1
+        requested_by:
+          type: string
+          minLength: 1
+    Mission:
+      type: object
+      required:
+        - id
+        - organization_id
+        - kind
+        - title
+        - brief
+        - requested_by
+        - status
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+        organization_id:
+          type: string
+        kind:
+          const: research_report
+        title:
+          type: string
+        brief:
+          type: string
+        requested_by:
+          type: string
+        status:
+          enum: [queued, running, blocked, completed, failed, cancelled]
+        created_at:
+          type: integer
+        updated_at:
+          type: integer
+    MissionArtifact:
+      type: object
+      required:
+        - id
+        - mission_id
+        - task_id
+        - kind
+        - title
+        - content
+        - version
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+        mission_id:
+          type: string
+        task_id:
+          type: [string, "null"]
+        kind:
+          enum: [report, slides, sheet, html]
+        title:
+          type: string
+        content:
+          type: string
+        version:
+          type: integer
+          minimum: 1
+        created_at:
+          type: integer
+        updated_at:
+          type: integer
+    MissionEvent:
+      type: object
+      required:
+        - mission_id
+        - organization_id
+        - sequence
+        - type
+        - status
+        - payload
+        - created_at
+      properties:
+        mission_id:
+          type: string
+        organization_id:
+          type: string
+        sequence:
+          type: integer
+          minimum: 1
+        type:
+          type: string
+        status:
+          type: string
+        payload:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: integer
+    MissionEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/Mission"
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          $ref: "#/components/schemas/Error"
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Unauthorized:
+      description: Missing, invalid, or expired service JWT
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Forbidden:
+      description: Token organization or scope cannot perform the operation
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    NotFound:
+      description: Mission is absent or outside the token organization
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"

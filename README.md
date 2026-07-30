@@ -99,6 +99,13 @@ npm run pack:verify --workspace desktop  # 脱离源码树验证包内运行时
 | `AITEAM_ALLOW_SIGNUP` | `1`（开） | 是否开放公开注册；设 `0` 则关闭，由 admin 建号 |
 | `AUTH_SECRET` | — | coworker 模式下解密 NextAuth 会话 cookie 的密钥 |
 | `COWORKER_INTERNAL_URL` | — | coworker 模式回源取用户展示名 |
+| `AITEAM_SERVICE_JWT_SECRET` | — | Coworker 调用 Mission API 的 HS256 服务密钥，至少 32 字节；不得复用浏览器会话密钥 |
+
+Coworker 融合采用“控制面 + 执行面”边界：AITeam 把研究 Mission 映射为原生
+四步 DAG，并通过组织范围内的事件与产物接口交付，不共享数据库或浏览器会话。
+接口契约见 [`docs/openapi-mission-v1.yaml`](docs/openapi-mission-v1.yaml)，
+执行与恢复决策见
+[`docs/ADR-coworker-mission-execution.md`](docs/ADR-coworker-mission-execution.md)。
 
 ### 模型与运行
 | 变量 | 默认 | 说明 |

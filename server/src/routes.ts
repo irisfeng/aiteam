@@ -53,7 +53,7 @@ import {
 } from "./db.js";
 import { broadcast } from "./bus.js";
 import { requireAdmin, type AuthedRequest } from "./auth.js";
-import { fetchCoworkerMe } from "./coworker.js";
+import { coworkerMeIsAdmin, fetchCoworkerMe } from "./coworker.js";
 import { seedForOwner } from "./seed.js";
 import { AGENT_TEMPLATES, getTemplate } from "./agents/templates.js";
 import multer from "multer";
@@ -262,9 +262,14 @@ api.get("/bootstrap", async (req, res) => {
   const userId = (req as AuthedRequest).userId;
   // standalone：展示名/角色取本地 users 表；coworker：回源 Coworker 取展示名（best-effort）
   const localUser = userId ? getUserById(userId) : undefined;
-  const name = localUser?.display_name || (await fetchCoworkerMe(userId, req.headers.cookie))?.displayName || process.env.AITEAM_USER_NAME || "我";
+  const coworkerMe = localUser ? null : await fetchCoworkerMe(userId, req.headers.cookie);
+  const name = localUser?.display_name || coworkerMe?.displayName || process.env.AITEAM_USER_NAME || "我";
   res.json({
-    user: { id: userId ?? "user", name, role: localUser?.role ?? "admin" },
+    user: {
+      id: userId ?? "user",
+      name,
+      role: localUser?.role ?? (coworkerMeIsAdmin(coworkerMe) ? "admin" : "member"),
+    },
     mock_mode: isMock(),
     providers: listProviders().map(sanitizeProvider),
     agents: listAgents(),

@@ -243,6 +243,45 @@ CREATE TABLE IF NOT EXISTS projects (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS missions (
+  id TEXT PRIMARY KEY,
+  organization_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  title TEXT NOT NULL,
+  brief TEXT NOT NULL,
+  requested_by TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(organization_id, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS idx_missions_org_created
+  ON missions(organization_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS mission_events (
+  mission_id TEXT NOT NULL,
+  organization_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL,
+  type TEXT NOT NULL,
+  status TEXT NOT NULL,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (mission_id, sequence)
+);
+CREATE INDEX IF NOT EXISTS idx_mission_events_org_mission_sequence
+  ON mission_events(organization_id, mission_id, sequence);
+CREATE TABLE IF NOT EXISTS mission_executions (
+  mission_id TEXT PRIMARY KEY,
+  organization_id TEXT NOT NULL,
+  owner_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  final_task_id TEXT NOT NULL,
+  task_ids_json TEXT NOT NULL DEFAULT '[]',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mission_executions_org_project
+  ON mission_executions(organization_id, project_id);
 `);
 
 // 轻量迁移：旧库补新列

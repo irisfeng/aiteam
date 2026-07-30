@@ -12,6 +12,7 @@ import { seedGlobalSkills } from "./seed.js";
 import { finalizeStaleStreaming } from "./db.js";
 import { isMock, recoverInFlightTasks, startScheduler } from "./agents/engine.js";
 import { assetsDir } from "./agents/images.js";
+import { missionRoutes } from "./mission-routes.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 8787);
@@ -36,6 +37,7 @@ if (process.env.AITEAM_TEST_INSTANCE_ID) {
 // 整合后所有 AiTeam 路由统一挂在 /aiteam/* 前缀下（由反向代理路由到本进程）。
 // 登录/注册路由公开（不经 requireUser，登出态也要能访问）；其余 API 一律需登录。
 app.use("/aiteam/api/auth", authRoutes);
+app.use("/aiteam/api/v1/missions", missionRoutes);
 app.use("/aiteam/api", requireUser, api);
 const assetsStatic = express.static(assetsDir, { maxAge: "30d", immutable: true });
 app.use("/aiteam/assets", assetsStatic); // 生成图资产（新前缀）

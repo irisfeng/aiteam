@@ -3,6 +3,7 @@ import { getToken } from "@auth/core/jwt";
 import { ownerFromUserId, withOwner } from "./ownerScope.js";
 import { SESSION_COOKIE, readCookie, verifySession } from "./session.js";
 import { getUserById } from "./db.js";
+import { coworkerMeIsAdmin, fetchCoworkerMe } from "./coworker.js";
 
 /**
  * 鉴权模式：
@@ -61,9 +62,31 @@ export async function requireUser(req: AuthedRequest, res: Response, next: NextF
   withOwner(ownerFromUserId(userId), () => next());
 }
 
-/** 管理员门控（用在 requireUser 之后）：standalone 下校验本地用户 role；coworker 暂不做角色门控。 */
-export function requireAdmin(req: AuthedRequest, res: Response, next: NextFunction): void {
-  if (AUTH_MODE !== "coworker") {
+/** 管理员门控（用在 requireUser 之后）：角色必须由当前鉴权模式的权威来源确认。 */
+export async function requireAdmin(
+  req: AuthedRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  if (AUTH_MODE === "coworker") {
+    try {
+      const coworkerMe = await fetchCoworkerMe(
+        req.userId,
+        req.headers.cookie,
+        { useCache: false },
+      );
+      if (coworkerMeIsAdmin(coworkerMe)) {
+        next();
+        return;
+      }
+    } catch {
+      // Authorization lookups fail closed, including unexpected parsing errors.
+    }
+    if (!res.headersSent) {
+      res.status(403).json({ error: "需要 Coworker 部门管理员或超级管理员权限" });
+    }
+    return;
+  } else {
     const u = req.userId ? getUserById(req.userId) : undefined;
     if (!u || u.role !== "admin") {
       res.status(403).json({ error: "需要管理员权限（仅管理员可改组织级配置）" });
