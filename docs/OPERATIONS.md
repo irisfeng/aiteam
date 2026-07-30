@@ -354,6 +354,12 @@ MarkItDown 官方工具虽接受 `http(s)` URI，本生产镜像固定 `--networ
 Preview 必须重建/导入对应架构镜像，重新生成 digest 与 SBOM，并在精确
 service user + systemd unit 下重跑真实业务链和通用逃逸套件。运行时仍禁止拉取。
 
+目标 Linux 的固定提交、systemd 硬化、回环监听、健康状态、脱敏配置检查和
+Podman/镜像准入统一使用 `scripts/preview-host-qualification.mjs`。首个 Preview
+必须选择 `http-only` profile；只有经单独批准的后续灰度才可选择
+`local-stdio`。完整命令、停止条件和证据边界见
+`docs/PREVIEW-host-qualification.md`。
+
 > 更多业务/治理开关见 GUIDE.md「治理开关（环境变量）」。
 
 ---

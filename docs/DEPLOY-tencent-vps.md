@@ -676,6 +676,7 @@ find "$DATA_DIR/assets" -type f -mtime +90 -print -delete
 - [ ] 注册首个 admin（白名单邮箱）→ 立刻 `AITEAM_ALLOW_SIGNUP=0` 重启
 - [ ] 登录 UI 配 DeepSeek/GLM/Kimi 等国内 provider（不设 `ANTHROPIC_API_KEY`）
 - [ ] 首个 Preview 确认数据库没有启用的 stdio MCP 且未设置 `AITEAM_MCP_STDIO_RUNNER`
+- [ ] 以实际 service user 执行 `preview-host-qualification.mjs --profile http-only`，归档 `0600` JSON 和 SHA-256；固定提交、unit 硬化、回环监听、401/200 健康和密钥存在性全部通过
 - [ ] 后续 local stdio 灰度前：目标 Linux rootless Podman + cgroup v2 preflight；按 `containers/markitdown-mcp/README.md` 构建/导入目标架构镜像，归档 digest + CycloneDX SBOM；`npm run test:stdio-sandbox:real`、`npm run test:stdio-sandbox:markitdown-real` 和 systemd 重启演练全部通过
 - [ ] 探针 `curl -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/aiteam/api/auth/me` 返回 401
 - [ ] 备份 cron + 一次手动 `backup.sh` + 一次 `restore.sh` 演练

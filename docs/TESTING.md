@@ -25,6 +25,12 @@
 >   `AITEAM_MARKITDOWN_TEST_IMAGE=... npm run test:stdio-sandbox:markitdown-real`，
 >   验证 MCP 握手、任务演练和真 `.docx` 上传转来源文档。该证据按架构和主机
 >   分层，本机通过不能替代目标 Linux/systemd 验收。
+> - **目标 Linux Preview 准入（需在目标主机执行）**：
+>   `npm run test:preview-host` 先验证预检 CLI 的固定提交、systemd、回环健康、
+>   stdio 禁用/启用、rootless Podman、digest 镜像和密钥脱敏契约；然后按
+>   `docs/PREVIEW-host-qualification.md` 以实际 service user 运行 CLI。
+>   畸形轮换 keyring 和边界命令失败都会 fail-closed，并留下脱敏 `0600`
+>   结构化证据。fixture 通过只证明检查器契约，不证明目标主机。
 > - **智能层（需真实 key 人工执行）**：即本清单的 B2、C1-C4 的质量观察项、D1、G1/G3/G5
 >   的行为观察项——机器只能验证"流程对不对"，"干得好不好"要靠你按 F 段回报。
 
