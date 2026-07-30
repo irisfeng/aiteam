@@ -6,8 +6,34 @@ import {
   ensureMissionExecution,
   inspectMissionExecution,
   MissionExecutionDomainError,
+  timeoutMissionExecution,
 } from "./mission-execution.js";
 import { missionActivityMetadata } from "./mission-activity.js";
+
+const DEFAULT_MISSION_TIMEOUT_MS = 60 * 60 * 1000;
+const MIN_MISSION_TIMEOUT_MS = 1000;
+const MAX_MISSION_TIMEOUT_MS = 7 * 24 * 60 * 60 * 1000;
+
+function configuredMissionTimeoutMs(): number {
+  const raw = process.env.AITEAM_MISSION_TIMEOUT_MS?.trim();
+  if (!raw) return DEFAULT_MISSION_TIMEOUT_MS;
+  const parsed = Number(raw);
+  if (
+    !Number.isSafeInteger(parsed) ||
+    parsed < MIN_MISSION_TIMEOUT_MS ||
+    parsed > MAX_MISSION_TIMEOUT_MS
+  ) {
+    throw new Error(
+      `AITEAM_MISSION_TIMEOUT_MS must be an integer between ${MIN_MISSION_TIMEOUT_MS} and ${MAX_MISSION_TIMEOUT_MS}`,
+    );
+  }
+  return parsed;
+}
+
+const missionTimeoutMs = configuredMissionTimeoutMs();
+db.prepare(
+  "UPDATE missions SET deadline_at = created_at + ? WHERE deadline_at = 0",
+).run(missionTimeoutMs);
 
 export type MissionStatus =
   | "queued"
@@ -25,6 +51,7 @@ export interface Mission {
   brief: string;
   requested_by: string;
   status: MissionStatus;
+  deadline_at: number;
   created_at: number;
   updated_at: number;
 }
@@ -83,7 +110,8 @@ export function createMission(
 ): CreateMissionResult {
   const hash = requestHash(input);
   const existing = db.prepare(
-    `SELECT id, organization_id, kind, title, brief, requested_by, status, created_at, updated_at, request_hash
+    `SELECT id, organization_id, kind, title, brief, requested_by, status,
+            deadline_at, created_at, updated_at, request_hash
      FROM missions WHERE organization_id = ? AND idempotency_key = ?`,
   ).get(input.organization_id, idempotencyKey) as
     | (Mission & { request_hash: string })
@@ -105,6 +133,7 @@ export function createMission(
     brief: input.brief,
     requested_by: input.requested_by,
     status: "queued",
+    deadline_at: createdAt + missionTimeoutMs,
     created_at: createdAt,
     updated_at: createdAt,
   };
@@ -113,10 +142,10 @@ export function createMission(
     db.prepare(
       `INSERT INTO missions (
         id, organization_id, kind, title, brief, requested_by,
-        idempotency_key, request_hash, status, created_at, updated_at
+        idempotency_key, request_hash, status, deadline_at, created_at, updated_at
       ) VALUES (
         @id, @organization_id, @kind, @title, @brief, @requested_by,
-        @idempotency_key, @request_hash, @status, @created_at, @updated_at
+        @idempotency_key, @request_hash, @status, @deadline_at, @created_at, @updated_at
       )`,
     ).run({
       ...mission,
@@ -222,6 +251,13 @@ function reconcileMission(mission: Mission): Mission {
   ) {
     return mission;
   }
+  if (Date.now() >= mission.deadline_at) {
+    return transitionMission(
+      mission,
+      "failed",
+      timeoutMissionExecution(mission),
+    );
+  }
   try {
     const execution = inspectMissionExecution(mission);
     return transitionMission(mission, execution.status, execution.payload);
@@ -243,10 +279,32 @@ export function getMission(
   missionId: string,
 ): Mission | undefined {
   const mission = db.prepare(
-    `SELECT id, organization_id, kind, title, brief, requested_by, status, created_at, updated_at
+    `SELECT id, organization_id, kind, title, brief, requested_by, status,
+            deadline_at, created_at, updated_at
      FROM missions WHERE id = ? AND organization_id = ?`,
   ).get(missionId, organizationId) as Mission | undefined;
   return mission ? reconcileMission(mission) : undefined;
+}
+
+export function expireOverdueMissions(now = Date.now()): number {
+  const overdue = db
+    .prepare(
+      `SELECT id, organization_id, kind, title, brief, requested_by, status,
+              deadline_at, created_at, updated_at
+       FROM missions
+       WHERE status IN ('queued', 'running', 'blocked')
+         AND deadline_at <= ?
+       ORDER BY deadline_at ASC, created_at ASC`,
+    )
+    .all(now) as Mission[];
+  for (const mission of overdue) {
+    transitionMission(
+      mission,
+      "failed",
+      timeoutMissionExecution(mission),
+    );
+  }
+  return overdue.length;
 }
 
 export function cancelMission(

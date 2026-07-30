@@ -6,6 +6,7 @@ export type MissionStageKey =
   | "report"
   | "quality_review"
   | "delivery"
+  | "timeout"
   | "cancelled";
 
 export interface MissionActivityMetadata {
@@ -77,6 +78,12 @@ const STAGES: Record<
     actorType: "agent",
     actorRole: "reviewer",
     defaultActorLabel: "AITeam 质量复核",
+  },
+  timeout: {
+    label: "执行超时",
+    actorType: "system",
+    actorRole: "system",
+    defaultActorLabel: "AITeam 运行时",
   },
   cancelled: {
     label: "任务取消",

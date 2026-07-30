@@ -253,6 +253,7 @@ CREATE TABLE IF NOT EXISTS missions (
   idempotency_key TEXT NOT NULL,
   request_hash TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'queued',
+  deadline_at INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   UNIQUE(organization_id, idempotency_key)
@@ -324,6 +325,7 @@ addColumnIfMissing("tasks", "estimate_billable", "estimate_billable INTEGER NOT 
 addColumnIfMissing("providers", "price_input_per_million", "price_input_per_million REAL NOT NULL DEFAULT 0");
 addColumnIfMissing("providers", "price_output_per_million", "price_output_per_million REAL NOT NULL DEFAULT 0");
 addColumnIfMissing("providers", "price_currency", "price_currency TEXT NOT NULL DEFAULT 'USD'");
+addColumnIfMissing("missions", "deadline_at", "deadline_at INTEGER NOT NULL DEFAULT 0");
 // Mission event envelope v0.3: old rows receive deterministic identities so
 // replay remains stable across restarts and upgrades.
 addColumnIfMissing("mission_events", "event_id", "event_id TEXT");

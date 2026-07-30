@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: AITeam Mission API
-  version: 0.5.0
+  version: 0.6.0
   description: Organization-scoped research execution and artifact contract used by Coworker.
 servers:
   - url: /aiteam/api/v1
@@ -242,6 +242,7 @@ components:
         - brief
         - requested_by
         - status
+        - deadline_at
         - created_at
         - updated_at
       properties:
@@ -259,6 +260,9 @@ components:
           type: string
         status:
           enum: [queued, running, blocked, completed, failed, cancelled]
+        deadline_at:
+          type: integer
+          description: Persisted Unix epoch milliseconds after which the runtime fails the Mission.
         created_at:
           type: integer
         updated_at:
@@ -310,6 +314,7 @@ components:
             - report
             - quality_review
             - delivery
+            - timeout
             - cancelled
         label:
           type: string
@@ -412,6 +417,7 @@ components:
         - MISSION_REQUEST_INVALID
         - MISSION_SCOPE_FORBIDDEN
         - MISSION_TERMINAL
+        - MISSION_TIMEOUT
         - SERVICE_AUTH_INVALID
         - SERVICE_AUTH_NOT_CONFIGURED
         - SERVICE_AUTH_REQUIRED

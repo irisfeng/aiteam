@@ -681,21 +681,42 @@ const queuedCount = new Map<string, number>(); // agentId -> 排队中的任务�
 const cancelledTasks = new Set<string>(); // 用户按下停止开关的任务
 const cancelledChannels = new Set<string>(); // 用户在频道里按下停止（覆盖聊天回复 + 该频道的任务运行）
 const activeStreams = new Map<string, Set<{ abort(): void }>>(); // channelId -> 正在跑的流（可 abort 中断）
+const activeTaskStreams = new Map<string, Set<{ abort(): void }>>();
 
 /** 登记一个在跑的流，返回注销函数（运行结束时调用，顺带清理频道停止标志）。 */
-function registerStream(channelId: string, stream: { abort(): void }): () => void {
+function registerStream(
+  channelId: string,
+  stream: { abort(): void },
+  taskId?: string | null,
+): () => void {
   let set = activeStreams.get(channelId);
   if (!set) { set = new Set(); activeStreams.set(channelId, set); }
   set.add(stream);
+  let taskSet: Set<{ abort(): void }> | undefined;
+  if (taskId) {
+    taskSet = activeTaskStreams.get(taskId);
+    if (!taskSet) {
+      taskSet = new Set();
+      activeTaskStreams.set(taskId, taskSet);
+    }
+    taskSet.add(stream);
+  }
   return () => {
     set!.delete(stream);
     if (set!.size === 0) { activeStreams.delete(channelId); cancelledChannels.delete(channelId); }
+    if (taskId && taskSet) {
+      taskSet.delete(stream);
+      if (taskSet.size === 0) activeTaskStreams.delete(taskId);
+    }
   };
 }
 
 /** 停止开关（kill switch）：运行中的任务在下一个迭代边界停下；排队中的任务直接不再开工。 */
 export function stopTask(taskId: string) {
   cancelledTasks.add(taskId);
+  for (const stream of activeTaskStreams.get(taskId) ?? []) {
+    try { stream.abort(); } catch { /* ignore */ }
+  }
   invalidateTaskNetworkApprovals(taskId);
 }
 
@@ -3302,7 +3323,7 @@ async function llmLoop(
       on(event: "text", listener: (delta: string) => void): unknown;
       finalMessage(): Promise<Anthropic.Message>;
     };
-    const unregister = registerStream(channel.id, stream);
+    const unregister = registerStream(channel.id, stream, ctx.taskId);
 
     stream.on("text", (delta) => {
       if (firstText) {
@@ -3548,6 +3569,13 @@ export function mockTaskDocument(task: Pick<Task, "title" | "description" | "acc
 
 async function mockRun(ctx: RunCtx, emit: (delta: string) => void) {
   const { agent } = ctx;
+  const testDelay = process.env.AITEAM_TEST_INSTANCE_ID
+    ? Number(process.env.AITEAM_TEST_MOCK_DELAY_MS ?? 0)
+    : 0;
+  if (Number.isFinite(testDelay) && testDelay > 0) {
+    await new Promise((resolve) => setTimeout(resolve, testDelay));
+  }
+  if (ctx.taskId && cancelledTasks.has(ctx.taskId)) return;
   let text: string;
   if (ctx.kind === "work" && ctx.taskId) {
     const task = getTask(ctx.taskId);

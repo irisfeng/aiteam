@@ -64,6 +64,8 @@ async function startServer(label) {
       AITEAM_TEST_INSTANCE_ID: instanceId,
       AITEAM_SERVICE_JWT_SECRET: secret,
       AITEAM_SERVICE_JWT_KEYS: "",
+      AITEAM_MISSION_TIMEOUT_MS: "1000",
+      AITEAM_TEST_MOCK_DELAY_MS: "5000",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -122,6 +124,11 @@ try {
   });
   assertEqual(created.status, 201, "A Mission is created before restart");
   const mission = (await created.json()).data;
+  assertEqual(
+    Number.isSafeInteger(mission.deadline_at),
+    true,
+    "A Mission publishes its persisted execution deadline",
+  );
   const beforeResponse = await fetch(
     `${first.base}/missions/${mission.id}/events?after=0&limit=500`,
     { headers },
@@ -131,7 +138,25 @@ try {
   await stopServer(first.child);
   first = null;
 
+  while (Date.now() <= mission.deadline_at + 50) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
   second = await startServer("second");
+  const missionAfterRestartResponse = await fetch(
+    `${second.base}/missions/${mission.id}`,
+    { headers },
+  );
+  const missionAfterRestart = (await missionAfterRestartResponse.json()).data;
+  assertEqual(
+    missionAfterRestartResponse.status,
+    200,
+    "The overdue Mission is readable after restart",
+  );
+  assertEqual(
+    missionAfterRestart.status,
+    "failed",
+    "Restart expires an overdue Mission before resuming in-flight work",
+  );
   const afterResponse = await fetch(
     `${second.base}/missions/${mission.id}/events?after=0&limit=500`,
     { headers },
@@ -139,14 +164,22 @@ try {
   const after = await afterResponse.json();
   assertEqual(afterResponse.status, 200, "Mission events are readable after restart");
   assertEqual(
-    JSON.stringify(after.data.map((event) => event.event_id)),
+    JSON.stringify(
+      after.data
+        .slice(0, before.data.length)
+        .map((event) => event.event_id),
+    ),
     JSON.stringify(before.data.map((event) => event.event_id)),
-    "Mission event identities survive a service restart",
+    "Pre-restart Mission event identities survive recovery",
   );
   assertEqual(
-    after.next_after,
-    before.next_after,
-    "Mission replay cursor survives a service restart",
+    after.data.filter(
+      (event) =>
+        event.type === "mission.failed" &&
+        event.payload?.error_code === "MISSION_TIMEOUT",
+    ).length,
+    1,
+    "Recovery records exactly one durable Mission timeout event",
   );
 
   const replayed = await fetch(`${second.base}/missions`, {
@@ -160,6 +193,28 @@ try {
     mission.id,
     "The restarted service returns the original Mission",
   );
+  await stopServer(second.child);
+  second = null;
+
+  const third = await startServer("third");
+  try {
+    const replayAfterSecondRestart = await fetch(
+      `${third.base}/missions/${mission.id}/events?after=0&limit=500`,
+      { headers },
+    );
+    const replayAfterSecondRestartBody = await replayAfterSecondRestart.json();
+    assertEqual(
+      replayAfterSecondRestartBody.data.filter(
+        (event) =>
+          event.type === "mission.failed" &&
+          event.payload?.error_code === "MISSION_TIMEOUT",
+      ).length,
+      1,
+      "A second restart does not duplicate the timeout transition",
+    );
+  } finally {
+    await stopServer(third.child);
+  }
 } finally {
   if (first) await stopServer(first.child);
   if (second) await stopServer(second.child);

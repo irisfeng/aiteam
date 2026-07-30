@@ -449,6 +449,59 @@ export function cancelMissionExecution(
   });
 }
 
+export function timeoutMissionExecution(
+  mission: Mission,
+): Record<string, unknown> {
+  const execution = ensureMissionExecution(mission);
+  return withOwner(execution.owner_id, () => {
+    const tasks = executionTasks(execution);
+    const timedOutTasks: Task[] = [];
+
+    const project = db.transaction(() => {
+      for (const task of tasks) {
+        if (task.status === "done" || task.status === "cancelled") continue;
+        if (task.status === "doing") stopTask(task.id);
+        invalidateApprovalsForTask(task.id);
+        const timedOut =
+          updateTask(task.id, {
+            status: "cancelled",
+            blocked_approval_id: null,
+          }) ?? task;
+        createTaskEvent({
+          task_id: timedOut.id,
+          channel_id: timedOut.channel_id,
+          project_id: timedOut.project_id,
+          agent_id: null,
+          type: "failure",
+          summary: "Mission 超过执行期限，运行时已停止剩余任务",
+          metadata: {
+            mission_id: mission.id,
+            error_code: "MISSION_TIMEOUT",
+            deadline_at: mission.deadline_at,
+          },
+        });
+        timedOutTasks.push(timedOut);
+      }
+      return updateProject(execution.project_id, { status: "done" });
+    }).immediate();
+
+    for (const task of timedOutTasks) {
+      broadcast({ type: "task:upsert", payload: task });
+    }
+    if (project) broadcast({ type: "project:upsert", payload: project });
+
+    return {
+      project_id: execution.project_id,
+      task_ids: tasks.map((task) => task.id),
+      timed_out_task_ids: timedOutTasks.map((task) => task.id),
+      deadline_at: mission.deadline_at,
+      error_code: "MISSION_TIMEOUT",
+      error: "AITeam execution exceeded its configured deadline.",
+      activity: missionActivityMetadata("timeout"),
+    };
+  });
+}
+
 export function listMissionArtifacts(mission: Mission): MissionArtifact[] {
   const execution = ensureMissionExecution(mission);
   return withOwner(execution.owner_id, () => {

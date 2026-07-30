@@ -284,6 +284,7 @@ npm start
 | `AITEAM_ADMIN_EMAILS` | 空 | 逗号分隔的 admin 邮箱白名单 |
 | `AITEAM_DAILY_TOKEN_BUDGET` | `0`（不限） | 每日 token 预算，`>0` 启用 |
 | `AITEAM_TASK_TOKEN_BUDGET` | `0`（不限） | 单任务默认预算（加权计费 token）；触线任务自动暂停并开审批，批准后追加预算续跑 |
+| `AITEAM_MISSION_TIMEOUT_MS` | `3600000`（1 小时） | Mission 总执行期限（1000–604800000ms）；截止时间写入数据库，重启时先过期再恢复任务 |
 | `TASK_MAX_REVISIONS` | `1` | 验收返工上限 |
 | `AITEAM_PROVIDER_BENCHMARK_BUDGET` | `20000` | 固定模型质量基准的计费 token 上限 |
 | `AITEAM_PROVIDER_BENCHMARK_REVIEW_RESERVE` | `6000` | 独立强模型复核的预留计费 token |
@@ -303,6 +304,7 @@ npm start
 ## 8. 测试与验证
 
 - `AITEAM_PROVIDER_TIMEOUT_MS`：OpenAI 兼容通道的**空闲超时**（毫秒，默认 120000）。连续这么久收不到任何字节才中止；流式长回复不受总时长限制。
+- `AITEAM_MISSION_TIMEOUT_MS`：Mission 的**总执行期限**（毫秒，默认 3600000）。它与单次 provider/MCP 空闲超时分离；截止时间随 Mission 持久化，服务重启会先把已超期 Mission 收口为 `failed`，再恢复仍有效的运行中任务。
 - 机制级回归（Mock、零 token、不调真模型）：`npm test`（先跑凭证加密/迁移回归，再跑完整业务回归；用例数以命令输出为准）。
 - 真模型端到端测试清单：见 [TESTING.md](TESTING.md)。
 
