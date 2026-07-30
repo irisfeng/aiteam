@@ -36,16 +36,14 @@ import {
   getChannel,
   getMemory,
   getTask,
-  listDocumentVersions,
   insertMessage,
+  listDocumentVersions,
   listAgents,
   listApprovals,
   listChannels,
   listMessages,
   listTaskEvents,
   listTasks,
-  resolveApprovalOnce,
-  updateApprovalPayload,
   updateTask,
   createVerdict,
   listVerdictsForTask,
@@ -90,10 +88,6 @@ import {
   PROVIDER_QUALITY_REVIEW_RESERVE_BILLABLE,
   isMock,
   onMessage,
-  onBudgetResolved,
-  onClarificationResolved,
-  onNetworkApprovalResolved,
-  onPlanResolved,
   onTaskAssigned,
   onTaskDelivered,
   oneShotComplete,
@@ -104,8 +98,8 @@ import {
   stopTask,
   teamStatus,
   testProviderConnection,
-  triggerAgent,
 } from "./agents/engine.js";
+import { resolveApprovalWithSideEffects } from "./approval-resolution.js";
 
 export const api = Router();
 
@@ -2058,48 +2052,20 @@ api.delete("/routines/:id", (req, res) => {
   res.json({ ok: true });
 });
 
-function mergeClarificationResponse(payload: string, response: string): string {
-  try {
-    const parsed = JSON.parse(payload || "{}") as Record<string, unknown>;
-    const proposed = typeof parsed.proposed_default === "string" ? parsed.proposed_default : "";
-    const userResponse = response.trim() || proposed.trim();
-    return JSON.stringify({ ...parsed, user_response: userResponse }, null, 2);
-  } catch {
-    return JSON.stringify({ question: payload, user_response: response.trim() }, null, 2);
-  }
-}
-
 api.post("/approvals/:id/resolve", (req, res) => {
   if (typeof req.body?.approve !== "boolean") {
     return res.status(400).json({ error: "approve must be boolean" });
   }
-  const approve = req.body.approve;
-  const before = getApproval(req.params.id);
-  if (before?.status === "pending" && before.kind === "clarification" && approve) {
-    const response = typeof req.body?.response === "string" ? req.body.response : "";
-    updateApprovalPayload(before.id, mergeClarificationResponse(before.payload, response));
+  const result = resolveApprovalWithSideEffects({
+    id: req.params.id,
+    approve: req.body.approve,
+    response: typeof req.body?.response === "string" ? req.body.response : "",
+  });
+  if (result.outcome === "not_found") {
+    return res.status(404).json({ error: "approval not found" });
   }
-  const resolved = resolveApprovalOnce(req.params.id, approve);
-  if (!resolved) return res.status(404).json({ error: "approval not found" });
-  const { approval, changed } = resolved;
-  const wasApproved = approval.status === "approved";
-  if (changed && approval.kind === "network") onNetworkApprovalResolved(approval);
-  if (changed) broadcast({ type: "approval:upsert", payload: approval });
-  if (changed && approval.channel_id) {
-    const agent = getAgent(approval.agent_id);
-    const sys = insertMessage({
-      channel_id: approval.channel_id,
-      author_type: "system",
-      content: `${wasApproved ? "✅ 用户批准了" : "❌ 用户拒绝了"} ${agent?.name ?? "AI"} 的审批请求「${approval.title}」`,
-    });
-    broadcast({ type: "message:new", payload: sys });
-    if (approval.kind === "plan" && approval.ref_id) {
-      onPlanResolved(approval.ref_id, wasApproved); // 计划把关：批准开工 / 退回唤起 Lead
-    } else if (approval.kind === "action") {
-      triggerAgent(approval.agent_id, approval.channel_id);
-    }
+  if (result.outcome === "conflict") {
+    return res.status(409).json({ error: "approval already has another decision" });
   }
-  if (changed && approval.kind === "clarification") onClarificationResolved(approval, wasApproved);
-  if (changed && approval.kind === "budget") onBudgetResolved(approval, wasApproved); // 预算追加：批准恢复执行/拒绝保持暂停
-  res.json(approval);
+  res.json(result.approval);
 });

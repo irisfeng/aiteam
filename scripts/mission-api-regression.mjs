@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import Database from "better-sqlite3";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dataDir = mkdtempSync(join(tmpdir(), "aiteam-mission-api-"));
@@ -86,6 +87,152 @@ function serviceToken(organizationId, scopes = ["mission:create", "mission:read"
   return `${header}.${payload}.${signature}`;
 }
 
+function canonicalJson(value) {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([, child]) => child !== undefined)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, child]) => [key, canonicalJson(child)]),
+    );
+  }
+  return value;
+}
+
+function sha256(value) {
+  return createHash("sha256")
+    .update(JSON.stringify(canonicalJson(value)))
+    .digest("hex");
+}
+
+function seedMissionNetworkApproval(missionId, approvalId, query) {
+  const database = new Database(join(dataDir, "aiteam.db"));
+  try {
+    const execution = database
+      .prepare(
+        `SELECT owner_id, task_ids_json
+         FROM mission_executions
+         WHERE mission_id = ?`,
+      )
+      .get(missionId);
+    const taskId = JSON.parse(execution.task_ids_json)[0];
+    const server = {
+      id: "mission-approval-network-server",
+      name: "mission_approval_network",
+      kind: "http",
+      url: "https://secret-network-target.example/mcp",
+      auth_token: "",
+      command: "",
+      args_json: "[]",
+      env_json: "{}",
+      safety: "network",
+    };
+    database
+      .prepare(
+        `INSERT OR IGNORE INTO mcp_servers (
+          id, name, kind, url, auth_token, command, args_json,
+          env_json, safety, enabled, created_at
+        ) VALUES (
+          @id, @name, @kind, @url, @auth_token, @command, @args_json,
+          @env_json, @safety, 1, @created_at
+        )`,
+      )
+      .run({ ...server, created_at: Date.now() });
+    const serverFingerprint = sha256(server);
+    const tool = "mcp__mission_approval_network__search";
+    const input = canonicalJson({ query, api_token: "must-never-leave-aiteam" });
+    const grant = {
+      v: 1,
+      server_id: server.id,
+      server_name: server.name,
+      server_target: server.url,
+      server_fingerprint: serverFingerprint,
+      tool,
+      input,
+      call_fingerprint: sha256({
+        server_fingerprint: serverFingerprint,
+        tool,
+        input,
+      }),
+    };
+    const createdAt = Date.now();
+    database
+      .prepare(
+        `UPDATE tasks
+         SET status = 'blocked',
+             assignee_agent_id = ?,
+             blocked_approval_id = ?,
+             updated_at = ?
+         WHERE id = ? AND owner_id = ?`,
+      )
+      .run(
+        "mission-approval-no-run-agent",
+        approvalId,
+        createdAt,
+        taskId,
+        execution.owner_id,
+      );
+    database
+      .prepare(
+        `INSERT INTO approvals (
+          id, owner_id, channel_id, agent_id, title, payload, kind, ref_id,
+          status, created_at, resolved_at, consumed_at
+        ) VALUES (
+          ?, ?, NULL, ?, ?, ?, 'network', ?, 'pending', ?, NULL, NULL
+        )`,
+      )
+      .run(
+        approvalId,
+        execution.owner_id,
+        "mission-approval-no-run-agent",
+        "批准一次外部资料检索",
+        JSON.stringify({
+          details: "AITeam 需要访问外部检索服务以继续 Mission。",
+          network_grant: grant,
+        }),
+        taskId,
+        createdAt,
+      );
+    return { taskId };
+  } finally {
+    database.close();
+  }
+}
+
+function approvalState(approvalId, taskId) {
+  const database = new Database(join(dataDir, "aiteam.db"), {
+    readonly: true,
+  });
+  try {
+    return {
+      approval: database
+        .prepare(
+          `SELECT status, resolved_at, consumed_at
+           FROM approvals
+           WHERE id = ?`,
+        )
+        .get(approvalId),
+      task: database
+        .prepare(
+          `SELECT status, blocked_approval_id
+           FROM tasks
+           WHERE id = ?`,
+        )
+        .get(taskId),
+      approvalEvents: database
+        .prepare(
+          `SELECT COUNT(*) AS count
+           FROM task_events
+           WHERE task_id = ? AND type = 'approval'`,
+        )
+        .get(taskId).count,
+    };
+  } finally {
+    database.close();
+  }
+}
+
 try {
   await waitForServer();
   const missingToken = await fetch(`${base}/missions`, {
@@ -145,6 +292,245 @@ try {
   });
   assertEqual(createMission.status, 201, "A valid service request creates a mission");
   const createdBody = await createMission.json();
+
+  const approvalMissionResponse = await fetch(`${base}/missions`, {
+    method: "POST",
+    headers: {
+      ...missionHeaders,
+      "Idempotency-Key": "mission-approval-alpha",
+    },
+    body: JSON.stringify({
+      ...missionBody,
+      title: "Mission requiring a network approval",
+    }),
+  });
+  assertEqual(
+    approvalMissionResponse.status,
+    201,
+    "A Mission for network-approval regression is created",
+  );
+  const approvalMissionBody = await approvalMissionResponse.json();
+  const approvalMissionId = approvalMissionBody.data.id;
+  const approvalId = "mission-network-approval-approved";
+  const seededApproval = seedMissionNetworkApproval(
+    approvalMissionId,
+    approvalId,
+    "private-query-that-must-not-be-returned",
+  );
+
+  const listApprovals = await fetch(
+    `${base}/missions/${approvalMissionId}/approvals`,
+    {
+      headers: {
+        Authorization: `Bearer ${serviceToken("org-alpha", ["mission:read"])}`,
+      },
+    },
+  );
+  assertEqual(
+    listApprovals.status,
+    200,
+    "The owning organization can list Mission network approvals",
+  );
+  const listApprovalsBody = await listApprovals.json();
+  assertEqual(
+    listApprovalsBody.data?.[0]?.id,
+    approvalId,
+    "Mission approval listing returns the matching approval",
+  );
+  assertEqual(
+    listApprovalsBody.data?.[0]?.kind,
+    "network",
+    "Mission approval listing exposes only the network approval kind",
+  );
+  const serializedApproval = JSON.stringify(listApprovalsBody);
+  for (const secretValue of [
+    "private-query-that-must-not-be-returned",
+    "must-never-leave-aiteam",
+    "secret-network-target.example",
+    seededApproval.taskId,
+    "mission-approval-no-run-agent",
+    "call_fingerprint",
+    "server_fingerprint",
+  ]) {
+    assertEqual(
+      serializedApproval.includes(secretValue),
+      false,
+      `Mission approval listing redacts ${secretValue}`,
+    );
+  }
+
+  const crossOrganizationApprovals = await fetch(
+    `${base}/missions/${approvalMissionId}/approvals`,
+    {
+      headers: {
+        Authorization: `Bearer ${serviceToken("org-beta", ["mission:read"])}`,
+      },
+    },
+  );
+  assertEqual(
+    crossOrganizationApprovals.status,
+    404,
+    "Mission approvals are hidden from another organization",
+  );
+
+  const readOnlyResolve = await fetch(
+    `${base}/missions/${approvalMissionId}/approvals/${approvalId}/resolve`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${serviceToken("org-alpha", ["mission:read"])}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        decision: "approve",
+        resolved_by: "user-123",
+      }),
+    },
+  );
+  assertEqual(
+    readOnlyResolve.status,
+    403,
+    "A read-only service token cannot resolve a Mission approval",
+  );
+
+  const resolveHeaders = {
+    Authorization: `Bearer ${serviceToken("org-alpha", ["mission:approve"])}`,
+    "Content-Type": "application/json",
+  };
+  const approveNetwork = await fetch(
+    `${base}/missions/${approvalMissionId}/approvals/${approvalId}/resolve`,
+    {
+      method: "POST",
+      headers: resolveHeaders,
+      body: JSON.stringify({
+        decision: "approve",
+        resolved_by: "user-123",
+      }),
+    },
+  );
+  assertEqual(
+    approveNetwork.status,
+    200,
+    "An authorized Mission requester can approve a network action",
+  );
+  const approvedState = approvalState(approvalId, seededApproval.taskId);
+  assertEqual(
+    approvedState.approval.status,
+    "approved",
+    "Mission approval updates the existing AITeam approval",
+  );
+  assertEqual(
+    approvedState.task.status,
+    "todo",
+    "Approving a Mission network action resumes its original task",
+  );
+  assertEqual(
+    approvedState.task.blocked_approval_id,
+    null,
+    "Approving clears the task's blocking approval",
+  );
+
+  const replayApprove = await fetch(
+    `${base}/missions/${approvalMissionId}/approvals/${approvalId}/resolve`,
+    {
+      method: "POST",
+      headers: resolveHeaders,
+      body: JSON.stringify({
+        decision: "approve",
+        resolved_by: "user-123",
+      }),
+    },
+  );
+  assertEqual(
+    replayApprove.status,
+    200,
+    "Repeating the same Mission approval decision is idempotent",
+  );
+  assertEqual(
+    approvalState(approvalId, seededApproval.taskId).approvalEvents,
+    approvedState.approvalEvents,
+    "An idempotent approval replay does not duplicate task events",
+  );
+
+  const conflictingReject = await fetch(
+    `${base}/missions/${approvalMissionId}/approvals/${approvalId}/resolve`,
+    {
+      method: "POST",
+      headers: resolveHeaders,
+      body: JSON.stringify({
+        decision: "reject",
+        resolved_by: "user-123",
+      }),
+    },
+  );
+  assertEqual(
+    conflictingReject.status,
+    409,
+    "A conflicting Mission approval decision cannot overwrite the first decision",
+  );
+
+  const rejectedApprovalId = "mission-network-approval-rejected";
+  const rejectedSeed = seedMissionNetworkApproval(
+    approvalMissionId,
+    rejectedApprovalId,
+    "another-private-query",
+  );
+  const rejectNetwork = await fetch(
+    `${base}/missions/${approvalMissionId}/approvals/${rejectedApprovalId}/resolve`,
+    {
+      method: "POST",
+      headers: resolveHeaders,
+      body: JSON.stringify({
+        decision: "reject",
+        resolved_by: "user-123",
+      }),
+    },
+  );
+  assertEqual(
+    rejectNetwork.status,
+    200,
+    "An authorized Mission requester can reject a network action",
+  );
+  const rejectedState = approvalState(
+    rejectedApprovalId,
+    rejectedSeed.taskId,
+  );
+  assertEqual(
+    rejectedState.approval.status,
+    "rejected",
+    "Mission network rejection is persisted",
+  );
+  assertEqual(
+    rejectedState.task.status,
+    "blocked",
+    "Rejecting a Mission network action leaves the task blocked",
+  );
+  assertEqual(
+    rejectedState.task.blocked_approval_id,
+    rejectedApprovalId,
+    "Rejected network approval remains the visible block reason",
+  );
+  const closeApprovalMission = await fetch(
+    `${base}/missions/${approvalMissionId}/cancel`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${serviceToken("org-alpha", [
+          "mission:cancel",
+        ])}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        cancelled_by: "user-123",
+        reason: "Network approval regression is complete.",
+      }),
+    },
+  );
+  assertEqual(
+    closeApprovalMission.status,
+    200,
+    "The approval regression Mission releases its admission slot",
+  );
 
   const cancellableMission = await fetch(`${base}/missions`, {
     method: "POST",

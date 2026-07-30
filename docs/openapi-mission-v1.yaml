@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: AITeam Mission API
-  version: 0.7.0
+  version: 0.8.0
   description: Organization-scoped research execution and artifact contract used by Coworker.
 servers:
   - url: /aiteam/api/v1
@@ -168,6 +168,65 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+  /missions/{missionId}/approvals:
+    parameters:
+      - $ref: "#/components/parameters/MissionId"
+    get:
+      operationId: listMissionNetworkApprovals
+      summary: List sanitized network-approval decisions associated with a Mission
+      responses:
+        "200":
+          description: Newest-first list of up to 50 Mission network approvals
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/MissionNetworkApproval"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /missions/{missionId}/approvals/{approvalId}/resolve:
+    parameters:
+      - $ref: "#/components/parameters/MissionId"
+      - $ref: "#/components/parameters/ApprovalId"
+    post:
+      operationId: resolveMissionNetworkApproval
+      summary: Resolve one Mission network approval
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResolveMissionNetworkApprovalRequest"
+      responses:
+        "200":
+          description: Decision recorded, or the same decision replayed idempotently
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MissionNetworkApprovalEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The approval already has the opposite final decision
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
 components:
   securitySchemes:
     serviceJwt:
@@ -177,7 +236,7 @@ components:
       description: >-
         HS256 JWT with iss=coworker, aud=aiteam, sub=service:coworker,
         organization_id, scope (mission:create, mission:read and/or
-        mission:cancel), iat and exp. During keyring rotation the JOSE header
+        mission:cancel and/or mission:approve), iat and exp. During keyring rotation the JOSE header
         must include a configured kid.
   parameters:
     IdempotencyKey:
@@ -194,6 +253,14 @@ components:
       required: true
       schema:
         type: string
+    ApprovalId:
+      name: approvalId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 160
   schemas:
     CreateMissionRequest:
       type: object
@@ -234,6 +301,20 @@ components:
           type: string
           minLength: 3
           maxLength: 500
+    ResolveMissionNetworkApprovalRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - decision
+        - resolved_by
+      properties:
+        decision:
+          type: string
+          enum: [approve, reject]
+        resolved_by:
+          type: string
+          minLength: 1
+          maxLength: 160
     Mission:
       type: object
       required:
@@ -301,6 +382,51 @@ components:
           type: integer
         updated_at:
           type: integer
+    MissionNetworkApproval:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - mission_id
+        - kind
+        - title
+        - server_name
+        - tool_name
+        - status
+        - created_at
+        - resolved_at
+      description: >-
+        Sanitized decision metadata. Exact input, target URL, credentials,
+        fingerprints, task IDs and agent IDs never cross the Mission boundary.
+      properties:
+        id:
+          type: string
+        mission_id:
+          type: string
+        kind:
+          const: network
+        title:
+          type: string
+          maxLength: 200
+        server_name:
+          type: string
+          maxLength: 120
+        tool_name:
+          type: string
+          maxLength: 120
+        status:
+          type: string
+          enum: [pending, approved, rejected]
+        created_at:
+          type: integer
+        resolved_at:
+          type: [integer, "null"]
+    MissionNetworkApprovalEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/MissionNetworkApproval"
     MissionActivityStage:
       type: object
       additionalProperties: false
@@ -413,6 +539,9 @@ components:
       enum:
         - MISSION_CANCEL_REQUEST_INVALID
         - MISSION_CAPACITY_EXCEEDED
+        - MISSION_APPROVAL_CONFLICT
+        - MISSION_APPROVAL_NOT_FOUND
+        - MISSION_APPROVAL_REQUEST_INVALID
         - MISSION_EVENT_CURSOR_INVALID
         - MISSION_IDEMPOTENCY_CONFLICT
         - MISSION_NOT_FOUND

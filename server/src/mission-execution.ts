@@ -4,17 +4,20 @@ import {
   createTaskEvent,
   db,
   getAgent,
+  getApproval,
   getTask,
   invalidateApprovalsForTask,
   listAgents,
   listChannels,
   listDocuments,
+  listApprovals,
   listTaskEvents,
   listTasks,
   listVerdictsForTask,
   updateProject,
   updateTask,
   type Task,
+  type Approval,
 } from "./db.js";
 import { isMock, onTaskAssigned, stopTask } from "./agents/engine.js";
 import { broadcast } from "./bus.js";
@@ -27,6 +30,7 @@ import {
 import { ownerFromUserId, withOwner } from "./ownerScope.js";
 import { seedForOwner } from "./seed.js";
 import type { Mission, MissionStatus } from "./missions.js";
+import { resolveApprovalWithSideEffects } from "./approval-resolution.js";
 
 interface MissionExecution {
   mission_id: string;
@@ -55,6 +59,26 @@ export interface MissionArtifact {
   updated_at: number;
 }
 
+export interface MissionNetworkApproval {
+  id: string;
+  mission_id: string;
+  kind: "network";
+  title: string;
+  server_name: string;
+  tool_name: string;
+  status: "pending" | "approved" | "rejected";
+  created_at: number;
+  resolved_at: number | null;
+}
+
+export type ResolveMissionNetworkApprovalResult =
+  | { outcome: "not_found" }
+  | { outcome: "conflict"; approval: MissionNetworkApproval }
+  | {
+      outcome: "resolved" | "replayed";
+      approval: MissionNetworkApproval;
+    };
+
 export interface CancelMissionExecutionInput {
   cancelledBy: string;
   reason: string;
@@ -80,6 +104,46 @@ function executionFor(
        WHERE mission_id = ? AND organization_id = ?`,
     )
     .get(missionId, organizationId) as MissionExecution | undefined;
+}
+
+function publicNetworkApproval(
+  mission: Mission,
+  approval: Approval,
+): MissionNetworkApproval | null {
+  if (approval.kind !== "network") return null;
+  try {
+    const payload = JSON.parse(approval.payload || "{}") as {
+      network_grant?: {
+        v?: unknown;
+        server_name?: unknown;
+        tool?: unknown;
+      };
+    };
+    const grant = payload.network_grant;
+    if (
+      grant?.v !== 1 ||
+      typeof grant.server_name !== "string" ||
+      typeof grant.tool !== "string"
+    ) {
+      return null;
+    }
+    const toolName =
+      grant.tool.match(/^mcp__.+?__(.+)$/)?.[1]?.slice(0, 120) ??
+      "external_tool";
+    return {
+      id: approval.id,
+      mission_id: mission.id,
+      kind: "network",
+      title: approval.title.slice(0, 200),
+      server_name: grant.server_name.slice(0, 120),
+      tool_name: toolName,
+      status: approval.status,
+      created_at: approval.created_at,
+      resolved_at: approval.resolved_at,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function pickAgent(
@@ -524,5 +588,65 @@ export function listMissionArtifacts(mission: Mission): MissionArtifact[] {
         created_at: document.created_at,
         updated_at: document.updated_at,
       }));
+  });
+}
+
+/**
+ * Mission clients receive only the decision metadata needed for informed
+ * consent. Exact tool input, target URL, credentials, fingerprints, task IDs,
+ * and agent IDs remain inside AITeam.
+ */
+export function listMissionNetworkApprovals(
+  mission: Mission,
+): MissionNetworkApproval[] {
+  const execution = ensureMissionExecution(mission);
+  return withOwner(execution.owner_id, () => {
+    const taskIds = new Set(executionTasks(execution).map((task) => task.id));
+    return listApprovals()
+      .filter(
+        (approval) =>
+          Boolean(approval.ref_id && taskIds.has(approval.ref_id)) &&
+          approval.kind === "network",
+      )
+      .map((approval) => publicNetworkApproval(mission, approval))
+      .filter(
+        (approval): approval is MissionNetworkApproval => approval !== null,
+      )
+      .sort((left, right) => right.created_at - left.created_at)
+      .slice(0, 50);
+  });
+}
+
+export function resolveMissionNetworkApproval(
+  mission: Mission,
+  approvalId: string,
+  input: { approve: boolean; resolvedBy: string },
+): ResolveMissionNetworkApprovalResult {
+  const execution = ensureMissionExecution(mission);
+  return withOwner(execution.owner_id, () => {
+    const taskIds = new Set(executionTasks(execution).map((task) => task.id));
+    const before = getApproval(approvalId);
+    const publicBefore = before
+      ? publicNetworkApproval(mission, before)
+      : null;
+    if (
+      !before?.ref_id ||
+      !taskIds.has(before.ref_id) ||
+      !publicBefore
+    ) {
+      return { outcome: "not_found" };
+    }
+    const result = resolveApprovalWithSideEffects({
+      id: approvalId,
+      approve: input.approve,
+      resolvedBy: input.resolvedBy,
+    });
+    if (result.outcome === "not_found") return { outcome: "not_found" };
+    const approval = publicNetworkApproval(mission, result.approval);
+    if (!approval) return { outcome: "not_found" };
+    if (result.outcome === "conflict") {
+      return { outcome: "conflict", approval };
+    }
+    return { outcome: result.outcome, approval };
   });
 }

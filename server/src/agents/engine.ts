@@ -2173,7 +2173,10 @@ export function onBudgetResolved(approval: Approval, approved: boolean) {
  * 单次 network MCP 审批恢复原任务，不进入无 taskId 的普通 chat。
  * 返回 true 表示该 action 是结构化网络审批，路由层不应再走 generic triggerAgent。
  */
-export function onNetworkApprovalResolved(approval: Approval): boolean {
+export function onNetworkApprovalResolved(
+  approval: Approval,
+  resolvedBy?: string,
+): boolean {
   if (!approvalContainsNetworkGrant(approval)) return false;
   if (!approval.ref_id) {
     if (approval.status === "approved") consumeApproval(approval.id);
@@ -2195,7 +2198,13 @@ export function onNetworkApprovalResolved(approval: Approval): boolean {
       next,
       "approval",
       `用户批准单次网络调用，任务恢复：${grant.tool}`,
-      { approval_id: approval.id, status: "approved", tool: grant.tool, call_fingerprint: grant.call_fingerprint },
+      {
+        approval_id: approval.id,
+        status: "approved",
+        tool: grant.tool,
+        call_fingerprint: grant.call_fingerprint,
+        ...(resolvedBy ? { resolved_by: resolvedBy } : {}),
+      },
       approval.agent_id,
     );
     if (next.channel_id) audit(next.channel_id, `▶️ 用户批准一次网络调用，任务「${next.title}」恢复执行`);
@@ -2214,7 +2223,13 @@ export function onNetworkApprovalResolved(approval: Approval): boolean {
           ? "网络调用授权已失效，任务保持阻塞"
           : "任务负责人已变化，原网络调用授权失效并保持阻塞"
         : "用户拒绝网络调用，任务保持阻塞",
-      { approval_id: approval.id, status: approved ? "invalid" : "rejected", same_agent: sameAgent, stopped },
+      {
+        approval_id: approval.id,
+        status: approved ? "invalid" : "rejected",
+        same_agent: sameAgent,
+        stopped,
+        ...(resolvedBy ? { resolved_by: resolvedBy } : {}),
+      },
       approval.agent_id,
     );
     if (task.channel_id) {
