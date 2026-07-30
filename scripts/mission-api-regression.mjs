@@ -298,6 +298,22 @@ try {
   const eventsBody = await missionEvents.json();
   assertEqual(eventsBody.data?.[0]?.sequence, 1, "The creation event starts at sequence one");
   assertEqual(
+    typeof eventsBody.data?.[0]?.event_id === "string" &&
+      eventsBody.data[0].event_id.length > 0,
+    true,
+    "Mission events expose a stable event id",
+  );
+  assertEqual(
+    eventsBody.data?.[0]?.correlation_id,
+    createdBody.data.id,
+    "Mission events correlate to the Mission",
+  );
+  assertEqual(
+    eventsBody.data?.[0]?.causation_id,
+    null,
+    "The creation event has no parent event",
+  );
+  assertEqual(
     eventsBody.data?.[0]?.type,
     "mission.created",
     "Mission creation is recorded as the first event",
@@ -323,6 +339,39 @@ try {
     completedEvent?.payload?.quality_gate,
     "mock_skipped",
     "Mock completion is not presented as a passed quality review",
+  );
+  const completedEventIndex = eventsBody.data?.findIndex(
+    (event) => event.event_id === completedEvent?.event_id,
+  );
+  assertEqual(
+    typeof completedEvent?.event_id === "string" &&
+      completedEvent.event_id.length > 0,
+    true,
+    "The completion event has a stable event id",
+  );
+  assertEqual(
+    completedEvent?.correlation_id,
+    createdBody.data.id,
+    "The completion event retains the Mission correlation id",
+  );
+  assertEqual(
+    completedEvent?.causation_id,
+    eventsBody.data?.[completedEventIndex - 1]?.event_id,
+    "Each transition event references the event that caused it",
+  );
+  const replayedEvents = await fetch(
+    `${base}/missions/${createdBody.data.id}/events?after=0`,
+    {
+      headers: {
+        Authorization: `Bearer ${serviceToken("org-alpha")}`,
+      },
+    },
+  );
+  const replayedEventsBody = await replayedEvents.json();
+  assertEqual(
+    JSON.stringify(replayedEventsBody.data?.map((event) => event.event_id)),
+    JSON.stringify(eventsBody.data?.map((event) => event.event_id)),
+    "Mission event ids remain stable across replay",
   );
 
   const noNewEvents = await fetch(

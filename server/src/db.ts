@@ -260,6 +260,9 @@ CREATE TABLE IF NOT EXISTS missions (
 CREATE INDEX IF NOT EXISTS idx_missions_org_created
   ON missions(organization_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS mission_events (
+  event_id TEXT NOT NULL,
+  correlation_id TEXT NOT NULL,
+  causation_id TEXT,
   mission_id TEXT NOT NULL,
   organization_id TEXT NOT NULL,
   sequence INTEGER NOT NULL,
@@ -321,6 +324,33 @@ addColumnIfMissing("tasks", "estimate_billable", "estimate_billable INTEGER NOT 
 addColumnIfMissing("providers", "price_input_per_million", "price_input_per_million REAL NOT NULL DEFAULT 0");
 addColumnIfMissing("providers", "price_output_per_million", "price_output_per_million REAL NOT NULL DEFAULT 0");
 addColumnIfMissing("providers", "price_currency", "price_currency TEXT NOT NULL DEFAULT 'USD'");
+// Mission event envelope v0.3: old rows receive deterministic identities so
+// replay remains stable across restarts and upgrades.
+addColumnIfMissing("mission_events", "event_id", "event_id TEXT");
+addColumnIfMissing("mission_events", "correlation_id", "correlation_id TEXT");
+addColumnIfMissing("mission_events", "causation_id", "causation_id TEXT");
+db.transaction(() => {
+  db.exec(`
+    UPDATE mission_events
+    SET event_id = 'legacy:' || mission_id || ':' || sequence
+    WHERE event_id IS NULL OR event_id = '';
+
+    UPDATE mission_events
+    SET correlation_id = mission_id
+    WHERE correlation_id IS NULL OR correlation_id = '';
+
+    UPDATE mission_events AS current
+    SET causation_id = (
+      SELECT previous.event_id
+      FROM mission_events AS previous
+      WHERE previous.mission_id = current.mission_id
+        AND previous.sequence = current.sequence - 1
+    )
+    WHERE current.sequence > 1
+      AND (current.causation_id IS NULL OR current.causation_id = '');
+  `);
+})();
+db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_mission_events_event_id ON mission_events(event_id)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_task_events_task ON task_events(owner_id, task_id, created_at)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_task_events_owner ON task_events(owner_id, created_at)`);
 // D1 质量闭环落表：每次验收裁决一行（此前 verdict 只散落在频道消息流里，无法做质量度量）

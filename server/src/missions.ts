@@ -36,6 +36,9 @@ export interface CreateMissionInput {
 }
 
 export interface MissionEvent {
+  event_id: string;
+  correlation_id: string;
+  causation_id: string | null;
   mission_id: string;
   organization_id: string;
   sequence: number;
@@ -86,6 +89,7 @@ export function createMission(
   }
 
   const createdAt = Date.now();
+  const createdEventId = nanoid(20);
   const mission: Mission = {
     id: nanoid(16),
     organization_id: input.organization_id,
@@ -114,9 +118,12 @@ export function createMission(
     });
     db.prepare(
       `INSERT INTO mission_events (
+        event_id, correlation_id, causation_id,
         mission_id, organization_id, sequence, type, status, payload_json, created_at
-      ) VALUES (?, ?, 1, 'mission.created', 'queued', ?, ?)`,
+      ) VALUES (?, ?, NULL, ?, ?, 1, 'mission.created', 'queued', ?, ?)`,
     ).run(
+      createdEventId,
+      mission.id,
       mission.id,
       mission.organization_id,
       JSON.stringify({ kind: mission.kind, requested_by: mission.requested_by }),
@@ -162,22 +169,31 @@ function transitionMission(
   if (status === "queued") return mission;
   const updatedAt = Date.now();
   db.transaction(() => {
-    const sequenceRow = db
+    const previousEvent = db
       .prepare(
-        "SELECT COALESCE(MAX(sequence), 0) AS sequence FROM mission_events WHERE mission_id = ?",
+        `SELECT event_id, sequence
+         FROM mission_events
+         WHERE mission_id = ?
+         ORDER BY sequence DESC
+         LIMIT 1`,
       )
-      .get(mission.id) as { sequence: number };
+      .get(mission.id) as { event_id: string; sequence: number } | undefined;
+    const eventId = nanoid(20);
     db.prepare(
       "UPDATE missions SET status = ?, updated_at = ? WHERE id = ? AND organization_id = ?",
     ).run(status, updatedAt, mission.id, mission.organization_id);
     db.prepare(
       `INSERT INTO mission_events (
+        event_id, correlation_id, causation_id,
         mission_id, organization_id, sequence, type, status, payload_json, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
+      eventId,
+      mission.id,
+      previousEvent?.event_id ?? null,
       mission.id,
       mission.organization_id,
-      sequenceRow.sequence + 1,
+      (previousEvent?.sequence ?? 0) + 1,
       eventType[status],
       status,
       JSON.stringify(payload),
@@ -229,7 +245,8 @@ export function listMissionEvents(
   limit: number,
 ): MissionEvent[] {
   const rows = db.prepare(
-    `SELECT mission_id, organization_id, sequence, type, status, payload_json, created_at
+    `SELECT event_id, correlation_id, causation_id,
+            mission_id, organization_id, sequence, type, status, payload_json, created_at
      FROM mission_events
      WHERE organization_id = ? AND mission_id = ? AND sequence > ?
      ORDER BY sequence ASC
