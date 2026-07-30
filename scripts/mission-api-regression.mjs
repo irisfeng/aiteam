@@ -124,6 +124,7 @@ function seedMissionNetworkApproval(missionId, approvalId, query) {
       url: "https://secret-network-target.example/mcp",
       auth_token: "",
       command: "",
+      container_image: "",
       args_json: "[]",
       env_json: "{}",
       safety: "network",
@@ -131,10 +132,10 @@ function seedMissionNetworkApproval(missionId, approvalId, query) {
     database
       .prepare(
         `INSERT OR IGNORE INTO mcp_servers (
-          id, name, kind, url, auth_token, command, args_json,
+          id, name, kind, url, auth_token, command, container_image, args_json,
           env_json, safety, enabled, created_at
         ) VALUES (
-          @id, @name, @kind, @url, @auth_token, @command, @args_json,
+          @id, @name, @kind, @url, @auth_token, @command, @container_image, @args_json,
           @env_json, @safety, 1, @created_at
         )`,
       )

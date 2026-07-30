@@ -6,6 +6,13 @@ import { basename } from "node:path";
 import { McpServer, listMcpServers } from "../db.js";
 import { currentOwnerOrNull } from "../ownerScope.js";
 import { decryptSecret } from "../secrets.js";
+import {
+  assertStdioSandboxImageReady,
+  assertStdioSandboxRunnerReady,
+  buildStdioSandboxLaunch,
+  isPinnedContainerImage,
+  type StdioSandboxScope,
+} from "./stdioSandbox.js";
 
 /** 注入工作循环的 MCP 工具数量上限（防上下文膨胀，尤其轻量通道） */
 const MAX_MCP_TOOLS = Number(process.env.AITEAM_MAX_MCP_TOOLS ?? 40);
@@ -24,45 +31,130 @@ const failed = new Map<string, number>(); // serverId -> 失败时间（5 分钟
 
 export const STDIO_PRODUCTION_DISABLED_CODE =
   "MCP_STDIO_PRODUCTION_DISABLED";
+export const STDIO_IMAGE_REQUIRED_CODE = "MCP_STDIO_IMAGE_REQUIRED";
+export const STDIO_IMAGE_UNAVAILABLE_CODE = "MCP_STDIO_IMAGE_UNAVAILABLE";
+export const STDIO_PRODUCTION_SAFETY_DISABLED_CODE =
+  "MCP_STDIO_PRODUCTION_SAFETY_DISABLED";
 
 export function stdioRuntimeAllowed(kind: McpServer["kind"]): boolean {
-  return kind !== "stdio" || process.env.NODE_ENV !== "production";
+  if (kind !== "stdio" || process.env.NODE_ENV !== "production") return true;
+  try {
+    assertStdioSandboxRunnerReady();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function stdioRuntimeBlockedCode(
+  kind: McpServer["kind"],
+  safety: McpServer["safety"] = "local",
+  containerImage = "",
+): string | null {
+  if (kind !== "stdio" || process.env.NODE_ENV !== "production") return null;
+  if (!stdioRuntimeAllowed(kind)) return STDIO_PRODUCTION_DISABLED_CODE;
+  if (safety !== "local") return STDIO_PRODUCTION_SAFETY_DISABLED_CODE;
+  if (!isPinnedContainerImage(containerImage)) return STDIO_IMAGE_REQUIRED_CODE;
+  return null;
+}
+
+export function stdioServerRuntimeAllowed(server: McpServer): boolean {
+  try {
+    assertStdioServerRuntimeAllowed(server);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function stdioServerRuntimeBlockedCode(
+  server: McpServer,
+): string | null {
+  const configCode = stdioRuntimeBlockedCode(
+    server.kind,
+    server.safety,
+    server.container_image,
+  );
+  if (configCode) return configCode;
+  if (server.kind !== "stdio" || process.env.NODE_ENV !== "production") {
+    return null;
+  }
+  try {
+    assertStdioSandboxImageReady(server.container_image);
+    return null;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return message.startsWith(`${STDIO_IMAGE_UNAVAILABLE_CODE}:`)
+      ? STDIO_IMAGE_UNAVAILABLE_CODE
+      : STDIO_PRODUCTION_DISABLED_CODE;
+  }
 }
 
 /**
- * 生产进程在没有独立 OS/container sandbox runner 前禁止派生 stdio MCP。
+ * 生产只允许 rootless Podman 中的 local stdio。network/exec 仍 fail-closed，
+ * 因为联网授权必须早于容器启动，exec 还需要独立写入策略；两者不能借 local
+ * runner 的容器边界偷渡。
  *
  * command basename 白名单不能约束 node -e / python -c / npx package 等参数，
  * cwd 也不是文件系统边界；审批只表达用户意图，不能代替进程隔离。因此生产
  * 必须在唯一真实 spawn 边界 fail-closed。开发/测试仍保留 stdio 便于本地验收。
  */
 export function assertStdioServerRuntimeAllowed(server: McpServer): void {
-  if (!stdioRuntimeAllowed(server.kind)) {
-    throw new Error(
-      `${STDIO_PRODUCTION_DISABLED_CODE}: 生产环境未配置独立 stdio 沙箱运行器，拒绝启动本地 MCP 子进程`,
-    );
+  const code = stdioRuntimeBlockedCode(
+    server.kind,
+    server.safety,
+    server.container_image,
+  );
+  if (code) {
+    const message =
+      code === STDIO_IMAGE_REQUIRED_CODE
+        ? "生产 stdio 必须配置按 sha256 digest 固定的 OCI 镜像"
+        : code === STDIO_PRODUCTION_SAFETY_DISABLED_CODE
+          ? "生产沙箱当前只开放 safety=local；network/exec 继续禁用"
+          : "生产环境未配置可用的 rootless Podman stdio 沙箱运行器";
+    throw new Error(`${code}: ${message}`);
+  }
+  if (server.kind === "stdio" && process.env.NODE_ENV === "production") {
+    assertStdioSandboxImageReady(server.container_image);
   }
 }
 
 export function assertProductionStdioConfiguration(): void {
   if (process.env.NODE_ENV !== "production") return;
-  const enabledStdioCount = listMcpServers().filter(
+  const enabledStdio = listMcpServers().filter(
     (server) => server.kind === "stdio" && Boolean(server.enabled),
-  ).length;
-  if (enabledStdioCount > 0) {
-    throw new Error(
-      `${STDIO_PRODUCTION_DISABLED_CODE}: 生产数据库中存在 ${enabledStdioCount} 个已启用的 stdio MCP；请在隔离环境中停用后再启动`,
-    );
+  );
+  for (const server of enabledStdio) {
+    try {
+      assertStdioServerRuntimeAllowed(server);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `${detail}: 已启用 stdio MCP「${server.name}」不满足生产隔离契约，请先停用或修正配置`,
+      );
+    }
   }
 }
 
 /** MCP 连接/调用超时：防一个挂死的插件把整个 agent 运行（消息）永久卡在 streaming。 */
 const MCP_TIMEOUT_MS = Number(process.env.AITEAM_MCP_TIMEOUT_MS ?? 45000);
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return Promise.race([
-    p,
-    new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`${label}超时（>${Math.round(ms / 1000)}s）`)), ms)),
-  ]);
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`${label}超时（>${Math.round(ms / 1000)}s）`)),
+      ms,
+    );
+    p.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 function sanitizeName(s: string): string {
@@ -72,7 +164,7 @@ function sanitizeName(s: string): string {
 /**
  * 开发/测试 stdio MCP 启动命令白名单。它只收窄误配置面，不是进程沙箱：
  * node -e / python -c / npx package 仍可通过参数执行代码。生产因此由上面的
- * fail-closed 门完全禁用 stdio，AITEAM_MCP_STDIO_ALLOW 不能改变该结论。
+ * rootless Podman 隔离；AITEAM_MCP_STDIO_ALLOW 不能改变生产容器边界。
  * 按 basename 匹配（容许绝对路径如 /usr/bin/python3；Windows 去 .exe）。
  */
 const STDIO_ALLOWED_DEFAULT = ["npx", "uvx", "uv", "node", "python", "python3", "markitdown-mcp"];
@@ -93,56 +185,126 @@ export function mcpToolName(serverName: string, tool: string): string {
   return `mcp__${sanitizeName(serverName)}__${tool}`;
 }
 
-async function connect(server: McpServer): Promise<Connection> {
-  const client = new Client({ name: "aiteam", version: "1.0.0" });
-  if (server.kind === "stdio") {
-    assertStdioServerRuntimeAllowed(server);
-    // 二次防御：路由层建档时已校验，但存量行/直接写库的行也必须在启动点被拦下
-    if (!stdioCommandAllowed(server.command)) {
-      throw new Error(
-        `stdio 命令「${server.command}」不在白名单（${stdioAllowedCommands().join("/")}）；如确需可用 AITEAM_MCP_STDIO_ALLOW 扩展`
-      );
-    }
-    let args: string[] = [];
-    try {
-      args = JSON.parse(server.args_json);
-    } catch { /* ignore */ }
-    // 自定义环境变量（如 BOCHA_API_KEY）：在 SDK 安全默认环境(含 PATH)之上叠加，让需要 env key 的 stdio MCP 可用。
-    let envExtra: Record<string, string> = {};
-    try {
-      const parsed = JSON.parse(decryptSecret(server.env_json || "{}") || "{}");
-      if (parsed && typeof parsed === "object") {
-        for (const [k, v] of Object.entries(parsed)) envExtra[k] = String(v);
-      }
-    } catch { /* ignore */ }
-    const env = { ...getDefaultEnvironment(), ...envExtra };
-    await client.connect(new StdioClientTransport({ command: server.command, args, env }));
-  } else {
-    const token = decryptSecret(server.auth_token);
-    await client.connect(
-      new StreamableHTTPClientTransport(new URL(server.url), {
-        requestInit: token ? { headers: { Authorization: `Bearer ${token}` } } : undefined,
-      })
-    );
-  }
-  const listed = await client.listTools();
-  return {
-    client,
-    tools: listed.tools.map((t) => ({
-      name: t.name,
-      description: t.description ?? "",
-      inputSchema: t.inputSchema ?? { type: "object", properties: {} },
-    })),
-  };
+function productionSandboxedStdio(server: McpServer): boolean {
+  return server.kind === "stdio" && process.env.NODE_ENV === "production";
 }
 
-async function ensureConnection(server: McpServer): Promise<Connection | null> {
+async function connect(
+  server: McpServer,
+  scope?: StdioSandboxScope,
+): Promise<Connection> {
+  const client = new Client({ name: "aiteam", version: "1.0.0" });
+  try {
+    if (server.kind === "stdio") {
+      assertStdioServerRuntimeAllowed(server);
+      // 开发/测试仍在宿主执行，保留 basename 误配置门；生产命令在 digest-pinned
+      // 容器内执行，真正安全边界是 buildStdioSandboxLaunch 生成的固定 runner 参数。
+      if (
+        process.env.NODE_ENV !== "production" &&
+        !stdioCommandAllowed(server.command)
+      ) {
+        throw new Error(
+          `stdio 命令「${server.command}」不在白名单（${stdioAllowedCommands().join("/")}）；如确需可用 AITEAM_MCP_STDIO_ALLOW 扩展`
+        );
+      }
+      let args: string[] = [];
+      try {
+        args = JSON.parse(server.args_json);
+      } catch { /* ignore */ }
+      // 自定义环境变量（如 BOCHA_API_KEY）：runner 保留 SDK 安全默认环境，
+      // 容器只注入 env_json 明确配置的键，避免把宿主 HOME/PATH 等隐式带入。
+      let envExtra: Record<string, string> = {};
+      try {
+        const parsed = JSON.parse(decryptSecret(server.env_json || "{}") || "{}");
+        if (parsed && typeof parsed === "object") {
+          for (const [k, v] of Object.entries(parsed)) envExtra[k] = String(v);
+        }
+      } catch { /* ignore */ }
+      const env = { ...getDefaultEnvironment(), ...envExtra };
+      if (process.env.NODE_ENV === "production") {
+        const owner = currentOwnerOrNull();
+        if (!scope || !owner || scope.ownerId !== owner) {
+          throw new Error(
+            "MCP_STDIO_CONTEXT_REQUIRED: production stdio requires the current owner and a Mission/task execution scope",
+          );
+        }
+        const launch = buildStdioSandboxLaunch(
+          server,
+          scope,
+          env,
+          Object.keys(envExtra),
+        );
+        await withTimeout(
+          client.connect(
+            new StdioClientTransport({
+              command: launch.command,
+              args: launch.args,
+              env: launch.env,
+            }),
+          ),
+          MCP_TIMEOUT_MS,
+          `连接隔离 MCP「${server.name}」`,
+        );
+      } else {
+        await withTimeout(
+          client.connect(
+            new StdioClientTransport({ command: server.command, args, env }),
+          ),
+          MCP_TIMEOUT_MS,
+          `连接 MCP「${server.name}」`,
+        );
+      }
+    } else {
+      const token = decryptSecret(server.auth_token);
+      await withTimeout(
+        client.connect(
+          new StreamableHTTPClientTransport(new URL(server.url), {
+            requestInit: token ? { headers: { Authorization: `Bearer ${token}` } } : undefined,
+          })
+        ),
+        MCP_TIMEOUT_MS,
+        `连接 MCP「${server.name}」`,
+      );
+    }
+    const listed = await withTimeout(
+      client.listTools(),
+      MCP_TIMEOUT_MS,
+      `读取 MCP「${server.name}」工具清单`,
+    );
+    return {
+      client,
+      tools: listed.tools.map((t) => ({
+        name: t.name,
+        description: t.description ?? "",
+        inputSchema: t.inputSchema ?? { type: "object", properties: {} },
+      })),
+    };
+  } catch (error) {
+    await client.close().catch(() => undefined);
+    throw error;
+  }
+}
+
+async function ensureConnection(
+  server: McpServer,
+  scope?: StdioSandboxScope,
+): Promise<Connection | null> {
+  // 每次生产 stdio 连接都是单独的 --rm 容器；不进入 server 级全局缓存，
+  // 避免一个 Mission 的进程、内存或 workspace 被另一 Mission 复用。
+  if (productionSandboxedStdio(server)) {
+    try {
+      return await connect(server, scope);
+    } catch (err) {
+      console.error(`[mcp] sandbox connect ${server.name} failed:`, err);
+      return null;
+    }
+  }
   const cached = connections.get(server.id);
   if (cached) return cached;
   const failedAt = failed.get(server.id);
   if (failedAt && Date.now() - failedAt < 5 * 60_000) return null; // 熔断窗口内不重试
   try {
-    const conn = await withTimeout(connect(server), MCP_TIMEOUT_MS, `连接 MCP「${server.name}」`);
+    const conn = await connect(server);
     connections.set(server.id, conn);
     failed.delete(server.id);
     return conn;
@@ -160,29 +322,53 @@ export function dropConnection(serverId: string) {
   failed.delete(serverId);
 }
 
-/** 测试连接：返回工具数（抛错则由路由层转为错误信息） */
-export async function testMcpServer(server: McpServer): Promise<number> {
+/** 测试连接：生产 stdio 使用一次性隔离容器，其他类型保持原有懒连接。 */
+export async function testMcpServer(
+  server: McpServer,
+  scope?: StdioSandboxScope,
+): Promise<number> {
   dropConnection(server.id);
-  const conn = await connect(server);
+  const conn = await connect(server, scope);
+  if (productionSandboxedStdio(server)) {
+    try {
+      return conn.tools.length;
+    } finally {
+      await conn.client.close().catch(() => undefined);
+    }
+  }
   connections.set(server.id, conn);
   return conn.tools.length;
 }
 
 /** 已启用 MCP server 的工具，转换为 Anthropic 工具定义（名字带 mcp__<server>__ 前缀防冲突） */
-export async function mcpToolDefs(): Promise<Anthropic.Tool[]> {
+export async function mcpToolDefs(
+  scope?: StdioSandboxScope,
+): Promise<Anthropic.Tool[]> {
   const defs: Anthropic.Tool[] = [];
   for (const server of listMcpServers()) {
     if (!server.enabled) continue;
-    const conn = await ensureConnection(server);
+    if (
+      productionSandboxedStdio(server) &&
+      (!scope || !stdioServerRuntimeAllowed(server))
+    ) {
+      continue;
+    }
+    const conn = await ensureConnection(server, scope);
     if (!conn) continue;
-    const prefix = `mcp__${sanitizeName(server.name)}__`;
-    for (const t of conn.tools) {
-      if (defs.length >= MAX_MCP_TOOLS) return defs;
-      defs.push({
-        name: `${prefix}${t.name}`.slice(0, 128),
-        description: `[${server.name}] ${t.description}`.slice(0, 1024),
-        input_schema: t.inputSchema,
-      });
+    try {
+      const prefix = `mcp__${sanitizeName(server.name)}__`;
+      for (const t of conn.tools) {
+        if (defs.length >= MAX_MCP_TOOLS) return defs;
+        defs.push({
+          name: `${prefix}${t.name}`.slice(0, 128),
+          description: `[${server.name}] ${t.description}`.slice(0, 1024),
+          input_schema: t.inputSchema,
+        });
+      }
+    } finally {
+      if (productionSandboxedStdio(server)) {
+        await conn.client.close().catch(() => undefined);
+      }
     }
   }
   return defs;
@@ -202,7 +388,7 @@ export function mcpToolPrefixReady(prefix: string): boolean {
   if (!m) return false;
   const key = m[1];
   const server = listMcpServers().find((s) => Boolean(s.enabled) && sanitizeName(s.name) === key);
-  if (!server || !stdioRuntimeAllowed(server.kind)) return false;
+  if (!server || !stdioServerRuntimeAllowed(server)) return false;
   const conn = connections.get(server.id);
   if (!conn) return true; // 懒连接：启用即视为就绪
   const wildcard = prefix.endsWith("*");
@@ -219,7 +405,7 @@ export function mcpServerForTool(name: string): McpServer | null {
       (server) =>
         sanitizeName(server.name) === mt[1] &&
         Boolean(server.enabled) &&
-        stdioRuntimeAllowed(server.kind),
+        stdioServerRuntimeAllowed(server),
     ) ?? null
   );
 }
@@ -253,6 +439,8 @@ export function searchQuerySignature(input: unknown): string | null {
 interface CallMcpToolOptions {
   /** 在可能耗时的连接前后核验调用上下文；false 时 fail-closed，不触发真实 callTool。 */
   canDispatch?: () => boolean;
+  /** 生产 stdio 用 owner + Mission/task 作用域派生唯一工作区。 */
+  scope?: StdioSandboxScope;
 }
 
 function dispatchAllowed(options: CallMcpToolOptions): boolean {
@@ -275,18 +463,23 @@ export async function callMcpTool(
   const server = listMcpServers().find((s) => sanitizeName(s.name) === serverKey && s.enabled);
   if (!server) return `错误：MCP server「${serverKey}」不存在或已停用`;
   if (!dispatchAllowed(options)) return "错误：任务执行权已撤销，本次 MCP 工具调用未执行";
-  const conn = await ensureConnection(server);
-  if (!conn) return `错误：MCP server「${server.name}」连接失败，请检查配置（设置 → MCP 插件 → 测试）`;
-  // ensureConnection 可能包含网络/进程握手；stop、取消或改派可在 await 期间发生，
-  // 因此必须紧邻真实 callTool 再校验一次，而不能只依赖授权消费前的状态。
-  if (!dispatchAllowed(options)) return "错误：任务执行权已撤销，本次 MCP 工具调用未执行";
-  // 缓存是进程级全局，而结果可能含租户私有数据（检索内容/文档转换产物）——key 必须带 owner 前缀，
-  // 否则多用户下 A 的结果会命中给 B。缺 owner 上下文时 fail-closed：不读不写缓存，只走真实调用。
+  const sandboxed = productionSandboxedStdio(server);
   const owner = currentOwnerOrNull();
-  const cacheKey = owner ? `${owner}:${name}:${JSON.stringify(input ?? {})}` : null;
+  const executionScope = sandboxed ? options.scope?.executionId : "";
+  const cacheKey =
+    owner && (!sandboxed || executionScope)
+      ? `${owner}:${executionScope}:${name}:${JSON.stringify(input ?? {})}`
+      : null;
   const hit = cacheKey ? callCache.get(cacheKey) : undefined;
   if (hit && Date.now() - hit.ts < CALL_CACHE_TTL) return hit.text;
+  const conn = await ensureConnection(server, options.scope);
+  if (!conn) return `错误：MCP server「${server.name}」连接失败，请检查配置（设置 → MCP 插件 → 测试）`;
   try {
+    // ensureConnection 可能包含网络/进程握手；stop、取消或改派可在 await 期间发生，
+    // 因此必须紧邻真实 callTool 再校验一次，而不能只依赖授权消费前的状态。
+    if (!dispatchAllowed(options)) {
+      return "错误：任务执行权已撤销，本次 MCP 工具调用未执行";
+    }
     const result = await withTimeout(
       conn.client.callTool({ name: toolName, arguments: (input ?? {}) as Record<string, unknown> }),
       MCP_TIMEOUT_MS,
@@ -309,5 +502,9 @@ export async function callMcpTool(
     // 连接失效则下次懒重连
     dropConnection(server.id);
     return `MCP 工具执行失败：${err?.message ?? err}`;
+  } finally {
+    if (sandboxed) {
+      await conn.client.close().catch(() => undefined);
+    }
   }
 }

@@ -30,6 +30,7 @@ import {
   getDocument,
   getMemory,
   getMessage,
+  mcpExecutionIdForTask,
   getProject,
   getSkill,
   getTask,
@@ -820,6 +821,7 @@ function networkServerFingerprint(server: NonNullable<ReturnType<typeof mcpServe
     url: server.url,
     auth_token: server.auth_token,
     command: server.command,
+    container_image: server.container_image,
     args_json: server.args_json,
     env_json: server.env_json,
     safety: server.safety,
@@ -3267,9 +3269,15 @@ async function llmLoop(
   const stageKey = rt.providerId ?? "env";
   let webStage = rt.official ? 0 : webToolsStage.get(stageKey) ?? 0;
   let mcpDefs: Anthropic.Tool[] = [];
+  const mcpScope = ctx.taskId
+    ? {
+        ownerId: currentOwner(),
+        executionId: mcpExecutionIdForTask(ctx.taskId),
+      }
+    : undefined;
   if (!toolsOverride) {
     try {
-      mcpDefs = await mcpToolDefs(); // MCP 插件工具（懒连接，失败自动跳过）
+      mcpDefs = await mcpToolDefs(mcpScope); // 生产 stdio 按 Mission/task 作用域起一次性容器
     } catch (err) {
       console.error("[engine] mcp tools unavailable:", err);
     }
@@ -3482,6 +3490,7 @@ async function llmLoop(
               mcpCalls++;
               let dispatchRevoked = false;
               result = await callMcpTool(tu.name, tu.input, {
+                scope: mcpScope,
                 canDispatch: () => {
                   const allowed = !ctx.taskId || taskExecutionIsCurrent(ctx.taskId, agent.id);
                   if (!allowed) dispatchRevoked = true;

@@ -56,18 +56,28 @@ import { coworkerMeIsAdmin, fetchCoworkerMe } from "./coworker.js";
 import { seedForOwner } from "./seed.js";
 import { AGENT_TEMPLATES, getTemplate } from "./agents/templates.js";
 import multer from "multer";
-import { withOwner, ownerFromUserId } from "./ownerScope.js";
+import { currentOwner, withOwner, ownerFromUserId } from "./ownerScope.js";
 import {
+  STDIO_IMAGE_REQUIRED_CODE,
+  STDIO_IMAGE_UNAVAILABLE_CODE,
   STDIO_PRODUCTION_DISABLED_CODE,
+  STDIO_PRODUCTION_SAFETY_DISABLED_CODE,
   callMcpTool,
   dropConnection,
-  mcpToolName,
   mcpToolPrefixReady,
   stdioAllowedCommands,
   stdioCommandAllowed,
   stdioRuntimeAllowed,
+  stdioRuntimeBlockedCode,
+  stdioServerRuntimeAllowed,
+  stdioServerRuntimeBlockedCode,
   testMcpServer,
 } from "./agents/mcp.js";
+import {
+  assertStdioSandboxImageReady,
+  type StdioSandboxScope,
+  withStdioSandboxFile,
+} from "./agents/stdioSandbox.js";
 import { UPLOAD_MAX_BYTES, TEXT_EXTS, DOC_EXTS, extOf, withTempFile, persistTemplateBinary, readTemplateBinary, removeTemplateBinary } from "./uploads.js";
 import { parseTemplate, applyTemplateEdits, type TemplateEdit, type ImageEdit } from "./pptx-template.js";
 import {
@@ -264,26 +274,69 @@ function emitTaskEvent(input: Parameters<typeof createTaskEvent>[0]) {
 
 function runtimeMcpPresetRegistry() {
   return MCP_REGISTRY.map((preset) => {
-    const runtimeAvailable = stdioRuntimeAllowed(preset.kind);
+    const blockedCode =
+      preset.kind !== "stdio" || process.env.NODE_ENV !== "production"
+        ? null
+        : !stdioRuntimeAllowed("stdio")
+          ? STDIO_PRODUCTION_DISABLED_CODE
+          : preset.safety !== "local"
+            ? STDIO_PRODUCTION_SAFETY_DISABLED_CODE
+            : null;
+    const runtimeAvailable = blockedCode === null;
     return {
       ...preset,
       runtime_available: runtimeAvailable,
-      runtime_blocked_code: runtimeAvailable
-        ? null
-        : STDIO_PRODUCTION_DISABLED_CODE,
+      runtime_blocked_code: blockedCode,
     };
   });
 }
 
 function runtimeMcpServer(server: McpServer) {
-  const runtimeAvailable = stdioRuntimeAllowed(server.kind);
+  const blockedCode = stdioServerRuntimeBlockedCode(server);
+  const runtimeAvailable = blockedCode === null;
   return {
     ...sanitizeMcpServer(server),
     runtime_available: runtimeAvailable,
-    runtime_blocked_code: runtimeAvailable
-      ? null
-      : STDIO_PRODUCTION_DISABLED_CODE,
+    runtime_blocked_code: blockedCode,
   };
+}
+
+function stdioBlockedMessage(code: string): string {
+  if (code === STDIO_IMAGE_REQUIRED_CODE) {
+    return "生产 stdio 必须配置按 sha256 digest 固定的 OCI 镜像";
+  }
+  if (code === STDIO_PRODUCTION_SAFETY_DISABLED_CODE) {
+    return "生产 stdio 沙箱当前只开放 local；network/exec 继续禁用";
+  }
+  if (code === STDIO_IMAGE_UNAVAILABLE_CODE) {
+    return "生产 stdio 的 digest 镜像尚未预拉取到 rootless Podman";
+  }
+  return "生产环境未配置可用的 rootless Podman stdio 沙箱运行器";
+}
+
+async function convertDocumentWithMarkitdown(
+  buffer: Buffer,
+  extension: string,
+  scope: StdioSandboxScope,
+): Promise<string> {
+  if (process.env.NODE_ENV === "production") {
+    return withStdioSandboxFile(
+      scope,
+      buffer,
+      extension,
+      (containerPath) =>
+        callMcpTool(
+          "mcp__markitdown__convert_to_markdown",
+          { uri: `file://${containerPath}` },
+          { scope },
+        ),
+    );
+  }
+  return withTempFile(buffer, extension, (hostPath) =>
+    callMcpTool("mcp__markitdown__convert_to_markdown", {
+      uri: `file://${hostPath}`,
+    }),
+  );
 }
 
 api.get("/bootstrap", async (req, res) => {
@@ -424,17 +477,52 @@ api.get("/mcp-servers", (_req, res) =>
 );
 
 api.post("/mcp-servers", requireAdmin, (req, res) => {
-  const { name, kind, url, auth_token, command, args, safety, env } = req.body ?? {};
+  const {
+    name,
+    kind,
+    url,
+    auth_token,
+    command,
+    container_image,
+    args,
+    safety,
+    env,
+  } = req.body ?? {};
   if (!name) return res.status(400).json({ error: "name required" });
   if (kind === "stdio" && !command) return res.status(400).json({ error: "command required for stdio" });
-  if (!stdioRuntimeAllowed(kind === "stdio" ? "stdio" : "http")) {
+  const normalizedKind = kind === "stdio" ? "stdio" : "http";
+  const normalizedSafety =
+    safety === "exec" || safety === "network" ? safety : "local";
+  const blockedCode = stdioRuntimeBlockedCode(
+    normalizedKind,
+    normalizedSafety,
+    String(container_image ?? "").trim(),
+  );
+  if (blockedCode) {
     return res.status(409).json({
-      error: "生产环境未配置独立 stdio 沙箱运行器，不能创建本地 MCP",
-      code: STDIO_PRODUCTION_DISABLED_CODE,
+      error: stdioBlockedMessage(blockedCode),
+      code: blockedCode,
     });
   }
-  // stdio = 以服务进程身份起子进程，命令必须过白名单（连接层还有二次防御，这里提前给可读报错）
-  if (kind === "stdio" && !stdioCommandAllowed(String(command))) {
+  if (normalizedKind === "stdio" && process.env.NODE_ENV === "production") {
+    try {
+      assertStdioSandboxImageReady(String(container_image ?? "").trim());
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      return res.status(409).json({
+        error: stdioBlockedMessage(STDIO_IMAGE_UNAVAILABLE_CODE),
+        code: STDIO_IMAGE_UNAVAILABLE_CODE,
+        detail: detail.slice(0, 300),
+      });
+    }
+  }
+  // 开发/测试 stdio 在宿主起进程，因此仍过 basename 误配置门；生产命令只在
+  // digest-pinned 容器中执行，不能拿宿主 PATH 白名单当隔离边界。
+  if (
+    kind === "stdio" &&
+    process.env.NODE_ENV !== "production" &&
+    !stdioCommandAllowed(String(command))
+  ) {
     return res.status(400).json({
       error: `stdio 命令不在白名单（${stdioAllowedCommands().join("/")}）；自部署可用 AITEAM_MCP_STDIO_ALLOW 环境变量扩展`,
     });
@@ -450,25 +538,29 @@ api.post("/mcp-servers", requireAdmin, (req, res) => {
   }
   const server = createMcpServer({
     name: String(name).trim(),
-    kind: kind === "stdio" ? "stdio" : "http",
+    kind: normalizedKind,
     url: String(url ?? "").trim(),
     auth_token: String(auth_token ?? "").trim(),
     command: String(command ?? "").trim(),
+    container_image: String(container_image ?? "").trim(),
     args: Array.isArray(args) ? args.map(String) : String(args ?? "").split(/\s+/).filter(Boolean),
     // 安全分级：registry 高危预设带入 exec/network → exec 受引擎审批门约束；缺省 local
-    safety: safety === "exec" || safety === "network" ? safety : "local",
+    safety: normalizedSafety,
     env: envObj,
   });
-  res.json(sanitizeMcpServer(server));
+  res.json(runtimeMcpServer(server));
 });
 
 api.post("/mcp-servers/:id/toggle", requireAdmin, (req, res) => {
   const current = getMcpServer(req.params.id);
   if (!current) return res.status(404).json({ error: "not found" });
-  if (Boolean(req.body?.enabled) && !stdioRuntimeAllowed(current.kind)) {
+  if (Boolean(req.body?.enabled) && !stdioServerRuntimeAllowed(current)) {
+    const code =
+      stdioServerRuntimeBlockedCode(current) ??
+      STDIO_PRODUCTION_DISABLED_CODE;
     return res.status(409).json({
-      error: "生产环境未配置独立 stdio 沙箱运行器，不能启用本地 MCP",
-      code: STDIO_PRODUCTION_DISABLED_CODE,
+      error: stdioBlockedMessage(code),
+      code,
     });
   }
   const server = setMcpServerEnabled(current.id, Boolean(req.body?.enabled));
@@ -482,13 +574,19 @@ api.post("/mcp-servers/:id/test", requireAdmin, (req, res) => {
   // 与 create/toggle/delete 同级别风险，不能只 requireUser 让普通成员触发子进程派生。
   const server = getMcpServer(req.params.id);
   if (!server) return res.status(404).json({ error: "not found" });
-  if (!stdioRuntimeAllowed(server.kind)) {
+  if (!stdioServerRuntimeAllowed(server)) {
+    const code =
+      stdioServerRuntimeBlockedCode(server) ??
+      STDIO_PRODUCTION_DISABLED_CODE;
     return res.status(409).json({
-      error: "生产环境未配置独立 stdio 沙箱运行器，不能测试本地 MCP",
-      code: STDIO_PRODUCTION_DISABLED_CODE,
+      error: stdioBlockedMessage(code),
+      code,
     });
   }
-  testMcpServer(server)
+  testMcpServer(server, {
+    ownerId: currentOwner(),
+    executionId: `admin-test:${server.id}:${Date.now()}`,
+  })
     .then((count) => res.json({ ok: true, tools: count }))
     .catch((err) => res.status(502).json({ error: String(err?.message ?? err) }));
 });
@@ -496,10 +594,13 @@ api.post("/mcp-servers/:id/test", requireAdmin, (req, res) => {
 api.post("/mcp-servers/:id/task-test", requireAdmin, async (req, res) => {
   const server = getMcpServer(req.params.id);
   if (!server) return res.status(404).json({ error: "not found" });
-  if (!stdioRuntimeAllowed(server.kind)) {
+  if (!stdioServerRuntimeAllowed(server)) {
+    const code =
+      stdioServerRuntimeBlockedCode(server) ??
+      STDIO_PRODUCTION_DISABLED_CODE;
     return res.status(409).json({
-      error: "生产环境未配置独立 stdio 沙箱运行器，不能运行本地 MCP 演练",
-      code: STDIO_PRODUCTION_DISABLED_CODE,
+      error: stdioBlockedMessage(code),
+      code,
     });
   }
   const startedAt = Date.now();
@@ -535,7 +636,11 @@ api.post("/mcp-servers/:id/task-test", requireAdmin, async (req, res) => {
       if (enabled) broadcast({ type: "channel:update", payload: channel });
     }
 
-    const tools = await testMcpServer(server);
+    const scope = {
+      ownerId: currentOwner(),
+      executionId: `task:${task.id}`,
+    };
+    const tools = await testMcpServer(server, scope);
     emitTaskEvent({
       task_id: task.id,
       channel_id: task.channel_id,
@@ -550,8 +655,10 @@ api.post("/mcp-servers/:id/task-test", requireAdmin, async (req, res) => {
     let converted = false;
     if (mcpKey(server.name) === "markitdown") {
       const sample = Buffer.from("# AiTeam MCP 演练\n\n- 输入：本地样本文档\n- 预期：转换为 Markdown 来源\n", "utf8");
-      sampleOutput = await withTempFile(sample, ".txt", (p) =>
-        callMcpTool(mcpToolName(server.name, "convert_to_markdown"), { uri: "file://" + p })
+      sampleOutput = await convertDocumentWithMarkitdown(
+        sample,
+        ".txt",
+        scope,
       );
       converted = !/^错误：/.test(sampleOutput);
       if (converted) {
@@ -1868,6 +1975,9 @@ const uploadMw = multer({ storage: multer.memoryStorage(), limits: { fileSize: U
 api.post("/uploads", uploadMw.single("file"), async (req, res) => {
   const f = (req as unknown as { file?: { originalname: string; buffer: Buffer } }).file;
   if (!f) return res.status(400).json({ error: "未收到文件（表单字段名应为 file）" });
+  const userId = (req as AuthedRequest).userId;
+  if (!userId) return res.status(401).json({ error: "unauthorized" });
+  const ownerId = ownerFromUserId(userId);
   const ext = extOf(f.originalname);
   const title = (f.originalname || "上传文档").slice(0, 200);
   try {
@@ -1875,18 +1985,22 @@ api.post("/uploads", uploadMw.single("file"), async (req, res) => {
     if (TEXT_EXTS.has(ext) || ext === "") {
       content = f.buffer.toString("utf-8"); // 纯文本直读，无需 markitdown
     } else if (DOC_EXTS.has(ext)) {
-      if (!mcpToolPrefixReady("mcp__markitdown__*"))
+      if (!withOwner(ownerId, () => mcpToolPrefixReady("mcp__markitdown__*")))
         return res.status(400).json({ error: `解析 ${ext} 文件需先启用 markitdown 插件（设置 → MCP → 浏览推荐 → 文档转 Markdown）。纯文本（txt/md/csv 等）可直接上传。` });
-      content = await withTempFile(f.buffer, ext, (p) => callMcpTool("mcp__markitdown__convert_to_markdown", { uri: "file://" + p }));
+      const scope = {
+        ownerId,
+        executionId: "upload:document-conversion",
+      };
+      content = await withOwner(ownerId, () =>
+        convertDocumentWithMarkitdown(f.buffer, ext, scope),
+      );
     } else {
       return res.status(400).json({ error: `不支持的文件类型「${ext || "无扩展名"}」` });
     }
     content = (content ?? "").trim();
     if (!content) return res.status(400).json({ error: "未能从文件中提取到文本内容" });
     // multer 的异步流解析会逃出 requireUser 建立的 withOwner(ALS) 上下文，故按 req.userId 重建 owner 作用域再写库/广播。
-    const userId = (req as AuthedRequest).userId;
-    if (!userId) return res.status(401).json({ error: "unauthorized" });
-    const doc = withOwner(ownerFromUserId(userId), () => {
+    const doc = withOwner(ownerId, () => {
       const d = createDocument({ channel_id: null, agent_id: null, title, content, kind: "source" });
       broadcast({ type: "doc:upsert", payload: d });
       return d;

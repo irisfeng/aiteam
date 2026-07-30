@@ -208,6 +208,7 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
   url TEXT NOT NULL DEFAULT '',
   auth_token TEXT NOT NULL DEFAULT '',
   command TEXT NOT NULL DEFAULT '',
+  container_image TEXT NOT NULL DEFAULT '',
   args_json TEXT NOT NULL DEFAULT '[]',
   enabled INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL
@@ -419,6 +420,7 @@ addColumnIfMissing("skills", "version", "version INTEGER NOT NULL DEFAULT 1");  
 // MCP 安全分级（registry 预设带入）：exec/network 受引擎层审批门约束（见 engine.callMcpTool 前置门）
 addColumnIfMissing("mcp_servers", "safety", "safety TEXT NOT NULL DEFAULT 'local'");  // local | network | exec
 addColumnIfMissing("mcp_servers", "env_json", "env_json TEXT NOT NULL DEFAULT '{}'"); // stdio 子进程环境变量（如 BOCHA_API_KEY），值含密钥→sanitize 只暴露 key 名
+addColumnIfMissing("mcp_servers", "container_image", "container_image TEXT NOT NULL DEFAULT ''"); // 生产 stdio 必须用 sha256 digest 固定 OCI 镜像
 db.exec(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '')`);
 // 启动凭证门禁：生产只认证已有 enc1，遇到 plaintext/enc:v1 直接拒启并指向 copy-only migrate-copy；
 // 仅开发/测试允许在事务内把旧格式原地规范化。任一错误均整体回滚，禁止部分迁移。
@@ -535,6 +537,8 @@ export interface McpServer {
   url: string;
   auth_token: string;
   command: string;
+  /** 生产 stdio 的不可变 OCI 镜像引用（必须包含 @sha256:<digest>） */
+  container_image: string;
   args_json: string;
   /** stdio 子进程环境变量 JSON（如 {"BOCHA_API_KEY":"..."}）；含密钥，sanitize 只回 key 名不回值 */
   env_json: string;
@@ -924,6 +928,7 @@ export function createMcpServer(s: {
   url?: string;
   auth_token?: string;
   command?: string;
+  container_image?: string;
   args?: string[];
   safety?: McpServer["safety"];
   env?: Record<string, string>;
@@ -935,6 +940,7 @@ export function createMcpServer(s: {
     url: s.url ?? "",
     auth_token: encryptSecret(s.auth_token ?? ""),
     command: s.command ?? "",
+    container_image: s.container_image ?? "",
     args_json: JSON.stringify(s.args ?? []),
     env_json: Object.keys(s.env ?? {}).length > 0 ? encryptSecret(JSON.stringify(s.env)) : "{}",
     safety: s.safety ?? "local",
@@ -942,7 +948,7 @@ export function createMcpServer(s: {
     created_at: now(),
   };
   db.prepare(
-    "INSERT INTO mcp_servers (id, name, kind, url, auth_token, command, args_json, env_json, safety, enabled, created_at) VALUES (@id, @name, @kind, @url, @auth_token, @command, @args_json, @env_json, @safety, @enabled, @created_at)"
+    "INSERT INTO mcp_servers (id, name, kind, url, auth_token, command, container_image, args_json, env_json, safety, enabled, created_at) VALUES (@id, @name, @kind, @url, @auth_token, @command, @container_image, @args_json, @env_json, @safety, @enabled, @created_at)"
   ).run(server);
   return server;
 }
@@ -971,6 +977,7 @@ export function sanitizeMcpServer(s: McpServer) {
     kind: s.kind,
     url: s.url,
     command: s.command,
+    container_image: s.container_image,
     args_json: s.args_json,
     safety: s.safety, // 风险分级前端可见（registry/手填带入）；非敏感，不脱敏
     env_keys: envKeyNames(s.env_json), // 只回 env 变量名（如 ["BOCHA_API_KEY"]），值含密钥绝不下发
@@ -1295,6 +1302,33 @@ export function listTasks(channelId?: string): Task[] {
 }
 export function getTask(id: string): Task | undefined {
   return db.prepare("SELECT * FROM tasks WHERE id = ? AND owner_id = ?").get(id, currentOwner()) as Task | undefined;
+}
+/**
+ * stdio 沙箱的持久执行作用域：Mission 的多个内部任务共享一个 workspace；
+ * 普通工作线任务退化为 task 作用域。查询始终带当前 owner，不能把另一租户的
+ * Mission id 变成工作区键。
+ */
+export function mcpExecutionIdForTask(taskId: string): string {
+  const owner = currentOwner();
+  const rows = db
+    .prepare(
+      "SELECT mission_id, task_ids_json FROM mission_executions WHERE owner_id = ?",
+    )
+    .all(owner) as { mission_id: string; task_ids_json: string }[];
+  for (const row of rows) {
+    try {
+      const taskIds = JSON.parse(row.task_ids_json || "[]");
+      if (
+        Array.isArray(taskIds) &&
+        taskIds.some((candidate) => candidate === taskId)
+      ) {
+        return `mission:${row.mission_id}`;
+      }
+    } catch {
+      // 损坏的其他 Mission 映射不能扩大当前任务作用域；继续落到 task 隔离。
+    }
+  }
+  return `task:${taskId}`;
 }
 export function createTask(t: {
   channel_id?: string | null;

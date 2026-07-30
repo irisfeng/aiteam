@@ -24,6 +24,7 @@ interface McpServerInfo {
   kind: "http" | "stdio";
   url: string;
   command: string;
+  container_image: string;
   args_json: string;
   safety: "local" | "network" | "exec";
   env_keys?: string[];
@@ -62,6 +63,7 @@ export function McpTab({ onOpenTask }: { onOpenTask?: (taskId: string) => void }
   const [url, setUrl] = useState("");
   const [token, setToken] = useState("");
   const [command, setCommand] = useState("");
+  const [containerImage, setContainerImage] = useState("");
   const [args, setArgs] = useState("");
   const [envText, setEnvText] = useState(""); // KEY=VALUE 多行（stdio 子进程环境变量，如 BOCHA_API_KEY）
   const [safety, setSafety] = useState<"local" | "network" | "exec">("local");
@@ -93,7 +95,11 @@ export function McpTab({ onOpenTask }: { onOpenTask?: (taskId: string) => void }
   /** 一键预填：把预设填进下方添加表单（仍需 admin 确认/补 token，且 stdio 需宿主先按 install 装好依赖）。 */
   function prefill(p: McpPreset) {
     if (p.runtime_available === false) {
-      setError("生产环境未配置独立 stdio 沙箱运行器，本地 MCP 暂不可用。");
+      setError(
+        p.runtime_blocked_code === "MCP_STDIO_PRODUCTION_SAFETY_DISABLED"
+          ? "生产沙箱当前只开放 local stdio；network/exec 预设继续禁用。"
+          : "生产环境未配置可用的 rootless Podman stdio 沙箱运行器，本地 MCP 暂不可用。",
+      );
       setShowCatalog(false);
       return;
     }
@@ -101,6 +107,7 @@ export function McpTab({ onOpenTask }: { onOpenTask?: (taskId: string) => void }
     setKind(p.kind);
     setUrl(p.url ?? "");
     setCommand(p.command ?? "");
+    setContainerImage("");
     setArgs((p.args ?? []).join(" "));
     setSafety(p.safety);
     setToken("");
@@ -125,13 +132,14 @@ export function McpTab({ onOpenTask }: { onOpenTask?: (taskId: string) => void }
           url: url.trim(),
           auth_token: token.trim(),
           command: command.trim(),
+          container_image: containerImage.trim(),
           args: args.trim(),
           safety,
           env: parseEnvLines(envText),
         }),
       });
       if (!res.ok) throw new Error((await res.json())?.error ?? "添加失败");
-      setName(""); setUrl(""); setToken(""); setCommand(""); setArgs(""); setEnvText(""); setSafety("local");
+      setName(""); setUrl(""); setToken(""); setCommand(""); setContainerImage(""); setArgs(""); setEnvText(""); setSafety("local");
       await load();
       notifyIntegrationsUpdated();
     } catch (e: any) {
@@ -192,7 +200,7 @@ export function McpTab({ onOpenTask }: { onOpenTask?: (taskId: string) => void }
         同事的工作循环（工具名带 <code className="rounded bg-sel px-1 font-mono text-[11px]">mcp__</code> 前缀）。
         支持远程 HTTP 端点（可带 Bearer 认证）
         {stdioAvailable ? (
-          <>与开发环境本地 stdio 命令（如 <code className="rounded bg-sel px-1 font-mono text-[11px]">npx -y @modelcontextprotocol/server-filesystem /data</code>）</>
+          <>与隔离 stdio；生产仅开放 rootless Podman 中的 <code className="rounded bg-sel px-1 font-mono text-[11px]">local</code> 插件，并要求镜像按 sha256 digest 固定</>
         ) : (
           <>；当前生产运行时在独立沙箱落地前已禁用本地 stdio</>
         )}。
@@ -256,8 +264,14 @@ export function McpTab({ onOpenTask }: { onOpenTask?: (taskId: string) => void }
                   type="checkbox"
                   checked={Boolean(s.enabled)}
                   onChange={() => void toggle(s)}
-                  disabled={s.runtime_available === false}
-                  title={s.runtime_available === false ? "生产运行时已禁用 stdio" : "启用/停用"}
+                  disabled={s.runtime_available === false && !Boolean(s.enabled)}
+                  title={
+                    s.runtime_available === false
+                      ? s.enabled
+                        ? "运行时不可用；可停用此插件"
+                        : "生产运行时已禁用 stdio"
+                      : "启用/停用"
+                  }
                 />
                 <span className="font-medium">{s.name}</span>
                 <span className="rounded bg-sel px-1 font-mono text-[10px] text-ink-3">{s.kind}</span>
@@ -361,6 +375,16 @@ export function McpTab({ onOpenTask }: { onOpenTask?: (taskId: string) => void }
         <>
           <label className={labelCls}>命令</label>
           <input value={command} onChange={(e) => setCommand(e.target.value)} placeholder="npx" className={inputCls} />
+          <label className={labelCls}>生产容器镜像（必须固定 sha256 digest）</label>
+          <input
+            value={containerImage}
+            onChange={(e) => setContainerImage(e.target.value)}
+            placeholder="registry.example/aiteam-mcp@sha256:…"
+            className={`${inputCls} font-mono text-[12px]`}
+          />
+          <div className="mt-1 text-[11px] leading-relaxed text-ink-3">
+            生产 runner 使用预拉取镜像（<code>--pull=never</code>）、禁网、只读根文件系统和独立 Mission 工作区；可变 tag 会被拒绝。
+          </div>
           <label className={labelCls}>参数（空格分隔）</label>
           <input value={args} onChange={(e) => setArgs(e.target.value)} placeholder="-y @modelcontextprotocol/server-filesystem /data" className={inputCls} />
           <label className={labelCls}>环境变量（每行 KEY=VALUE，密钥仅存服务端、不下发前端）</label>
