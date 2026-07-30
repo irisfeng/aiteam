@@ -41,6 +41,17 @@ Coworker、Nginx/Caddy、systemd、Docker daemon、防火墙或安全组，也�
 
 任一现有容器出现不明重启、监听变化或资源回退时停止。
 
+仓库提供只读采集脚本：
+
+```bash
+sudo bash deploy/aiteam-vps-readonly-inventory.sh
+```
+
+脚本自身只写 stdout/stderr，不创建文件、不枚举环境变量、不输出容器环境或 cron
+命令，也不刷新包管理器元数据。若获准保存 root-only 基线，由操作者在主机上使用
+`umask 077` 后显式重定向；
+安全组、VPC、云快照和公网可达性仍必须从天翼云控制面或独立观察点补证。
+
 ## 2. 主机目录与配置
 
 以下为计划命令，尚未在 VPS 执行：

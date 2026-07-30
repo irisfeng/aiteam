@@ -25,7 +25,7 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --no-audit
 
       - name: Typecheck
         run: npm run typecheck
@@ -35,3 +35,120 @@ jobs:
 
       - name: Test
         run: npm test
+
+      - name: Test gray runtime
+        run: node scripts/gray-runtime-regression.mjs
+
+  container:
+    name: Build and verify gray image
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RELEASE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      IMAGE: local/aiteam:${{ github.event.pull_request.head.sha || github.sha }}
+      CONTAINER: aiteam-gray-ci
+      AITEAM_COMPOSE_PROJECT: aiteam-gray-ci
+      AITEAM_CONTAINER_NAME: aiteam-gray-ci
+      AITEAM_RELEASE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      AITEAM_IMAGE: local/aiteam:${{ github.event.pull_request.head.sha || github.sha }}
+      AITEAM_GRAY_HOST_PORT: "18787"
+      AITEAM_GRAY_DATA_DIR: ${{ runner.temp }}/aiteam-data
+      AITEAM_GRAY_SECRETS_FILE: ${{ runner.temp }}/aiteam.env
+      AITEAM_GRAY_NETWORK: coworker-aiteam-gray-ci
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+
+      - name: Build commit-bound image
+        run: |
+          docker build \
+            --build-arg "AITEAM_RELEASE_SHA=${RELEASE_SHA}" \
+            --tag "${IMAGE}" \
+            .
+
+      - name: Reject image identity mismatch
+        run: |
+          if docker run --rm \
+            --env AITEAM_EXPECTED_RELEASE_SHA=wrong-release \
+            "${IMAGE}"; then
+            echo "image accepted the wrong expected release" >&2
+            exit 1
+          fi
+
+      - name: Prepare isolated gray data and fake secrets
+        run: |
+          sudo install -d -o 10001 -g 10001 -m 0700 "${RUNNER_TEMP}/aiteam-data"
+          umask 077
+          {
+            echo "AITEAM_SESSION_SECRET=ci-gray-session-secret-with-at-least-32-bytes"
+            echo "AITEAM_CREDENTIAL_KEY=9494949494949494949494949494949494949494949494949494949494949494"
+            echo "AUTH_SECRET=ci-gray-coworker-auth-secret-with-at-least-32-bytes"
+            echo "AITEAM_SERVICE_JWT_SECRET=ci-gray-service-secret-with-at-least-32-bytes"
+            echo "ANTHROPIC_API_KEY="
+          } > "${RUNNER_TEMP}/aiteam.env"
+
+      - name: Run hardened empty gray
+        run: |
+          docker compose -f deploy/compose.aiteam-gray.yaml config --quiet
+          docker compose \
+            -f deploy/compose.aiteam-gray.yaml \
+            up --detach --no-deps aiteam-gray
+
+          for attempt in {1..30}; do
+            health="$(docker inspect "${CONTAINER}" --format '{{.State.Health.Status}}')"
+            if [[ "${health}" == "healthy" ]]; then
+              break
+            fi
+            sleep 1
+          done
+          test "${health}" = "healthy"
+
+      - name: Verify image identity and runtime constraints
+        run: |
+          test "$(docker image inspect "${IMAGE}" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "${RELEASE_SHA}"
+          test "$(docker inspect "${CONTAINER}" --format '{{.Config.User}}')" = "10001:10001"
+          test "$(docker inspect "${CONTAINER}" --format '{{.HostConfig.ReadonlyRootfs}}')" = "true"
+          test "$(docker inspect "${CONTAINER}" --format '{{.RestartCount}}')" = "0"
+          test "$(docker inspect "${CONTAINER}" --format '{{.HostConfig.Memory}}')" = "2147483648"
+          test "$(docker inspect "${CONTAINER}" --format '{{.HostConfig.NanoCpus}}')" = "2000000000"
+          test "$(docker inspect "${CONTAINER}" --format '{{.HostConfig.PidsLimit}}')" = "256"
+          test "$(docker inspect "${CONTAINER}" --format '{{json .HostConfig.CapDrop}}')" = '["ALL"]'
+          test "$(docker inspect "${CONTAINER}" --format '{{json .HostConfig.SecurityOpt}}')" = '["no-new-privileges:true"]'
+          test "$(docker inspect "${CONTAINER}" --format '{{.HostConfig.RestartPolicy.Name}}')" = "unless-stopped"
+          test "$(docker port "${CONTAINER}" 8787/tcp)" = "127.0.0.1:18787"
+          docker network inspect "${AITEAM_GRAY_NETWORK}" >/dev/null
+          docker exec "${CONTAINER}" node scripts/container-healthcheck.mjs
+          docker exec "${CONTAINER}" node scripts/gray-data-audit.mjs
+          curl --fail --silent \
+            http://127.0.0.1:18787/aiteam/api/readyz \
+            > "${RUNNER_TEMP}/ready.json"
+          grep -F "\"release_sha\":\"${RELEASE_SHA}\"" "${RUNNER_TEMP}/ready.json"
+          grep -F '"auth_mode":"coworker"' "${RUNNER_TEMP}/ready.json"
+          grep -F '"model_mode":"mock"' "${RUNNER_TEMP}/ready.json"
+
+      - name: Verify graceful stop and post-stop data
+        run: |
+          docker compose \
+            -f deploy/compose.aiteam-gray.yaml \
+            stop --timeout 10 aiteam-gray
+          docker logs "${CONTAINER}" > "${RUNNER_TEMP}/aiteam.log" 2>&1
+          grep -F "[aiteam] SIGTERM received, starting graceful shutdown" "${RUNNER_TEMP}/aiteam.log"
+          docker run --rm \
+            --read-only \
+            --user 10001:10001 \
+            --mount "type=bind,source=${RUNNER_TEMP}/aiteam-data,target=/data,readonly" \
+            --tmpfs /audit:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700 \
+            --env AITEAM_DATA_DIR=/audit \
+            --entrypoint sh \
+            "${IMAGE}" \
+            -ec 'cp /data/aiteam.db* /audit/; exec node scripts/gray-data-audit.mjs'
+
+      - name: Clean up gray container
+        if: always()
+        run: |
+          docker compose -f deploy/compose.aiteam-gray.yaml down >/dev/null 2>&1 || true
+          docker rm --force "${CONTAINER}" >/dev/null 2>&1 || true
+          docker network rm "${AITEAM_GRAY_NETWORK}" >/dev/null 2>&1 || true
