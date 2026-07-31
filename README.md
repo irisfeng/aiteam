@@ -100,12 +100,16 @@ npm run pack:verify --workspace desktop  # 脱离源码树验证包内运行时
 | `AUTH_SECRET` | — | coworker 模式下解密 NextAuth 会话 cookie 的密钥 |
 | `COWORKER_INTERNAL_URL` | — | coworker 模式回源取用户展示名 |
 | `AITEAM_SERVICE_JWT_SECRET` | — | Coworker 调用 Mission API 的 HS256 服务密钥，至少 32 字节；不得复用浏览器会话密钥 |
+| `AITEAM_SERVICE_JWT_KEYS` | — | 可轮换 keyring，JSON 对象 `{"kid":"32-byte-secret"}`，最多 8 把；配置后取代单密钥并要求 JWT 带匹配 `kid` |
 
 Coworker 融合采用“控制面 + 执行面”边界：AITeam 把研究 Mission 映射为原生
 四步 DAG，并通过组织范围内的事件与产物接口交付，不共享数据库或浏览器会话。
 接口契约见 [`docs/openapi-mission-v1.yaml`](docs/openapi-mission-v1.yaml)，
 执行与恢复决策见
 [`docs/ADR-coworker-mission-execution.md`](docs/ADR-coworker-mission-execution.md)。
+Mission API `0.9.0` 的可重放活动会携带脱敏的执行延迟、token 用量、
+以 `billable_tokens` 为单位的成本观测、联网审批决策数和稳定失败码。
+它不暴露内部任务标识，也不在缺少供应商账单时推算货币成本。
 
 ### 模型与运行
 | 变量 | 默认 | 说明 |
@@ -127,6 +131,9 @@ Coworker 融合采用“控制面 + 执行面”边界：AITeam 把研究 Missio
 |---|---|---|
 | `AITEAM_DAILY_TOKEN_BUDGET` | `0`（不限） | 每用户每日 token 预算硬切断（按加权计费 token） |
 | `AITEAM_TASK_TOKEN_BUDGET` | `0`（不限） | 单任务默认预算（加权计费 token）；任务累计触线自动暂停待批，批准即追加续跑（任务级 `budget_billable` 可覆盖） |
+| `AITEAM_MISSION_TIMEOUT_MS` | `3600000`（1 小时） | Mission 总执行期限；持久化到 Mission，超期后停止剩余任务并记录 `MISSION_TIMEOUT` |
+| `AITEAM_MISSION_MAX_ACTIVE_PER_ORGANIZATION` | `2` | 单组织同时处于 `queued/running/blocked` 的 Mission 上限（1–32） |
+| `AITEAM_MISSION_MAX_ACTIVE_GLOBAL` | `4` | 单 AITeam 实例的全局活跃 Mission 上限（1–64），不得小于单组织上限 |
 | `TASK_MAX_REVISIONS` | `1` | 验收未过的返工次数上限 |
 | `AITEAM_PROVIDER_BENCHMARK_BUDGET` | `20000` | 固定模型质量基准的计费 token 上限 |
 | `AITEAM_PROVIDER_BENCHMARK_REVIEW_RESERVE` | `6000` | 为独立强模型复核预留的计费 token；不足时先暂停待批 |
@@ -138,6 +145,11 @@ Coworker 融合采用“控制面 + 执行面”边界：AITeam 把研究 Missio
 | `AITEAM_MCP_CACHE_TTL_MS` | `600000` | MCP 同参调用结果缓存 TTL |
 | `AITEAM_MAX_MCP_TOOLS` | `40` | 注入工作循环的 MCP 工具数上限 |
 | `AITEAM_SKILL_INDEX_BUDGET` | `6000` | 技能索引（L1）注入上限（字）；正文按需 `read_skill` 拉取不计入 |
+
+默认准入值面向首轮单场景 Preview/灰度：每个研究 Mission 展开为四任务
+DAG，因此单组织 2 个、全局 4 个活跃 Mission 分别约束为 8/16 个执行任务。
+超限请求返回 `429 / MISSION_CAPACITY_EXCEEDED`，不会创建 Mission；相同
+幂等请求仍可重放，终态或超时 Mission 会释放名额。
 
 ---
 

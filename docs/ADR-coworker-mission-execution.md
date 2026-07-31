@@ -15,7 +15,8 @@ AITeam 已有按用户隔离的多智能体任务、依赖调度、独立复核�
 
 `research_report` Mission 映射到发起人的 AITeam 私有执行工作区：
 
-1. 使用 Coworker `requested_by` 建立 `user:<id>` owner 上下文。
+1. 使用 Coworker `organization_id + requested_by` 建立复合 owner 上下文；即使不同
+   组织意外复用了相同用户 ID，也不会共享执行工作区。
 2. 幂等播种该 owner 的默认团队和频道。
 3. 创建一个 AITeam Project，并建立“口径→资料→对比→报告”的四任务 DAG。
 4. 每个任务使用现有负责人、独立 reviewer、质量门、返工和文档版本机制。
@@ -42,6 +43,10 @@ AITeam 已有按用户隔离的多智能体任务、依赖调度、独立复核�
   Event 和 Document 重新计算。
 - 同组织同幂等键重放不会新建第二个 Project 或第二组任务。
 - 执行初始化或检查失败会进入 `failed` 并留下可重放事件，不静默卡在 queued。
+- Mission 与首事件写入前，以 SQLite 立即事务检查组织和单实例活跃容量；
+  `queued/running/blocked` 占用名额，终态和已收口超时释放名额。相同幂等键
+  重放先于容量检查，超限的新请求返回
+  `429 / MISSION_CAPACITY_EXCEEDED` 且不留下半成品。
 
 ## 边界
 

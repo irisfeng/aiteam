@@ -5,7 +5,45 @@ export interface ServiceRequest extends Request {
   serviceClaims?: {
     organizationId: string;
     scopes: string[];
+    keyId: string | null;
   };
+}
+
+type ServiceJwtConfig =
+  | { mode: "legacy"; secret: string }
+  | { mode: "keyring"; keys: Map<string, string> };
+
+function loadServiceJwtConfig(): ServiceJwtConfig | null {
+  const encodedKeys = process.env.AITEAM_SERVICE_JWT_KEYS?.trim();
+  if (encodedKeys) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(encodedKeys);
+    } catch {
+      return null;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    const entries = Object.entries(parsed);
+    if (entries.length === 0 || entries.length > 8) return null;
+    const keys = new Map<string, string>();
+    for (const [keyId, secret] of entries) {
+      if (
+        !/^[A-Za-z0-9._-]{1,64}$/.test(keyId) ||
+        typeof secret !== "string" ||
+        Buffer.byteLength(secret) < 32
+      ) {
+        return null;
+      }
+      keys.set(keyId, secret);
+    }
+    return { mode: "keyring", keys };
+  }
+
+  const secret = process.env.AITEAM_SERVICE_JWT_SECRET;
+  if (!secret || Buffer.byteLength(secret) < 32) return null;
+  return { mode: "legacy", secret };
 }
 
 export function requireServiceJwt(
@@ -24,8 +62,8 @@ export function requireServiceJwt(
     return;
   }
 
-  const secret = process.env.AITEAM_SERVICE_JWT_SECRET;
-  if (!secret || Buffer.byteLength(secret) < 32) {
+  const config = loadServiceJwtConfig();
+  if (!config) {
     res.status(503).json({
       error: {
         code: "SERVICE_AUTH_NOT_CONFIGURED",
@@ -42,10 +80,24 @@ export function requireServiceJwt(
     const [encodedHeader, encodedPayload, encodedSignature] = parts;
     const header = JSON.parse(
       Buffer.from(encodedHeader, "base64url").toString("utf8"),
-    ) as { alg?: unknown; typ?: unknown };
+    ) as { alg?: unknown; typ?: unknown; kid?: unknown };
     if (header.alg !== "HS256" || header.typ !== "JWT") {
       throw new Error("unsupported token header");
     }
+    const keyId =
+      typeof header.kid === "string" &&
+      /^[A-Za-z0-9._-]{1,64}$/.test(header.kid)
+        ? header.kid
+        : null;
+    const secret =
+      config.mode === "keyring"
+        ? keyId
+          ? config.keys.get(keyId)
+          : undefined
+        : header.kid === undefined
+          ? config.secret
+          : undefined;
+    if (!secret) throw new Error("unknown service key");
 
     const expected = createHmac("sha256", secret)
       .update(`${encodedHeader}.${encodedPayload}`)
@@ -78,6 +130,7 @@ export function requireServiceJwt(
     req.serviceClaims = {
       organizationId: payload.organization_id,
       scopes: payload.scope,
+      keyId,
     };
     next();
   } catch {

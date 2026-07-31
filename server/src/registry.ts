@@ -2,7 +2,8 @@
  * 内置预设目录（registry）——Skill/MCP 一键浏览推荐。
  * 静态常量、编译进 server、不入库、不含任何实例 token、零运行期依赖。
  * MCP 预设只列**真实存在**的包/端点；一键添加仅预填表单 ≠ 开箱可用：
- * stdio 预设需 admin 先在宿主机按 install 指引装好依赖（与另两项目共用主机，注意资源）。
+ * 开发 stdio 预设需 admin 在宿主机按 install 指引装好依赖；生产 stdio
+ * 必须改用已预载、digest 固定的 rootless Podman 镜像，不能复用宿主安装。
  *
  * 部署红线（腾讯云大陆 VPS / 仅国内模型 / 共用主机）：
  * - 默认只推 runtime_china=yes 的本地/国产项；install_china=degrade 的必须展示大陆镜像命令；
@@ -52,7 +53,7 @@ export const MCP_REGISTRY: McpPreset[] = [
     runtime_china: "yes",
     install_china: "degrade",
     safety: "local",
-    install: `pip install markitdown-mcp ${PIP_MIRROR}`,
+    install: `开发：pip install markitdown-mcp ${PIP_MIRROR}；生产：运行 npm run mcp:image:markitdown:build，并填入证据输出的 image@sha256 digest`,
     phase: "P1-install",
   },
   {

@@ -30,6 +30,7 @@ import {
   getDocument,
   getMemory,
   getMessage,
+  mcpExecutionIdForTask,
   getProject,
   getSkill,
   getTask,
@@ -681,21 +682,42 @@ const queuedCount = new Map<string, number>(); // agentId -> 排队中的任务�
 const cancelledTasks = new Set<string>(); // 用户按下停止开关的任务
 const cancelledChannels = new Set<string>(); // 用户在频道里按下停止（覆盖聊天回复 + 该频道的任务运行）
 const activeStreams = new Map<string, Set<{ abort(): void }>>(); // channelId -> 正在跑的流（可 abort 中断）
+const activeTaskStreams = new Map<string, Set<{ abort(): void }>>();
 
 /** 登记一个在跑的流，返回注销函数（运行结束时调用，顺带清理频道停止标志）。 */
-function registerStream(channelId: string, stream: { abort(): void }): () => void {
+function registerStream(
+  channelId: string,
+  stream: { abort(): void },
+  taskId?: string | null,
+): () => void {
   let set = activeStreams.get(channelId);
   if (!set) { set = new Set(); activeStreams.set(channelId, set); }
   set.add(stream);
+  let taskSet: Set<{ abort(): void }> | undefined;
+  if (taskId) {
+    taskSet = activeTaskStreams.get(taskId);
+    if (!taskSet) {
+      taskSet = new Set();
+      activeTaskStreams.set(taskId, taskSet);
+    }
+    taskSet.add(stream);
+  }
   return () => {
     set!.delete(stream);
     if (set!.size === 0) { activeStreams.delete(channelId); cancelledChannels.delete(channelId); }
+    if (taskId && taskSet) {
+      taskSet.delete(stream);
+      if (taskSet.size === 0) activeTaskStreams.delete(taskId);
+    }
   };
 }
 
 /** 停止开关（kill switch）：运行中的任务在下一个迭代边界停下；排队中的任务直接不再开工。 */
 export function stopTask(taskId: string) {
   cancelledTasks.add(taskId);
+  for (const stream of activeTaskStreams.get(taskId) ?? []) {
+    try { stream.abort(); } catch { /* ignore */ }
+  }
   invalidateTaskNetworkApprovals(taskId);
 }
 
@@ -799,6 +821,7 @@ function networkServerFingerprint(server: NonNullable<ReturnType<typeof mcpServe
     url: server.url,
     auth_token: server.auth_token,
     command: server.command,
+    container_image: server.container_image,
     args_json: server.args_json,
     env_json: server.env_json,
     safety: server.safety,
@@ -2152,7 +2175,10 @@ export function onBudgetResolved(approval: Approval, approved: boolean) {
  * 单次 network MCP 审批恢复原任务，不进入无 taskId 的普通 chat。
  * 返回 true 表示该 action 是结构化网络审批，路由层不应再走 generic triggerAgent。
  */
-export function onNetworkApprovalResolved(approval: Approval): boolean {
+export function onNetworkApprovalResolved(
+  approval: Approval,
+  resolvedBy?: string,
+): boolean {
   if (!approvalContainsNetworkGrant(approval)) return false;
   if (!approval.ref_id) {
     if (approval.status === "approved") consumeApproval(approval.id);
@@ -2174,7 +2200,13 @@ export function onNetworkApprovalResolved(approval: Approval): boolean {
       next,
       "approval",
       `用户批准单次网络调用，任务恢复：${grant.tool}`,
-      { approval_id: approval.id, status: "approved", tool: grant.tool, call_fingerprint: grant.call_fingerprint },
+      {
+        approval_id: approval.id,
+        status: "approved",
+        tool: grant.tool,
+        call_fingerprint: grant.call_fingerprint,
+        ...(resolvedBy ? { resolved_by: resolvedBy } : {}),
+      },
       approval.agent_id,
     );
     if (next.channel_id) audit(next.channel_id, `▶️ 用户批准一次网络调用，任务「${next.title}」恢复执行`);
@@ -2193,7 +2225,13 @@ export function onNetworkApprovalResolved(approval: Approval): boolean {
           ? "网络调用授权已失效，任务保持阻塞"
           : "任务负责人已变化，原网络调用授权失效并保持阻塞"
         : "用户拒绝网络调用，任务保持阻塞",
-      { approval_id: approval.id, status: approved ? "invalid" : "rejected", same_agent: sameAgent, stopped },
+      {
+        approval_id: approval.id,
+        status: approved ? "invalid" : "rejected",
+        same_agent: sameAgent,
+        stopped,
+        ...(resolvedBy ? { resolved_by: resolvedBy } : {}),
+      },
       approval.agent_id,
     );
     if (task.channel_id) {
@@ -3231,9 +3269,15 @@ async function llmLoop(
   const stageKey = rt.providerId ?? "env";
   let webStage = rt.official ? 0 : webToolsStage.get(stageKey) ?? 0;
   let mcpDefs: Anthropic.Tool[] = [];
+  const mcpScope = ctx.taskId
+    ? {
+        ownerId: currentOwner(),
+        executionId: mcpExecutionIdForTask(ctx.taskId),
+      }
+    : undefined;
   if (!toolsOverride) {
     try {
-      mcpDefs = await mcpToolDefs(); // MCP 插件工具（懒连接，失败自动跳过）
+      mcpDefs = await mcpToolDefs(mcpScope); // 生产 stdio 按 Mission/task 作用域起一次性容器
     } catch (err) {
       console.error("[engine] mcp tools unavailable:", err);
     }
@@ -3302,7 +3346,7 @@ async function llmLoop(
       on(event: "text", listener: (delta: string) => void): unknown;
       finalMessage(): Promise<Anthropic.Message>;
     };
-    const unregister = registerStream(channel.id, stream);
+    const unregister = registerStream(channel.id, stream, ctx.taskId);
 
     stream.on("text", (delta) => {
       if (firstText) {
@@ -3446,6 +3490,7 @@ async function llmLoop(
               mcpCalls++;
               let dispatchRevoked = false;
               result = await callMcpTool(tu.name, tu.input, {
+                scope: mcpScope,
                 canDispatch: () => {
                   const allowed = !ctx.taskId || taskExecutionIsCurrent(ctx.taskId, agent.id);
                   if (!allowed) dispatchRevoked = true;
@@ -3548,6 +3593,13 @@ export function mockTaskDocument(task: Pick<Task, "title" | "description" | "acc
 
 async function mockRun(ctx: RunCtx, emit: (delta: string) => void) {
   const { agent } = ctx;
+  const testDelay = process.env.AITEAM_TEST_INSTANCE_ID
+    ? Number(process.env.AITEAM_TEST_MOCK_DELAY_MS ?? 0)
+    : 0;
+  if (Number.isFinite(testDelay) && testDelay > 0) {
+    await new Promise((resolve) => setTimeout(resolve, testDelay));
+  }
+  if (ctx.taskId && cancelledTasks.has(ctx.taskId)) return;
   let text: string;
   if (ctx.kind === "work" && ctx.taskId) {
     const task = getTask(ctx.taskId);

@@ -13,6 +13,8 @@ import { finalizeStaleStreaming } from "./db.js";
 import { isMock, recoverInFlightTasks, startScheduler } from "./agents/engine.js";
 import { assetsDir } from "./agents/images.js";
 import { missionRoutes } from "./mission-routes.js";
+import { expireOverdueMissions, startMissionExpirySweep } from "./missions.js";
+import { assertProductionStdioConfiguration } from "./agents/mcp.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 8787);
@@ -20,10 +22,16 @@ const PORT = Number(process.env.PORT ?? 8787);
 // 不直接暴露公网（防火墙之外的第二层防御）。容器/反代在别的主机时用 AITEAM_HOST=0.0.0.0（或私网 IP）放开。
 const HOST = process.env.AITEAM_HOST || "127.0.0.1";
 
+assertProductionStdioConfiguration();
 seedGlobalSkills();
 const healed = finalizeStaleStreaming(); // 收口上次遗留的 streaming 中断消息，避免界面永久卡住
 if (healed) console.log(`[aiteam] 收口 ${healed} 条中断的流式消息`);
 startScheduler();
+const expiredMissions = expireOverdueMissions();
+if (expiredMissions) {
+  console.log(`[aiteam] 启动时终止 ${expiredMissions} 个已超期 Mission`);
+}
+startMissionExpirySweep();
 recoverInFlightTasks();
 
 const app = express();

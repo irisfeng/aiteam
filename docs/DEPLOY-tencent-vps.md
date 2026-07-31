@@ -168,7 +168,14 @@ WantedBy=multi-user.target
 
 > **关于 127.0.0.1 监听**：已合入——`server/src/index.ts` 现在 `server.listen(PORT, HOST)`，`HOST = process.env.AITEAM_HOST || "127.0.0.1"`，**默认只听回环**（见 §10）。同机 Nginx 反代照常可达，公网够不着。安全组 + 主机防火墙仍作为第一层兜底（叠加，必做）。
 >
-> **若将来要配 stdio MCP**：上面的 `ProtectSystem=strict` + `ProtectHome=true` + `PrivateTmp=true` 会让 `npx` 首次联网拉包**无可写缓存目录而失败**（写不进 `~/.npm`、受限的 `/tmp`）。届时需为 npm cache 补一条 `ReadWritePaths`（如 `/var/lib/aiteam/.npm` 并设 `Environment=npm_config_cache=/var/lib/aiteam/.npm`），或预先把 MCP server 包装好、不在运行期联网拉包。内部场景默认不配 stdio MCP 则无此问题。
+> **首个 Preview 仍不启用 stdio MCP**：未配置 runner 时，应用在启动、API 和
+> 唯一 spawn 边界继续拒绝全部 stdio。代码已有 rootless Podman 的
+> `safety=local` 候选：digest 固定、`--pull=never`、禁网、只读 rootfs、drop all
+> capabilities、no-new-privileges、CPU/内存/PID 限额和 owner + Mission/task
+> 独立工作区；network/exec 仍禁用。它必须先在目标 Linux + cgroup v2 上通过
+> `npm run test:stdio-sandbox:real`。现有 systemd 的 `NoNewPrivileges`、
+> `ProtectHome` 与 rootless Podman 的 subuid/subgid、storage/runtime 需求可能
+> 冲突；实测失败时保持关闭，不得为赶进度放宽主服务沙箱。
 
 ### 4.2 环境变量文件 `/etc/aiteam/aiteam.env`
 （权限 `chmod 600 && chown aiteam:aiteam`，绝不进 git）
@@ -510,7 +517,7 @@ ssh "$VPS" 'systemctl daemon-reload && systemctl enable aiteam && systemctl rest
 | **8787 绑回环 ✅ 已合入** | `server/src/index.ts` `HOST=AITEAM_HOST\|\|127.0.0.1`，默认只听回环 | 安全组只放 80 给可信网段 + ufw/firewalld 双层作第一层（必做）；代码已默认不暴露公网 |
 | **会话密钥 fail-fast ✅ 已合入（commit 0983fb6）** | `server/src/session.ts:12-17` 生产未设 `AITEAM_SESSION_SECRET` 直接 `process.exit(1)` 拒启 | EnvironmentFile 里 `openssl rand -base64 48` 写入强密钥 + 确保 `NODE_ENV=production`；漏配会被拒启兜底 |
 | **开放注册 + 首注册成 admin** | `server/src/auth-routes.ts:12/27` | 部署前设 `AITEAM_ADMIN_EMAILS` 白名单 → 注册首个 admin → 立刻 `AITEAM_ALLOW_SIGNUP=0` 重启（必做） |
-| **MCP test 端点 ✅ 已合入 requireAdmin（commit 0983fb6）** | `server/src/routes.ts:208` `/mcp-servers/:id/test` 现带 `requireAdmin`，与同文件 185/201/216 的 create/toggle/delete 对齐 | 普通 member 不能再触发已存在 stdio server 子进程派生；内部场景仍建议坚决不配任何 stdio MCP（args 不放可执行命令，最稳） |
+| **MCP test 端点 + 生产 stdio sandbox gate** | create/toggle/test/task-test 均需 admin；默认拒绝全部 stdio；配置合格 runner 后只开放 digest-pinned `local` 容器 | 普通 member、存量/直写行、可变 tag、rootful/cgroup v1 runner、network/exec 都不能触发生产子进程；首个 Preview 仍只接 HTTP MCP |
 | **cookie 无 Secure 标志** | `auth-routes.ts:14` 只有 `httpOnly`+`sameSite=lax` | 纯内网 HTTP 可接受（cookie 无 Secure 正常工作），但必须靠网络层隔离（安全组+防火墙只放可信网段） |
 | **provider / MCP / 文生图凭证落库加密 ✅ 已合入** | `server/src/secrets.ts` 使用 AES-256-GCM `enc1:`；`db.ts` 启动事务统一迁移 | EnvironmentFile 固定注入 `AITEAM_CREDENTIAL_KEY`；密钥与 DB 分开备份，恢复演练验证可解密 |
 | **三项目横向感染** | 默认同用户/共享目录可互读 | 每项目独立 OS 用户 + systemd 沙箱（`ProtectSystem=strict`/`ReadWritePaths` 收窄）+ 独立 data |
@@ -668,7 +675,9 @@ find "$DATA_DIR/assets" -type f -mtime +90 -print -delete
 - [ ] Nginx 配置（路径前缀，§4.3）
 - [ ] 注册首个 admin（白名单邮箱）→ 立刻 `AITEAM_ALLOW_SIGNUP=0` 重启
 - [ ] 登录 UI 配 DeepSeek/GLM/Kimi 等国内 provider（不设 `ANTHROPIC_API_KEY`）
-- [ ] 决定是否配 stdio MCP；内部默认不配（args 留空，最稳）
+- [ ] 首个 Preview 确认数据库没有启用的 stdio MCP 且未设置 `AITEAM_MCP_STDIO_RUNNER`
+- [ ] 以实际 service user 执行 `preview-host-qualification.mjs --profile http-only`，归档 `0600` JSON 和 SHA-256；固定提交、unit 硬化、回环监听、401/200 健康和密钥存在性全部通过
+- [ ] 后续 local stdio 灰度前：目标 Linux rootless Podman + cgroup v2 preflight；按 `containers/markitdown-mcp/README.md` 构建/导入目标架构镜像，归档 digest + CycloneDX SBOM；`npm run test:stdio-sandbox:real`、`npm run test:stdio-sandbox:markitdown-real` 和 systemd 重启演练全部通过
 - [ ] 探针 `curl -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/aiteam/api/auth/me` 返回 401
 - [ ] 备份 cron + 一次手动 `backup.sh` + 一次 `restore.sh` 演练
 - [ ] （可选）assets 清理 cron + 磁盘水位告警 webhook

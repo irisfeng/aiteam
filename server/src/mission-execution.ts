@@ -4,20 +4,35 @@ import {
   createTaskEvent,
   db,
   getAgent,
+  getApproval,
   getTask,
+  invalidateApprovalsForTask,
   listAgents,
   listChannels,
   listDocuments,
+  listApprovals,
   listTaskEvents,
   listTasks,
   listVerdictsForTask,
+  readUsage,
+  updateProject,
+  updateTask,
   type Task,
+  type Approval,
 } from "./db.js";
-import { isMock, onTaskAssigned } from "./agents/engine.js";
+import { isMock, onTaskAssigned, stopTask } from "./agents/engine.js";
+import { broadcast } from "./bus.js";
 import { classifyFinalMissionDelivery } from "./mission-quality.js";
-import { ownerFromUserId, withOwner } from "./ownerScope.js";
+import {
+  missionCancellationActivityMetadata,
+  missionActivityMetadata,
+  type MissionStageKey,
+} from "./mission-activity.js";
+import { summarizeMissionObservability } from "./mission-observability.js";
+import { ownerFromOrganizationUser, withOwner } from "./ownerScope.js";
 import { seedForOwner } from "./seed.js";
 import type { Mission, MissionStatus } from "./missions.js";
+import { resolveApprovalWithSideEffects } from "./approval-resolution.js";
 
 interface MissionExecution {
   mission_id: string;
@@ -46,6 +61,34 @@ export interface MissionArtifact {
   updated_at: number;
 }
 
+export interface MissionNetworkApproval {
+  id: string;
+  mission_id: string;
+  kind: "network";
+  title: string;
+  server_name: string;
+  tool_name: string;
+  destination: string;
+  input_summary: string;
+  call_fingerprint: string;
+  status: "pending" | "approved" | "rejected";
+  created_at: number;
+  resolved_at: number | null;
+}
+
+export type ResolveMissionNetworkApprovalResult =
+  | { outcome: "not_found" }
+  | { outcome: "conflict"; approval: MissionNetworkApproval }
+  | {
+      outcome: "resolved" | "replayed";
+      approval: MissionNetworkApproval;
+    };
+
+export interface CancelMissionExecutionInput {
+  cancelledBy: string;
+  reason: string;
+}
+
 export class MissionExecutionDomainError extends Error {
   override name = "MissionExecutionDomainError";
 }
@@ -68,6 +111,142 @@ function executionFor(
     .get(missionId, organizationId) as MissionExecution | undefined;
 }
 
+function publicNetworkApproval(
+  mission: Mission,
+  approval: Approval,
+): MissionNetworkApproval | null {
+  if (approval.kind !== "network") return null;
+  try {
+    const payload = JSON.parse(approval.payload || "{}") as {
+      network_grant?: {
+        v?: unknown;
+        server_name?: unknown;
+        server_target?: unknown;
+        tool?: unknown;
+        input?: unknown;
+        call_fingerprint?: unknown;
+      };
+    };
+    const grant = payload.network_grant;
+    if (
+      grant?.v !== 1 ||
+      typeof grant.server_name !== "string" ||
+      typeof grant.server_target !== "string" ||
+      typeof grant.tool !== "string" ||
+      typeof grant.call_fingerprint !== "string" ||
+      !/^[a-f0-9]{64}$/.test(grant.call_fingerprint)
+    ) {
+      return null;
+    }
+    const toolName =
+      grant.tool.match(/^mcp__.+?__(.+)$/)?.[1]?.slice(0, 120) ??
+      "external_tool";
+    return {
+      id: approval.id,
+      mission_id: mission.id,
+      kind: "network",
+      title: approval.title.slice(0, 200),
+      server_name: grant.server_name.slice(0, 120),
+      tool_name: toolName,
+      destination: publicNetworkDestination(grant.server_target),
+      input_summary: truncateUtf8(
+        JSON.stringify(redactNetworkInput(grant.input)),
+        1200,
+      ),
+      call_fingerprint: grant.call_fingerprint,
+      status: approval.status,
+      created_at: approval.created_at,
+      resolved_at: approval.resolved_at,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function publicNetworkDestination(value: string): string {
+  if (value.startsWith("stdio:")) {
+    return value.slice(0, 240);
+  }
+  try {
+    const target = new URL(value);
+    target.username = "";
+    target.password = "";
+    target.search = "";
+    target.hash = "";
+    return target.toString().slice(0, 240);
+  } catch {
+    return "unavailable";
+  }
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value) <= maxBytes) return value;
+  const suffix = "…";
+  const contentBudget = maxBytes - Buffer.byteLength(suffix);
+  let bytes = 0;
+  let end = 0;
+  for (const character of value) {
+    const characterBytes = Buffer.byteLength(character);
+    if (bytes + characterBytes > contentBudget) break;
+    bytes += characterBytes;
+    end += character.length;
+  }
+  return `${value.slice(0, end)}${suffix}`;
+}
+
+function redactNetworkInput(
+  value: unknown,
+  depth = 0,
+): unknown {
+  if (depth > 3) return "[nested value]";
+  if (value === null || typeof value === "boolean" || typeof value === "number") {
+    return value;
+  }
+  if (typeof value === "string") {
+    const redacted = redactSensitiveString(value);
+    return redacted.length > 240 ? `${redacted.slice(0, 240)}…` : redacted;
+  }
+  if (Array.isArray(value)) {
+    const visible = value
+      .slice(0, 8)
+      .map((child) => redactNetworkInput(child, depth + 1));
+    if (value.length > visible.length) visible.push(`[${value.length - visible.length} more]`);
+    return visible;
+  }
+  if (value && typeof value === "object") {
+    const result: Record<string, unknown> = {};
+    const entries = Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .slice(0, 16);
+    for (const [key, child] of entries) {
+      result[key.slice(0, 80)] =
+        /authorization|cookie|credential|password|secret|token|api[_-]?key/i.test(
+          key,
+        )
+          ? "[redacted]"
+          : redactNetworkInput(child, depth + 1);
+    }
+    return result;
+  }
+  return "[unsupported value]";
+}
+
+function redactSensitiveString(value: string): string {
+  return value
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+    .replace(/\b(?:sk|pk|rk|ghp|github_pat)[-_][A-Za-z0-9_-]{8,}\b/gi, "[redacted]")
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[redacted]")
+    .replace(/(https?:\/\/)[^/\s@]+@/gi, "$1[redacted]@")
+    .replace(
+      /([?&](?:access[_-]?token|api[_-]?key|key|password|secret|token)=)[^&#\s]*/gi,
+      "$1[redacted]",
+    )
+    .replace(
+      /\b(api[_-]?key|access[_-]?token|password|secret|token)\s*[:=]\s*[^\s,;&]+/gi,
+      "$1=[redacted]",
+    );
+}
+
 function pickAgent(
   agents: ReturnType<typeof listAgents>,
   patterns: RegExp[],
@@ -86,7 +265,10 @@ export function ensureMissionExecution(mission: Mission): MissionExecution {
   const existing = executionFor(mission.id, mission.organization_id);
   if (existing) return existing;
 
-  const ownerId = ownerFromUserId(mission.requested_by);
+  const ownerId = ownerFromOrganizationUser(
+    mission.organization_id,
+    mission.requested_by,
+  );
   return withOwner(ownerId, () => {
     seedForOwner();
     const agents = listAgents();
@@ -296,6 +478,66 @@ export function inspectMissionExecution(mission: Mission): MissionExecutionState
       latestVerdict: latestFinalVerdict?.result ?? null,
       mock: isMock(),
     });
+    const workflowStageKeys = [
+      "scope",
+      "research",
+      "analysis",
+      "report",
+    ] as const satisfies readonly MissionStageKey[];
+    const activeTaskIndex = tasks.findIndex(
+      (task) => !["done", "cancelled"].includes(task.status),
+    );
+    const activeTask =
+      activeTaskIndex >= 0 ? tasks[activeTaskIndex] : finalTask ?? tasks.at(-1);
+    let activityStage: MissionStageKey =
+      workflowStageKeys[
+        Math.min(
+          Math.max(activeTaskIndex, 0),
+          workflowStageKeys.length - 1,
+        )
+      ] ?? "report";
+    let activityAgentId = activeTask?.assignee_agent_id ?? null;
+    if (
+      deliveryDecision?.status === "blocked" ||
+      finalTask?.status === "review" ||
+      latestFinalVerdict
+    ) {
+      activityStage = "quality_review";
+      activityAgentId = finalTask?.reviewer_agent_id ?? null;
+    }
+    if (deliveryDecision?.status === "completed") {
+      activityStage = "delivery";
+      activityAgentId = finalTask?.reviewer_agent_id ?? null;
+    }
+    if (
+      tasks.length > 0 &&
+      tasks.every((task) => task.status === "cancelled")
+    ) {
+      activityStage = "cancelled";
+      activityAgentId = null;
+    }
+    const missionTaskIds = new Set(tasks.map((task) => task.id));
+    const observability = summarizeMissionObservability({
+      missionCreatedAt: mission.created_at,
+      observedAt: Date.now(),
+      usageSamples: tasks.map((task) => {
+        const usage = readUsage(task.usage_json);
+        return {
+          inputTokens: usage.input,
+          outputTokens: usage.output,
+          cacheReadTokens: usage.cacheRead,
+          cacheCreationTokens: usage.cacheCreation,
+          billableTokens: usage.billable,
+        };
+      }),
+      approvalStatuses: listApprovals()
+        .filter(
+          (approval) =>
+            approval.kind === "network" &&
+            Boolean(approval.ref_id && missionTaskIds.has(approval.ref_id)),
+        )
+        .map((approval) => approval.status),
+    });
     const payload = {
       project_id: execution.project_id,
       task_ids: tasks.map((task) => task.id),
@@ -308,6 +550,11 @@ export function inspectMissionExecution(mission: Mission): MissionExecutionState
         latestFinalVerdict?.result === "revise"
           ? latestFinalVerdict.reasons.slice(0, 2000)
           : null,
+      observability,
+      activity: missionActivityMetadata(
+        activityStage,
+        activityAgentId ? getAgent(activityAgentId)?.name : null,
+      ),
     };
     if (deliveryDecision?.status === "completed") {
       return { status: "completed", payload };
@@ -331,10 +578,122 @@ export function inspectMissionExecution(mission: Mission): MissionExecutionState
     if (failedTask) {
       return {
         status: "failed",
-        payload: { ...payload, failed_task_id: failedTask.id },
+        payload: {
+          ...payload,
+          error_code: "MISSION_TASK_FAILED",
+          failed_task_id: failedTask.id,
+        },
       };
     }
     return { status: "running", payload };
+  });
+}
+
+export function cancelMissionExecution(
+  mission: Mission,
+  input: CancelMissionExecutionInput,
+): Record<string, unknown> {
+  const execution = ensureMissionExecution(mission);
+  return withOwner(execution.owner_id, () => {
+    const tasks = executionTasks(execution);
+    const cancelledTasks: Task[] = [];
+    const reason = input.reason.trim().slice(0, 500);
+    const cancelledBy = input.cancelledBy.trim().slice(0, 160);
+
+    const project = db.transaction(() => {
+      for (const task of tasks) {
+        if (task.status === "done" || task.status === "cancelled") continue;
+        if (task.status === "doing") stopTask(task.id);
+        invalidateApprovalsForTask(task.id);
+        const cancelled =
+          updateTask(task.id, {
+            status: "cancelled",
+            blocked_approval_id: null,
+          }) ?? task;
+        createTaskEvent({
+          task_id: cancelled.id,
+          channel_id: cancelled.channel_id,
+          project_id: cancelled.project_id,
+          agent_id: null,
+          type: "cancelled",
+          summary: "Coworker 请求取消 Mission 执行",
+          metadata: {
+            mission_id: mission.id,
+            cancelled_by: cancelledBy,
+            reason,
+          },
+        });
+        cancelledTasks.push(cancelled);
+      }
+      return updateProject(execution.project_id, { status: "done" });
+    }).immediate();
+
+    for (const task of cancelledTasks) {
+      broadcast({ type: "task:upsert", payload: task });
+    }
+    if (project) broadcast({ type: "project:upsert", payload: project });
+
+    return {
+      project_id: execution.project_id,
+      task_ids: tasks.map((task) => task.id),
+      cancelled_task_ids: cancelledTasks.map((task) => task.id),
+      cancelled_by: cancelledBy,
+      reason,
+      activity: missionCancellationActivityMetadata(),
+    };
+  });
+}
+
+export function timeoutMissionExecution(
+  mission: Mission,
+): Record<string, unknown> {
+  const execution = ensureMissionExecution(mission);
+  return withOwner(execution.owner_id, () => {
+    const tasks = executionTasks(execution);
+    const timedOutTasks: Task[] = [];
+
+    const project = db.transaction(() => {
+      for (const task of tasks) {
+        if (task.status === "done" || task.status === "cancelled") continue;
+        if (task.status === "doing") stopTask(task.id);
+        invalidateApprovalsForTask(task.id);
+        const timedOut =
+          updateTask(task.id, {
+            status: "cancelled",
+            blocked_approval_id: null,
+          }) ?? task;
+        createTaskEvent({
+          task_id: timedOut.id,
+          channel_id: timedOut.channel_id,
+          project_id: timedOut.project_id,
+          agent_id: null,
+          type: "failure",
+          summary: "Mission 超过执行期限，运行时已停止剩余任务",
+          metadata: {
+            mission_id: mission.id,
+            error_code: "MISSION_TIMEOUT",
+            deadline_at: mission.deadline_at,
+          },
+        });
+        timedOutTasks.push(timedOut);
+      }
+      return updateProject(execution.project_id, { status: "done" });
+    }).immediate();
+
+    for (const task of timedOutTasks) {
+      broadcast({ type: "task:upsert", payload: task });
+    }
+    if (project) broadcast({ type: "project:upsert", payload: project });
+
+    return {
+      project_id: execution.project_id,
+      task_ids: tasks.map((task) => task.id),
+      timed_out_task_ids: timedOutTasks.map((task) => task.id),
+      deadline_at: mission.deadline_at,
+      error_code: "MISSION_TIMEOUT",
+      error: "AITeam execution exceeded its configured deadline.",
+      activity: missionActivityMetadata("timeout"),
+    };
   });
 }
 
@@ -360,5 +719,70 @@ export function listMissionArtifacts(mission: Mission): MissionArtifact[] {
         created_at: document.created_at,
         updated_at: document.updated_at,
       }));
+  });
+}
+
+/**
+ * Mission clients receive only the decision metadata needed for informed
+ * consent. Exact tool input, target URL, credentials, fingerprints, task IDs,
+ * and agent IDs remain inside AITeam.
+ */
+export function listMissionNetworkApprovals(
+  mission: Mission,
+): MissionNetworkApproval[] {
+  const execution = ensureMissionExecution(mission);
+  return withOwner(execution.owner_id, () => {
+    const taskIds = new Set(executionTasks(execution).map((task) => task.id));
+    return listApprovals()
+      .filter(
+        (approval) =>
+          Boolean(approval.ref_id && taskIds.has(approval.ref_id)) &&
+          approval.kind === "network",
+      )
+      .map((approval) => publicNetworkApproval(mission, approval))
+      .filter(
+        (approval): approval is MissionNetworkApproval => approval !== null,
+      )
+      .sort((left, right) => right.created_at - left.created_at)
+      .slice(0, 50);
+  });
+}
+
+export function resolveMissionNetworkApproval(
+  mission: Mission,
+  approvalId: string,
+  input: {
+    approve: boolean;
+    resolvedBy: string;
+    callFingerprint: string;
+  },
+): ResolveMissionNetworkApprovalResult {
+  const execution = ensureMissionExecution(mission);
+  return withOwner(execution.owner_id, () => {
+    const taskIds = new Set(executionTasks(execution).map((task) => task.id));
+    const before = getApproval(approvalId);
+    const publicBefore = before
+      ? publicNetworkApproval(mission, before)
+      : null;
+    if (
+      !before?.ref_id ||
+      !taskIds.has(before.ref_id) ||
+      !publicBefore ||
+      publicBefore.call_fingerprint !== input.callFingerprint
+    ) {
+      return { outcome: "not_found" };
+    }
+    const result = resolveApprovalWithSideEffects({
+      id: approvalId,
+      approve: input.approve,
+      resolvedBy: input.resolvedBy,
+    });
+    if (result.outcome === "not_found") return { outcome: "not_found" };
+    const approval = publicNetworkApproval(mission, result.approval);
+    if (!approval) return { outcome: "not_found" };
+    if (result.outcome === "conflict") {
+      return { outcome: "conflict", approval };
+    }
+    return { outcome: result.outcome, approval };
   });
 }

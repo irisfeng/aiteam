@@ -208,6 +208,7 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
   url TEXT NOT NULL DEFAULT '',
   auth_token TEXT NOT NULL DEFAULT '',
   command TEXT NOT NULL DEFAULT '',
+  container_image TEXT NOT NULL DEFAULT '',
   args_json TEXT NOT NULL DEFAULT '[]',
   enabled INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL
@@ -253,6 +254,7 @@ CREATE TABLE IF NOT EXISTS missions (
   idempotency_key TEXT NOT NULL,
   request_hash TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'queued',
+  deadline_at INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   UNIQUE(organization_id, idempotency_key)
@@ -260,6 +262,9 @@ CREATE TABLE IF NOT EXISTS missions (
 CREATE INDEX IF NOT EXISTS idx_missions_org_created
   ON missions(organization_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS mission_events (
+  event_id TEXT NOT NULL,
+  correlation_id TEXT NOT NULL,
+  causation_id TEXT,
   mission_id TEXT NOT NULL,
   organization_id TEXT NOT NULL,
   sequence INTEGER NOT NULL,
@@ -321,6 +326,34 @@ addColumnIfMissing("tasks", "estimate_billable", "estimate_billable INTEGER NOT 
 addColumnIfMissing("providers", "price_input_per_million", "price_input_per_million REAL NOT NULL DEFAULT 0");
 addColumnIfMissing("providers", "price_output_per_million", "price_output_per_million REAL NOT NULL DEFAULT 0");
 addColumnIfMissing("providers", "price_currency", "price_currency TEXT NOT NULL DEFAULT 'USD'");
+addColumnIfMissing("missions", "deadline_at", "deadline_at INTEGER NOT NULL DEFAULT 0");
+// Mission event envelope v0.3: old rows receive deterministic identities so
+// replay remains stable across restarts and upgrades.
+addColumnIfMissing("mission_events", "event_id", "event_id TEXT");
+addColumnIfMissing("mission_events", "correlation_id", "correlation_id TEXT");
+addColumnIfMissing("mission_events", "causation_id", "causation_id TEXT");
+db.transaction(() => {
+  db.exec(`
+    UPDATE mission_events
+    SET event_id = 'legacy:' || mission_id || ':' || sequence
+    WHERE event_id IS NULL OR event_id = '';
+
+    UPDATE mission_events
+    SET correlation_id = mission_id
+    WHERE correlation_id IS NULL OR correlation_id = '';
+
+    UPDATE mission_events AS current
+    SET causation_id = (
+      SELECT previous.event_id
+      FROM mission_events AS previous
+      WHERE previous.mission_id = current.mission_id
+        AND previous.sequence = current.sequence - 1
+    )
+    WHERE current.sequence > 1
+      AND (current.causation_id IS NULL OR current.causation_id = '');
+  `);
+})();
+db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_mission_events_event_id ON mission_events(event_id)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_task_events_task ON task_events(owner_id, task_id, created_at)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_task_events_owner ON task_events(owner_id, created_at)`);
 // D1 质量闭环落表：每次验收裁决一行（此前 verdict 只散落在频道消息流里，无法做质量度量）
@@ -387,6 +420,7 @@ addColumnIfMissing("skills", "version", "version INTEGER NOT NULL DEFAULT 1");  
 // MCP 安全分级（registry 预设带入）：exec/network 受引擎层审批门约束（见 engine.callMcpTool 前置门）
 addColumnIfMissing("mcp_servers", "safety", "safety TEXT NOT NULL DEFAULT 'local'");  // local | network | exec
 addColumnIfMissing("mcp_servers", "env_json", "env_json TEXT NOT NULL DEFAULT '{}'"); // stdio 子进程环境变量（如 BOCHA_API_KEY），值含密钥→sanitize 只暴露 key 名
+addColumnIfMissing("mcp_servers", "container_image", "container_image TEXT NOT NULL DEFAULT ''"); // 生产 stdio 必须用 sha256 digest 固定 OCI 镜像
 db.exec(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '')`);
 // 启动凭证门禁：生产只认证已有 enc1，遇到 plaintext/enc:v1 直接拒启并指向 copy-only migrate-copy；
 // 仅开发/测试允许在事务内把旧格式原地规范化。任一错误均整体回滚，禁止部分迁移。
@@ -503,6 +537,8 @@ export interface McpServer {
   url: string;
   auth_token: string;
   command: string;
+  /** 生产 stdio 的不可变 OCI 镜像引用（必须包含 @sha256:<digest>） */
+  container_image: string;
   args_json: string;
   /** stdio 子进程环境变量 JSON（如 {"BOCHA_API_KEY":"..."}）；含密钥，sanitize 只回 key 名不回值 */
   env_json: string;
@@ -892,6 +928,7 @@ export function createMcpServer(s: {
   url?: string;
   auth_token?: string;
   command?: string;
+  container_image?: string;
   args?: string[];
   safety?: McpServer["safety"];
   env?: Record<string, string>;
@@ -903,6 +940,7 @@ export function createMcpServer(s: {
     url: s.url ?? "",
     auth_token: encryptSecret(s.auth_token ?? ""),
     command: s.command ?? "",
+    container_image: s.container_image ?? "",
     args_json: JSON.stringify(s.args ?? []),
     env_json: Object.keys(s.env ?? {}).length > 0 ? encryptSecret(JSON.stringify(s.env)) : "{}",
     safety: s.safety ?? "local",
@@ -910,7 +948,7 @@ export function createMcpServer(s: {
     created_at: now(),
   };
   db.prepare(
-    "INSERT INTO mcp_servers (id, name, kind, url, auth_token, command, args_json, env_json, safety, enabled, created_at) VALUES (@id, @name, @kind, @url, @auth_token, @command, @args_json, @env_json, @safety, @enabled, @created_at)"
+    "INSERT INTO mcp_servers (id, name, kind, url, auth_token, command, container_image, args_json, env_json, safety, enabled, created_at) VALUES (@id, @name, @kind, @url, @auth_token, @command, @container_image, @args_json, @env_json, @safety, @enabled, @created_at)"
   ).run(server);
   return server;
 }
@@ -939,6 +977,7 @@ export function sanitizeMcpServer(s: McpServer) {
     kind: s.kind,
     url: s.url,
     command: s.command,
+    container_image: s.container_image,
     args_json: s.args_json,
     safety: s.safety, // 风险分级前端可见（registry/手填带入）；非敏感，不脱敏
     env_keys: envKeyNames(s.env_json), // 只回 env 变量名（如 ["BOCHA_API_KEY"]），值含密钥绝不下发
@@ -1264,6 +1303,33 @@ export function listTasks(channelId?: string): Task[] {
 export function getTask(id: string): Task | undefined {
   return db.prepare("SELECT * FROM tasks WHERE id = ? AND owner_id = ?").get(id, currentOwner()) as Task | undefined;
 }
+/**
+ * stdio 沙箱的持久执行作用域：Mission 的多个内部任务共享一个 workspace；
+ * 普通工作线任务退化为 task 作用域。查询始终带当前 owner，不能把另一租户的
+ * Mission id 变成工作区键。
+ */
+export function mcpExecutionIdForTask(taskId: string): string {
+  const owner = currentOwner();
+  const rows = db
+    .prepare(
+      "SELECT mission_id, task_ids_json FROM mission_executions WHERE owner_id = ?",
+    )
+    .all(owner) as { mission_id: string; task_ids_json: string }[];
+  for (const row of rows) {
+    try {
+      const taskIds = JSON.parse(row.task_ids_json || "[]");
+      if (
+        Array.isArray(taskIds) &&
+        taskIds.some((candidate) => candidate === taskId)
+      ) {
+        return `mission:${row.mission_id}`;
+      }
+    } catch {
+      // 损坏的其他 Mission 映射不能扩大当前任务作用域；继续落到 task 隔离。
+    }
+  }
+  return `task:${taskId}`;
+}
 export function createTask(t: {
   channel_id?: string | null;
   title: string;
@@ -1576,6 +1642,31 @@ export function invalidateNetworkApprovalsForTask(taskId: string): number {
     WHERE owner_id = ?
       AND ref_id = ?
       AND kind = 'network'
+      AND (
+        status = 'pending'
+        OR (status = 'approved' AND consumed_at IS NULL)
+      )
+  `).run(closedAt, closedAt, currentOwner(), taskId);
+  return result.changes;
+}
+
+/**
+ * Mission 取消时关闭任务上下文中的全部未结束审批。
+ * pending → rejected，approved+未消费 → consumed，防止取消后由旧审批恢复执行。
+ */
+export function invalidateApprovalsForTask(taskId: string): number {
+  const closedAt = now();
+  const result = db.prepare(`
+    UPDATE approvals
+    SET
+      status = CASE WHEN status = 'pending' THEN 'rejected' ELSE status END,
+      resolved_at = CASE WHEN status = 'pending' THEN ? ELSE resolved_at END,
+      consumed_at = CASE
+        WHEN status = 'approved' AND consumed_at IS NULL THEN ?
+        ELSE consumed_at
+      END
+    WHERE owner_id = ?
+      AND ref_id = ?
       AND (
         status = 'pending'
         OR (status = 'approved' AND consumed_at IS NULL)

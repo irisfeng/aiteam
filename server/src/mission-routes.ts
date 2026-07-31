@@ -1,5 +1,6 @@
 import { Router } from "express";
 import {
+  cancelMission,
   createMission,
   getMission,
   listMissionEvents,
@@ -8,7 +9,11 @@ import {
   requireServiceJwt,
   type ServiceRequest,
 } from "./service-auth.js";
-import { listMissionArtifacts } from "./mission-execution.js";
+import {
+  listMissionArtifacts,
+  listMissionNetworkApprovals,
+  resolveMissionNetworkApproval,
+} from "./mission-execution.js";
 
 export const missionRoutes = Router();
 
@@ -74,6 +79,18 @@ missionRoutes.post("/", (request, res) => {
       },
     });
   }
+  if (result.outcome === "capacity") {
+    res.setHeader("Retry-After", "5");
+    return res.status(429).json({
+      error: {
+        code: "MISSION_CAPACITY_EXCEEDED",
+        message:
+          result.scope === "organization"
+            ? "AITeam 当前组织的任务并发已满，请稍后重试"
+            : "AITeam 当前服务的任务并发已满，请稍后重试",
+      },
+    });
+  }
   return res
     .status(result.outcome === "created" ? 201 : 200)
     .json({ data: result.mission });
@@ -100,6 +117,59 @@ missionRoutes.get("/:missionId", (request, res) => {
     });
   }
   return res.json({ data: mission });
+});
+
+missionRoutes.post("/:missionId/cancel", (request, res) => {
+  const req = request as ServiceRequest;
+  const claims = req.serviceClaims;
+  if (!claims?.scopes.includes("mission:cancel")) {
+    return res.status(403).json({
+      error: {
+        code: "MISSION_SCOPE_FORBIDDEN",
+        message: "The token does not allow mission cancellation",
+      },
+    });
+  }
+  const cancelledBy = String(req.body?.cancelled_by ?? "").trim();
+  const reason = String(req.body?.reason ?? "").trim();
+  if (
+    !cancelledBy ||
+    cancelledBy.length > 160 ||
+    reason.length < 3 ||
+    reason.length > 500
+  ) {
+    return res.status(400).json({
+      error: {
+        code: "MISSION_CANCEL_REQUEST_INVALID",
+        message: "The mission cancellation request is invalid",
+      },
+    });
+  }
+  const result = cancelMission(
+    claims.organizationId,
+    req.params.missionId,
+    {
+      cancelledBy,
+      reason,
+    },
+  );
+  if (!result) {
+    return res.status(404).json({
+      error: {
+        code: "MISSION_NOT_FOUND",
+        message: "Mission not found",
+      },
+    });
+  }
+  if (result.outcome === "terminal") {
+    return res.status(409).json({
+      error: {
+        code: "MISSION_TERMINAL",
+        message: "A completed or failed Mission cannot be cancelled",
+      },
+    });
+  }
+  return res.json({ data: result.mission });
 });
 
 missionRoutes.get("/:missionId/events", (request, res) => {
@@ -148,6 +218,97 @@ missionRoutes.get("/:missionId/events", (request, res) => {
     next_after: events.at(-1)?.sequence ?? after,
   });
 });
+
+missionRoutes.get("/:missionId/approvals", (request, res) => {
+  const req = request as ServiceRequest;
+  const claims = req.serviceClaims;
+  if (!claims?.scopes.includes("mission:read")) {
+    return res.status(403).json({
+      error: {
+        code: "MISSION_SCOPE_FORBIDDEN",
+        message: "The token does not allow mission approval reads",
+      },
+    });
+  }
+  const mission = getMission(claims.organizationId, req.params.missionId);
+  if (!mission) {
+    return res.status(404).json({
+      error: {
+        code: "MISSION_NOT_FOUND",
+        message: "Mission not found",
+      },
+    });
+  }
+  return res.json({ data: listMissionNetworkApprovals(mission) });
+});
+
+missionRoutes.post(
+  "/:missionId/approvals/:approvalId/resolve",
+  (request, res) => {
+    const req = request as ServiceRequest;
+    const claims = req.serviceClaims;
+    if (!claims?.scopes.includes("mission:approve")) {
+      return res.status(403).json({
+        error: {
+          code: "MISSION_SCOPE_FORBIDDEN",
+          message: "The token does not allow mission approval decisions",
+        },
+      });
+    }
+    const decision = String(req.body?.decision ?? "").trim();
+    const resolvedBy = String(req.body?.resolved_by ?? "").trim();
+    const callFingerprint = String(
+      req.body?.call_fingerprint ?? "",
+    ).trim();
+    const approvalId = String(req.params.approvalId ?? "").trim();
+    if (
+      !["approve", "reject"].includes(decision) ||
+      !approvalId ||
+      approvalId.length > 160 ||
+      !resolvedBy ||
+      resolvedBy.length > 160 ||
+      !/^[a-f0-9]{64}$/.test(callFingerprint)
+    ) {
+      return res.status(400).json({
+        error: {
+          code: "MISSION_APPROVAL_REQUEST_INVALID",
+          message: "The Mission approval request is invalid",
+        },
+      });
+    }
+    const mission = getMission(claims.organizationId, req.params.missionId);
+    if (!mission) {
+      return res.status(404).json({
+        error: {
+          code: "MISSION_NOT_FOUND",
+          message: "Mission not found",
+        },
+      });
+    }
+    const result = resolveMissionNetworkApproval(mission, approvalId, {
+      approve: decision === "approve",
+      resolvedBy,
+      callFingerprint,
+    });
+    if (result.outcome === "not_found") {
+      return res.status(404).json({
+        error: {
+          code: "MISSION_APPROVAL_NOT_FOUND",
+          message: "Mission network approval not found",
+        },
+      });
+    }
+    if (result.outcome === "conflict") {
+      return res.status(409).json({
+        error: {
+          code: "MISSION_APPROVAL_CONFLICT",
+          message: "The approval already has another decision",
+        },
+      });
+    }
+    return res.json({ data: result.approval });
+  },
+);
 
 missionRoutes.get("/:missionId/artifacts", (request, res) => {
   const req = request as ServiceRequest;

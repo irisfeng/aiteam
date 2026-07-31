@@ -260,7 +260,7 @@ npm start
 | 任务长时间停在 `doing` | 富方案（检索 + 配图 + 强模型验收 + 返工）端到端常 3–5 分钟，属正常；看 audit 进度，真卡死再排查 |
 | audit 出现「联网工具适配…400 Failed to deserialize…降级为仅搜索」 | 国内端点不接受官方 web_search 工具组合，引擎已自动降级用检索插件，**非致命** |
 | 智谱 `web_search_prime` 报 1309 | GLM Coding 套餐过期 / 额度问题 |
-| MCP 首次调用慢（~20–30s） | stdio MCP 冷启动，之后走缓存连接 |
+| 开发环境 MCP 首次调用慢（~20–30s） | stdio MCP 冷启动，之后走缓存连接；生产 local stdio 使用一次性隔离容器，不跨 Mission 缓存 |
 | 导出的 PPT 中文在别的电脑变样 | .pptx 写的是字体名；默认 `PingFang SC` 适配 Mac，面向 Windows/WPS 客户设 `AITEAM_PPTX_FONT=Microsoft YaHei` 后重启 |
 
 ---
@@ -284,6 +284,10 @@ npm start
 | `AITEAM_ADMIN_EMAILS` | 空 | 逗号分隔的 admin 邮箱白名单 |
 | `AITEAM_DAILY_TOKEN_BUDGET` | `0`（不限） | 每日 token 预算，`>0` 启用 |
 | `AITEAM_TASK_TOKEN_BUDGET` | `0`（不限） | 单任务默认预算（加权计费 token）；触线任务自动暂停并开审批，批准后追加预算续跑 |
+| `AITEAM_MISSION_TIMEOUT_MS` | `3600000`（1 小时） | Mission 总执行期限（1000–604800000ms）；截止时间写入数据库，重启时先过期再恢复任务 |
+| `AITEAM_MISSION_EXPIRY_SWEEP_MS` | `30000`（30 秒） | 主动收口已超期 Mission 的扫描间隔（1000–60000ms） |
+| `AITEAM_MISSION_MAX_ACTIVE_PER_ORGANIZATION` | `2` | 单组织活跃 Mission 上限（1–32） |
+| `AITEAM_MISSION_MAX_ACTIVE_GLOBAL` | `4` | 单实例全局活跃 Mission 上限（1–64），不得小于单组织上限 |
 | `TASK_MAX_REVISIONS` | `1` | 验收返工上限 |
 | `AITEAM_PROVIDER_BENCHMARK_BUDGET` | `20000` | 固定模型质量基准的计费 token 上限 |
 | `AITEAM_PROVIDER_BENCHMARK_REVIEW_RESERVE` | `6000` | 独立强模型复核的预留计费 token |
@@ -294,7 +298,68 @@ npm start
 | `AITEAM_IMAGES_PER_RUN` | `2` | 单次运行配图张数上限（工具每次只采用 1 张；Seedream 5.0 Pro 默认单图） |
 | `AITEAM_UPLOAD_MAX_BYTES` | `20971520`（20MB） | 上传单文件大小上限 |
 | `AITEAM_SEARCH_DEDUP` | `1`（开） | 跨插件检索去重；`0`=关 |
-| `AITEAM_MCP_STDIO_ALLOW` | 空 | stdio MCP 启动命令白名单扩展（逗号分隔）；默认仅允许 `npx/uvx/uv/node/python/python3/markitdown-mcp` |
+| `AITEAM_MCP_STDIO_ALLOW` | 空 | 仅开发/测试宿主 stdio 的命令白名单扩展；不能开启生产 stdio |
+| `AITEAM_MCP_STDIO_RUNNER` | 空 | 生产 stdio runner；当前唯一合法值 `podman`，空值保持全部 fail-closed |
+| `AITEAM_MCP_STDIO_RUNNER_BIN` | `podman` | Podman CLI；basename 必须为 `podman`，不会连接 Docker/Podman API socket |
+| `AITEAM_MCP_STDIO_WORKSPACE_ROOT` | `$AITEAM_DATA_DIR/mcp-workspaces` | 必须是 `AITEAM_DATA_DIR` 的专用绝对子目录；按 owner + Mission/task 哈希分区 |
+| `AITEAM_MCP_STDIO_MEMORY` | `256m` | 每个 stdio 容器内存硬上限 |
+| `AITEAM_MCP_STDIO_CPUS` | `1` | 每个 stdio 容器 CPU 上限（0.1–8） |
+| `AITEAM_MCP_STDIO_PIDS` | `64` | 每个 stdio 容器进程数上限（8–1024） |
+
+> **生产 stdio 两态门**：默认没有 `AITEAM_MCP_STDIO_RUNNER` 时，启动、API 和
+> 唯一 spawn sink 仍全面 fail-closed。配置 runner 后也只允许
+> `safety=local`，并要求 rootless Podman、cgroup v2、已预拉取的
+> `image@sha256:<digest>`；network/exec 继续拒绝。每次连接均为
+> `--rm` 容器，固定 `--network=none`、只读 rootfs、drop all capabilities、
+> `no-new-privileges`、CPU/内存/PID 限额，只挂载一个 owner + Mission/task
+> 工作区。密钥通过 runner 环境按变量名注入，不出现在 argv。
+>
+> 机制回归 `npm run test:stdio-sandbox` 使用可审计 runner fixture 验证完整
+> MCP 握手与命令构造；它不是 Linux 容器逃逸证据。真正启用前必须在目标 Linux
+> 主机设置预拉取的 Node 测试镜像 digest，并运行
+> `npm run test:stdio-sandbox:real`，确认工作区外写入、只读 rootfs 写入和网络
+> 均失败。Podman rootless 还要求 `/etc/subuid`、`/etc/subgid` 和可用的存储/
+> runtime 目录；若现有 systemd `NoNewPrivileges`/`ProtectHome` 令 preflight
+> 失败，不得削弱主服务单元来硬开，应改用单独受限 runner 服务并重新评审。
+
+### MarkItDown 首个真实 local 镜像
+
+仓库已包含 `containers/markitdown-mcp/`：基础镜像按 OCI digest 固定，
+`markitdown-mcp==0.0.1a4`、`markitdown==0.1.6` 与 65 个传递依赖全部精确
+版本并校验分发包 SHA-256。先预拉固定基础镜像，再构建：
+
+```bash
+podman pull docker.io/library/python@sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7
+npm run mcp:image:markitdown:build
+```
+
+构建脚本使用 `--pull=never`，并在无网络、只读 rootfs、drop capabilities、
+非 root 的实际容器中核对锁定包和 `pip check`。输出
+`output/markitdown-mcp-image-evidence.json` 与 CycloneDX 1.6 SBOM；二者默认
+被 Git 忽略，晋级时必须另存到发布证据库。把证据中的 `digest_reference`
+填入 MarkItDown MCP 的 OCI 镜像字段。
+
+随后跑真实生产业务链：
+
+```bash
+AITEAM_MARKITDOWN_TEST_IMAGE='localhost/aiteam/markitdown-mcp@sha256:...' \
+  npm run test:stdio-sandbox:markitdown-real
+```
+
+它实际覆盖生产服务启动、管理员注册、MCP 注册/握手、任务演练、真 `.docx`
+上传、Mission 工作区 staging、Markdown 来源文档入库与 staging 文件清理。
+MarkItDown 官方工具虽接受 `http(s)` URI，本生产镜像固定 `--network=none`，
+只支持 AITeam 已 staging 的本地 `file:///workspace/...` 输入。
+
+镜像 digest 与架构绑定。本机 arm64 通过不等于目标 amd64 Linux 通过；目标
+Preview 必须重建/导入对应架构镜像，重新生成 digest 与 SBOM，并在精确
+service user + systemd unit 下重跑真实业务链和通用逃逸套件。运行时仍禁止拉取。
+
+目标 Linux 的固定提交、systemd 硬化、回环监听、健康状态、脱敏配置检查和
+Podman/镜像准入统一使用 `scripts/preview-host-qualification.mjs`。首个 Preview
+必须选择 `http-only` profile；只有经单独批准的后续灰度才可选择
+`local-stdio`。完整命令、停止条件和证据边界见
+`docs/PREVIEW-host-qualification.md`。
 
 > 更多业务/治理开关见 GUIDE.md「治理开关（环境变量）」。
 
@@ -303,6 +368,13 @@ npm start
 ## 8. 测试与验证
 
 - `AITEAM_PROVIDER_TIMEOUT_MS`：OpenAI 兼容通道的**空闲超时**（毫秒，默认 120000）。连续这么久收不到任何字节才中止；流式长回复不受总时长限制。
+- `AITEAM_MISSION_TIMEOUT_MS`：Mission 的**总执行期限**（毫秒，默认 3600000）。它与单次 provider/MCP 空闲超时分离；截止时间随 Mission 持久化，服务重启会先把已超期 Mission 收口为 `failed`，运行中也会按 `AITEAM_MISSION_EXPIRY_SWEEP_MS` 主动收口，再恢复仍有效的任务。
+- `AITEAM_MISSION_MAX_ACTIVE_PER_ORGANIZATION` / `AITEAM_MISSION_MAX_ACTIVE_GLOBAL`：
+  在 Mission 与首事件写入前，以 SQLite 立即事务原子检查组织/实例容量。
+  活跃状态为 `queued/running/blocked`；终态和已收口的超时 Mission 释放名额。
+  超限返回 `429 / MISSION_CAPACITY_EXCEEDED`，不写入半成品，相同幂等键
+  的已有请求仍可重放。默认 2/4 对应研究 Mission 四任务 DAG 的单组织
+  8 个、全局 16 个执行任务上界。
 - 机制级回归（Mock、零 token、不调真模型）：`npm test`（先跑凭证加密/迁移回归，再跑完整业务回归；用例数以命令输出为准）。
 - 真模型端到端测试清单：见 [TESTING.md](TESTING.md)。
 

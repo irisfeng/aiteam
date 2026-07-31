@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: AITeam Mission API
-  version: 0.2.0
+  version: 0.9.1
   description: Organization-scoped research execution and artifact contract used by Coworker.
 servers:
   - url: /aiteam/api/v1
@@ -45,6 +45,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/CapacityExceeded"
   /missions/{missionId}:
     parameters:
       - $ref: "#/components/parameters/MissionId"
@@ -64,6 +66,39 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+  /missions/{missionId}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/MissionId"
+    post:
+      operationId: cancelMission
+      summary: Cancel an active Mission and its remaining execution tasks
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CancelMissionRequest"
+      responses:
+        "200":
+          description: Mission cancelled or an identical terminal cancellation replayed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MissionEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Mission already completed or failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
   /missions/{missionId}/events:
     parameters:
       - $ref: "#/components/parameters/MissionId"
@@ -133,6 +168,65 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+  /missions/{missionId}/approvals:
+    parameters:
+      - $ref: "#/components/parameters/MissionId"
+    get:
+      operationId: listMissionNetworkApprovals
+      summary: List sanitized network-approval decisions associated with a Mission
+      responses:
+        "200":
+          description: Newest-first list of up to 50 Mission network approvals
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/MissionNetworkApproval"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /missions/{missionId}/approvals/{approvalId}/resolve:
+    parameters:
+      - $ref: "#/components/parameters/MissionId"
+      - $ref: "#/components/parameters/ApprovalId"
+    post:
+      operationId: resolveMissionNetworkApproval
+      summary: Resolve one Mission network approval
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResolveMissionNetworkApprovalRequest"
+      responses:
+        "200":
+          description: Decision recorded, or the same decision replayed idempotently
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MissionNetworkApprovalEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The approval already has the opposite final decision
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
 components:
   securitySchemes:
     serviceJwt:
@@ -141,7 +235,9 @@ components:
       bearerFormat: JWT
       description: >-
         HS256 JWT with iss=coworker, aud=aiteam, sub=service:coworker,
-        organization_id, scope, iat and exp.
+        organization_id, scope (mission:create, mission:read and/or
+        mission:cancel and/or mission:approve), iat and exp. During keyring rotation the JOSE header
+        must include a configured kid.
   parameters:
     IdempotencyKey:
       name: Idempotency-Key
@@ -157,6 +253,14 @@ components:
       required: true
       schema:
         type: string
+    ApprovalId:
+      name: approvalId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 160
   schemas:
     CreateMissionRequest:
       type: object
@@ -182,6 +286,40 @@ components:
         requested_by:
           type: string
           minLength: 1
+          description: External requester id, isolated together with organization_id.
+    CancelMissionRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - cancelled_by
+        - reason
+      properties:
+        cancelled_by:
+          type: string
+          minLength: 1
+          maxLength: 160
+        reason:
+          type: string
+          minLength: 3
+          maxLength: 500
+    ResolveMissionNetworkApprovalRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - decision
+        - resolved_by
+        - call_fingerprint
+      properties:
+        decision:
+          type: string
+          enum: [approve, reject]
+        resolved_by:
+          type: string
+          minLength: 1
+          maxLength: 160
+        call_fingerprint:
+          type: string
+          pattern: ^[a-f0-9]{64}$
     Mission:
       type: object
       required:
@@ -192,6 +330,7 @@ components:
         - brief
         - requested_by
         - status
+        - deadline_at
         - created_at
         - updated_at
       properties:
@@ -209,6 +348,9 @@ components:
           type: string
         status:
           enum: [queued, running, blocked, completed, failed, cancelled]
+        deadline_at:
+          type: integer
+          description: Persisted Unix epoch milliseconds after which the runtime fails the Mission.
         created_at:
           type: integer
         updated_at:
@@ -245,9 +387,191 @@ components:
           type: integer
         updated_at:
           type: integer
+    MissionNetworkApproval:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - mission_id
+        - kind
+        - title
+        - server_name
+        - tool_name
+        - destination
+        - input_summary
+        - call_fingerprint
+        - status
+        - created_at
+        - resolved_at
+      description: >-
+        Sanitized decision metadata. Only the credential-free destination,
+        bounded redacted input summary and exact call fingerprint cross the
+        Mission boundary; credentials, full input, task IDs and agent IDs do not.
+      properties:
+        id:
+          type: string
+        mission_id:
+          type: string
+        kind:
+          const: network
+        title:
+          type: string
+          maxLength: 200
+        server_name:
+          type: string
+          maxLength: 120
+        tool_name:
+          type: string
+          maxLength: 120
+        destination:
+          type: string
+          minLength: 1
+          maxLength: 240
+        input_summary:
+          type: string
+          minLength: 1
+          maxLength: 1200
+          x-maxUtf8Bytes: 1200
+          description: UTF-8-safe redacted summary bounded to 1200 bytes.
+        call_fingerprint:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        status:
+          type: string
+          enum: [pending, approved, rejected]
+        created_at:
+          type: integer
+        resolved_at:
+          type: [integer, "null"]
+    MissionNetworkApprovalEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/MissionNetworkApproval"
+    MissionActivityStage:
+      type: object
+      additionalProperties: false
+      required: [key, label]
+      properties:
+        key:
+          type: string
+          enum:
+            - intake
+            - scope
+            - research
+            - analysis
+            - report
+            - quality_review
+            - delivery
+            - timeout
+            - cancelled
+        label:
+          type: string
+          minLength: 1
+          maxLength: 80
+    MissionActivityActor:
+      type: object
+      additionalProperties: false
+      required: [type, role, label]
+      properties:
+        type:
+          type: string
+          enum: [human, agent, system]
+        role:
+          type: string
+          enum:
+            - requester
+            - mission_lead
+            - researcher
+            - analyst
+            - writer
+            - reviewer
+            - system
+        label:
+          type: string
+          minLength: 1
+          maxLength: 80
+    MissionActivityMetadata:
+      type: object
+      additionalProperties: false
+      required: [stage, actor]
+      properties:
+        stage:
+          $ref: "#/components/schemas/MissionActivityStage"
+        actor:
+          $ref: "#/components/schemas/MissionActivityActor"
+    MissionUsageObservability:
+      type: object
+      additionalProperties: false
+      required:
+        - input_tokens
+        - output_tokens
+        - cache_read_tokens
+        - cache_creation_tokens
+        - billable_tokens
+      properties:
+        input_tokens:
+          type: integer
+          minimum: 0
+        output_tokens:
+          type: integer
+          minimum: 0
+        cache_read_tokens:
+          type: integer
+          minimum: 0
+        cache_creation_tokens:
+          type: integer
+          minimum: 0
+        billable_tokens:
+          type: integer
+          minimum: 0
+    MissionCostObservability:
+      type: object
+      additionalProperties: false
+      required:
+        - unit
+        - amount
+        - currency_estimate
+        - currency_status
+      properties:
+        unit:
+          type: string
+          const: billable_tokens
+        amount:
+          type: integer
+          minimum: 0
+        currency_estimate:
+          type: [number, "null"]
+          minimum: 0
+        currency_status:
+          type: string
+          const: unavailable
+    MissionObservability:
+      type: object
+      additionalProperties: false
+      required:
+        - latency_ms
+        - usage
+        - cost
+        - network_approval_decisions
+      properties:
+        latency_ms:
+          type: integer
+          minimum: 0
+        usage:
+          $ref: "#/components/schemas/MissionUsageObservability"
+        cost:
+          $ref: "#/components/schemas/MissionCostObservability"
+        network_approval_decisions:
+          type: integer
+          minimum: 0
     MissionEvent:
       type: object
       required:
+        - event_id
+        - correlation_id
+        - causation_id
         - mission_id
         - organization_id
         - sequence
@@ -256,6 +580,14 @@ components:
         - payload
         - created_at
       properties:
+        event_id:
+          type: string
+          minLength: 1
+        correlation_id:
+          type: string
+          minLength: 1
+        causation_id:
+          type: [string, "null"]
         mission_id:
           type: string
         organization_id:
@@ -269,6 +601,13 @@ components:
           type: string
         payload:
           type: object
+          properties:
+            activity:
+              $ref: "#/components/schemas/MissionActivityMetadata"
+            observability:
+              $ref: "#/components/schemas/MissionObservability"
+            error_code:
+              $ref: "#/components/schemas/MissionFailureCode"
           additionalProperties: true
         created_at:
           type: integer
@@ -283,9 +622,34 @@ components:
       required: [code, message]
       properties:
         code:
-          type: string
+          $ref: "#/components/schemas/MissionErrorCode"
         message:
           type: string
+    MissionErrorCode:
+      type: string
+      enum:
+        - MISSION_CANCEL_REQUEST_INVALID
+        - MISSION_CAPACITY_EXCEEDED
+        - MISSION_APPROVAL_CONFLICT
+        - MISSION_APPROVAL_NOT_FOUND
+        - MISSION_APPROVAL_REQUEST_INVALID
+        - MISSION_EVENT_CURSOR_INVALID
+        - MISSION_IDEMPOTENCY_CONFLICT
+        - MISSION_NOT_FOUND
+        - MISSION_ORGANIZATION_FORBIDDEN
+        - MISSION_REQUEST_INVALID
+        - MISSION_SCOPE_FORBIDDEN
+        - MISSION_TERMINAL
+        - MISSION_TIMEOUT
+        - SERVICE_AUTH_INVALID
+        - SERVICE_AUTH_NOT_CONFIGURED
+        - SERVICE_AUTH_REQUIRED
+    MissionFailureCode:
+      type: string
+      enum:
+        - MISSION_EXECUTION_FAILED
+        - MISSION_TASK_FAILED
+        - MISSION_TIMEOUT
     ErrorEnvelope:
       type: object
       required: [error]
@@ -313,6 +677,18 @@ components:
             $ref: "#/components/schemas/ErrorEnvelope"
     NotFound:
       description: Mission is absent or outside the token organization
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    CapacityExceeded:
+      description: Organization or service active-Mission capacity is full
+      headers:
+        Retry-After:
+          description: Minimum suggested delay before retrying the request, in seconds
+          schema:
+            type: integer
+            minimum: 1
       content:
         application/json:
           schema:

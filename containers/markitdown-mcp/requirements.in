@@ -1,0 +1,9 @@
+# Microsoft publishes markitdown-mcp separately from the converter. Keep both
+# exact so a rebuild cannot silently pick up a new converter within <0.2.
+markitdown-mcp==0.0.1a4
+markitdown==0.1.6
+
+# markitdown[all] requires >=1.2.0b1. Make the single intended prerelease
+# explicit so the resolver can keep every unrelated dependency on a stable
+# release instead of globally admitting alpha/rc versions.
+azure-ai-contentunderstanding==1.2.0b2

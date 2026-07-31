@@ -1,0 +1,25 @@
+FROM docker.io/library/python@sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7
+
+LABEL org.opencontainers.image.source="https://github.com/microsoft/markitdown" \
+      org.opencontainers.image.licenses="MIT" \
+      com.aiteam.markitdown-mcp.version="0.0.1a4" \
+      com.aiteam.markitdown.version="0.1.6"
+
+ENV HOME=/tmp \
+    TMPDIR=/tmp \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    MARKITDOWN_ENABLE_PLUGINS=False
+
+COPY requirements.lock /build/requirements.lock
+RUN python -m pip install \
+      --no-cache-dir \
+      --disable-pip-version-check \
+      --require-hashes \
+      --no-deps \
+      --requirement /build/requirements.lock \
+    && python -m pip check \
+    && rm -rf /build
+
+WORKDIR /workspace
+USER 65532:65532
