@@ -16,6 +16,7 @@ import { join } from "node:path";
 const root = process.cwd();
 const fixture = mkdtempSync(join(tmpdir(), "aiteam-preview-qualification-"));
 const bin = join(fixture, "bin");
+const decoyBin = join(fixture, "decoy-bin");
 const release = join(fixture, "release");
 const dataDir = join(fixture, "data");
 const envFile = join(fixture, "aiteam.env");
@@ -24,6 +25,7 @@ const localEnvFile = join(fixture, "aiteam-local-stdio.env");
 const localOutput = join(fixture, "local-stdio-evidence.json");
 const invalidKeyringEnvFile = join(fixture, "aiteam-invalid-keyring.env");
 const invalidKeyringOutput = join(fixture, "invalid-keyring-evidence.json");
+const envDecoyOutput = join(fixture, "env-decoy-evidence.json");
 const collectionFailureOutput = join(
   fixture,
   "collection-failure-evidence.json",
@@ -37,6 +39,7 @@ const serviceSecret = "service-secret-must-not-leak-123456789";
 const invalidKeyring = "not-json-but-long-enough-to-look-like-a-secret";
 
 mkdirSync(bin);
+mkdirSync(decoyBin);
 mkdirSync(release);
 mkdirSync(dataDir);
 mkdirSync(workspaceRoot);
@@ -100,7 +103,7 @@ EOF
 fakeCommand(
   "ss",
   `
-echo "LISTEN 0 511 127.0.0.1:8787 0.0.0.0:*"
+echo "LISTEN 0 511 127.0.0.1:\${FAKE_PORT} 0.0.0.0:*"
 `,
 );
 fakeCommand(
@@ -144,11 +147,17 @@ writeFileSync(
 );
 chmodSync(envFile, 0o600);
 writeFileSync(
+  join(decoyBin, "podman"),
+  "#!/bin/sh\nexit 71\n",
+  "utf8",
+);
+chmodSync(join(decoyBin, "podman"), 0o755);
+writeFileSync(
   localEnvFile,
   [
     readFileSync(envFile, "utf8").trimEnd(),
     "AITEAM_MCP_STDIO_RUNNER=podman",
-    "AITEAM_MCP_STDIO_RUNNER_BIN=/usr/bin/podman",
+    `AITEAM_MCP_STDIO_RUNNER_BIN=${join(bin, "podman")}`,
     `AITEAM_MCP_STDIO_WORKSPACE_ROOT=${workspaceRoot}`,
     "AITEAM_MCP_STDIO_MEMORY=256m",
     "AITEAM_MCP_STDIO_CPUS=1",
@@ -180,6 +189,15 @@ await new Promise((resolvePromise) =>
   healthServer.listen(0, "127.0.0.1", resolvePromise),
 );
 const healthPort = healthServer.address().port;
+process.env.FAKE_PORT = String(healthPort);
+for (const path of [envFile, localEnvFile, invalidKeyringEnvFile]) {
+  writeFileSync(
+    path,
+    readFileSync(path, "utf8").replace("PORT=8787", `PORT=${healthPort}`),
+    "utf8",
+  );
+  chmodSync(path, 0o600);
+}
 
 try {
   const result = await runCli(
@@ -197,7 +215,7 @@ try {
       "--env-file",
       envFile,
       "--port",
-      "8787",
+      String(healthPort),
       "--health-url",
       `http://127.0.0.1:${healthPort}/aiteam/api/auth/me`,
       "--output",
@@ -207,7 +225,7 @@ try {
       cwd: root,
       env: {
         ...process.env,
-        PATH: `${bin}:${process.env.PATH}`,
+        PATH: `${decoyBin}:${bin}:${process.env.PATH}`,
         FAKE_ENV_FILE: envFile,
       },
       encoding: "utf8",
@@ -246,6 +264,99 @@ try {
     "✅ [PREVIEW-HOST-HTTP] fixed release + hardened systemd + loopback health + stdio disabled + secrets redacted",
   );
 
+  const wrongHealthPortResult = await runCli(
+    process.execPath,
+    [
+      "scripts/preview-host-qualification.mjs",
+      "--profile",
+      "http-only",
+      "--service",
+      "aiteam-preview.service",
+      "--release-dir",
+      release,
+      "--expected-commit",
+      expectedCommit,
+      "--env-file",
+      envFile,
+      "--port",
+      String(healthPort === 65535 ? healthPort - 1 : healthPort + 1),
+      "--health-url",
+      `http://127.0.0.1:${healthPort}/aiteam/api/auth/me`,
+    ],
+    {
+      cwd: root,
+      env: {
+        ...process.env,
+        PATH: `${decoyBin}:${bin}:${process.env.PATH}`,
+        FAKE_ENV_FILE: envFile,
+      },
+      encoding: "utf8",
+      timeout: 10_000,
+    },
+  );
+  if (
+    wrongHealthPortResult.status !== 2 ||
+    !wrongHealthPortResult.stderr.includes(
+      "--health-url must be loopback HTTP on --port",
+    )
+  ) {
+    throw new Error(
+      `mismatched health port did not fail closed: ${wrongHealthPortResult.stderr || wrongHealthPortResult.stdout}`,
+    );
+  }
+  console.log(
+    "✅ [PREVIEW-HOST-PORT] health evidence is bound to the qualified listener port",
+  );
+
+  const envDecoyResult = await runCli(
+    process.execPath,
+    [
+      "scripts/preview-host-qualification.mjs",
+      "--profile",
+      "http-only",
+      "--service",
+      "aiteam-preview.service",
+      "--release-dir",
+      release,
+      "--expected-commit",
+      expectedCommit,
+      "--env-file",
+      envFile,
+      "--port",
+      String(healthPort),
+      "--health-url",
+      `http://127.0.0.1:${healthPort}/aiteam/api/auth/me`,
+      "--output",
+      envDecoyOutput,
+    ],
+    {
+      cwd: root,
+      env: {
+        ...process.env,
+        PATH: `${decoyBin}:${bin}:${process.env.PATH}`,
+        FAKE_ENV_FILE: `${envFile}.backup`,
+      },
+      encoding: "utf8",
+      timeout: 10_000,
+    },
+  );
+  const envDecoyEvidence = JSON.parse(readFileSync(envDecoyOutput, "utf8"));
+  const envFileCheck = envDecoyEvidence.checks.find(
+    (check) => check.id === "service.environment_file",
+  );
+  if (
+    envDecoyResult.status !== 1 ||
+    envDecoyEvidence.status !== "fail" ||
+    envFileCheck?.status !== "fail"
+  ) {
+    throw new Error(
+      `environment file decoy did not fail closed: ${envDecoyResult.stdout || envDecoyResult.stderr}`,
+    );
+  }
+  console.log(
+    "✅ [PREVIEW-HOST-ENV] systemd EnvironmentFiles requires an exact configured path",
+  );
+
   const localResult = await runCli(
     process.execPath,
     [
@@ -261,7 +372,7 @@ try {
       "--env-file",
       localEnvFile,
       "--port",
-      "8787",
+      String(healthPort),
       "--health-url",
       `http://127.0.0.1:${healthPort}/aiteam/api/auth/me`,
       "--image",
@@ -273,7 +384,7 @@ try {
       cwd: root,
       env: {
         ...process.env,
-        PATH: `${bin}:${process.env.PATH}`,
+        PATH: `${decoyBin}:${bin}:${process.env.PATH}`,
         FAKE_ENV_FILE: localEnvFile,
       },
       encoding: "utf8",
@@ -327,7 +438,7 @@ try {
       "--env-file",
       invalidKeyringEnvFile,
       "--port",
-      "8787",
+      String(healthPort),
       "--health-url",
       `http://127.0.0.1:${healthPort}/aiteam/api/auth/me`,
       "--output",
@@ -337,7 +448,7 @@ try {
       cwd: root,
       env: {
         ...process.env,
-        PATH: `${bin}:${process.env.PATH}`,
+        PATH: `${decoyBin}:${bin}:${process.env.PATH}`,
         FAKE_ENV_FILE: invalidKeyringEnvFile,
       },
       encoding: "utf8",
@@ -383,7 +494,7 @@ try {
       "--env-file",
       localEnvFile,
       "--port",
-      "8787",
+      String(healthPort),
       "--health-url",
       `http://127.0.0.1:${healthPort}/aiteam/api/auth/me`,
       "--image",
@@ -395,7 +506,7 @@ try {
       cwd: root,
       env: {
         ...process.env,
-        PATH: `${bin}:${process.env.PATH}`,
+        PATH: `${decoyBin}:${bin}:${process.env.PATH}`,
         FAKE_ENV_FILE: localEnvFile,
         FAKE_PODMAN_FAIL: "1",
       },

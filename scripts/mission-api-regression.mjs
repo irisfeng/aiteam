@@ -195,7 +195,7 @@ function seedMissionNetworkApproval(missionId, approvalId, query) {
         taskId,
         createdAt,
       );
-    return { taskId };
+    return { taskId, callFingerprint: grant.call_fingerprint };
   } finally {
     database.close();
   }
@@ -343,14 +343,28 @@ try {
     "network",
     "Mission approval listing exposes only the network approval kind",
   );
+  assertEqual(
+    listApprovalsBody.data?.[0]?.destination,
+    "https://secret-network-target.example/mcp",
+    "Mission approval listing identifies the sanitized network destination",
+  );
+  assertEqual(
+    listApprovalsBody.data?.[0]?.input_summary?.includes(
+      "private-query-that-must-not-be-returned",
+    ),
+    true,
+    "Mission approval listing identifies the bounded outbound query",
+  );
+  assertEqual(
+    listApprovalsBody.data?.[0]?.call_fingerprint,
+    seededApproval.callFingerprint,
+    "Mission approval listing binds the decision to the exact network call",
+  );
   const serializedApproval = JSON.stringify(listApprovalsBody);
   for (const secretValue of [
-    "private-query-that-must-not-be-returned",
     "must-never-leave-aiteam",
-    "secret-network-target.example",
     seededApproval.taskId,
     "mission-approval-no-run-agent",
-    "call_fingerprint",
     "server_fingerprint",
   ]) {
     assertEqual(
@@ -385,6 +399,7 @@ try {
       body: JSON.stringify({
         decision: "approve",
         resolved_by: "user-123",
+        call_fingerprint: seededApproval.callFingerprint,
       }),
     },
   );
@@ -406,6 +421,7 @@ try {
       body: JSON.stringify({
         decision: "approve",
         resolved_by: "user-123",
+        call_fingerprint: seededApproval.callFingerprint,
       }),
     },
   );
@@ -439,6 +455,7 @@ try {
       body: JSON.stringify({
         decision: "approve",
         resolved_by: "user-123",
+        call_fingerprint: seededApproval.callFingerprint,
       }),
     },
   );
@@ -461,6 +478,7 @@ try {
       body: JSON.stringify({
         decision: "reject",
         resolved_by: "user-123",
+        call_fingerprint: seededApproval.callFingerprint,
       }),
     },
   );
@@ -484,6 +502,7 @@ try {
       body: JSON.stringify({
         decision: "reject",
         resolved_by: "user-123",
+        call_fingerprint: rejectedSeed.callFingerprint,
       }),
     },
   );

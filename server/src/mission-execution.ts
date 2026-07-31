@@ -68,6 +68,9 @@ export interface MissionNetworkApproval {
   title: string;
   server_name: string;
   tool_name: string;
+  destination: string;
+  input_summary: string;
+  call_fingerprint: string;
   status: "pending" | "approved" | "rejected";
   created_at: number;
   resolved_at: number | null;
@@ -118,14 +121,20 @@ function publicNetworkApproval(
       network_grant?: {
         v?: unknown;
         server_name?: unknown;
+        server_target?: unknown;
         tool?: unknown;
+        input?: unknown;
+        call_fingerprint?: unknown;
       };
     };
     const grant = payload.network_grant;
     if (
       grant?.v !== 1 ||
       typeof grant.server_name !== "string" ||
-      typeof grant.tool !== "string"
+      typeof grant.server_target !== "string" ||
+      typeof grant.tool !== "string" ||
+      typeof grant.call_fingerprint !== "string" ||
+      !/^[a-f0-9]{64}$/.test(grant.call_fingerprint)
     ) {
       return null;
     }
@@ -139,6 +148,12 @@ function publicNetworkApproval(
       title: approval.title.slice(0, 200),
       server_name: grant.server_name.slice(0, 120),
       tool_name: toolName,
+      destination: publicNetworkDestination(grant.server_target),
+      input_summary: JSON.stringify(redactNetworkInput(grant.input)).slice(
+        0,
+        1200,
+      ),
+      call_fingerprint: grant.call_fingerprint,
       status: approval.status,
       created_at: approval.created_at,
       resolved_at: approval.resolved_at,
@@ -146,6 +161,58 @@ function publicNetworkApproval(
   } catch {
     return null;
   }
+}
+
+function publicNetworkDestination(value: string): string {
+  if (value.startsWith("stdio:")) {
+    return value.slice(0, 240);
+  }
+  try {
+    const target = new URL(value);
+    target.username = "";
+    target.password = "";
+    target.search = "";
+    target.hash = "";
+    return target.toString().slice(0, 240);
+  } catch {
+    return "unavailable";
+  }
+}
+
+function redactNetworkInput(
+  value: unknown,
+  depth = 0,
+): unknown {
+  if (depth > 3) return "[nested value]";
+  if (value === null || typeof value === "boolean" || typeof value === "number") {
+    return value;
+  }
+  if (typeof value === "string") {
+    return value.length > 240 ? `${value.slice(0, 240)}…` : value;
+  }
+  if (Array.isArray(value)) {
+    const visible = value
+      .slice(0, 8)
+      .map((child) => redactNetworkInput(child, depth + 1));
+    if (value.length > visible.length) visible.push(`[${value.length - visible.length} more]`);
+    return visible;
+  }
+  if (value && typeof value === "object") {
+    const result: Record<string, unknown> = {};
+    const entries = Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .slice(0, 16);
+    for (const [key, child] of entries) {
+      result[key.slice(0, 80)] =
+        /authorization|cookie|credential|password|secret|token|api[_-]?key/i.test(
+          key,
+        )
+          ? "[redacted]"
+          : redactNetworkInput(child, depth + 1);
+    }
+    return result;
+  }
+  return "[unsupported value]";
 }
 
 function pickAgent(
@@ -649,7 +716,11 @@ export function listMissionNetworkApprovals(
 export function resolveMissionNetworkApproval(
   mission: Mission,
   approvalId: string,
-  input: { approve: boolean; resolvedBy: string },
+  input: {
+    approve: boolean;
+    resolvedBy: string;
+    callFingerprint: string;
+  },
 ): ResolveMissionNetworkApprovalResult {
   const execution = ensureMissionExecution(mission);
   return withOwner(execution.owner_id, () => {
@@ -661,7 +732,8 @@ export function resolveMissionNetworkApproval(
     if (
       !before?.ref_id ||
       !taskIds.has(before.ref_id) ||
-      !publicBefore
+      !publicBefore ||
+      publicBefore.call_fingerprint !== input.callFingerprint
     ) {
       return { outcome: "not_found" };
     }

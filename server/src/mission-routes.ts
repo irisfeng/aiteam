@@ -257,13 +257,17 @@ missionRoutes.post(
     }
     const decision = String(req.body?.decision ?? "").trim();
     const resolvedBy = String(req.body?.resolved_by ?? "").trim();
+    const callFingerprint = String(
+      req.body?.call_fingerprint ?? "",
+    ).trim();
     const approvalId = String(req.params.approvalId ?? "").trim();
     if (
       !["approve", "reject"].includes(decision) ||
       !approvalId ||
       approvalId.length > 160 ||
       !resolvedBy ||
-      resolvedBy.length > 160
+      resolvedBy.length > 160 ||
+      !/^[a-f0-9]{64}$/.test(callFingerprint)
     ) {
       return res.status(400).json({
         error: {
@@ -284,6 +288,7 @@ missionRoutes.post(
     const result = resolveMissionNetworkApproval(mission, approvalId, {
       approve: decision === "approve",
       resolvedBy,
+      callFingerprint,
     });
     if (result.outcome === "not_found") {
       return res.status(404).json({

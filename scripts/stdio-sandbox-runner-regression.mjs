@@ -533,7 +533,7 @@ try {
   const [
     { enterOwner },
     { mcpExecutionIdForTask },
-    { callMcpTool, mcpToolName },
+    { boundedMcpInputSchema, callMcpTool, mcpToolName },
   ] = await Promise.all([
     import("../server/dist/ownerScope.js"),
     import("../server/dist/db.js"),
@@ -586,6 +586,42 @@ try {
       runsAfterOtherMission === runsAfterFirst + 1 &&
       callsAfterOtherMission === callsAfterFirst + 1,
     `runs=${runsAfterFirst}/${runsAfterCached}/${runsAfterOtherMission} calls=${callsAfterFirst}/${callsAfterCached}/${callsAfterOtherMission}`,
+  );
+  const legitimateSchema = boundedMcpInputSchema({
+    type: "object",
+    properties: {
+      query: { type: "string", description: "Search query" },
+    },
+    required: ["query"],
+  });
+  const oversizedSchema = boundedMcpInputSchema({
+    type: "object",
+    description: "x".repeat(20_000),
+  });
+  let deeplyNested = { type: "string" };
+  for (let depth = 0; depth < 12; depth += 1) {
+    deeplyNested = { type: "object", properties: { child: deeplyNested } };
+  }
+  check(
+    "STDIO-SANDBOX-20",
+    "tool metadata accepts a normal schema and rejects oversized or deeply nested schemas",
+    legitimateSchema?.properties?.query?.type === "string" &&
+      oversizedSchema === null &&
+      boundedMcpInputSchema(deeplyNested) === null,
+  );
+
+  const mcpSource = readFileSync(
+    fileURLToPath(new URL("../server/src/agents/mcp.ts", import.meta.url)),
+    "utf8",
+  );
+  check(
+    "STDIO-SANDBOX-21",
+    "production tool discovery uses a metadata-only sandbox instead of the Mission execution environment",
+    /metadataOnly:\s*true/.test(mcpSource) &&
+      /executionId:\s*`metadata:/.test(mcpSource) &&
+      /requestedContainerEnvKeys\s*=\s*options\.metadataOnly\s*\?\s*\[\]/s.test(
+        mcpSource,
+      ),
   );
 } finally {
   rmSync(fixture, { recursive: true, force: true });

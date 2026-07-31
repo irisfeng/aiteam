@@ -44,9 +44,10 @@ if (
   parsedHealthUrl.protocol !== "http:" ||
   !["127.0.0.1", "::1", "[::1]", "localhost"].includes(
     parsedHealthUrl.hostname,
-  )
+  ) ||
+  Number(parsedHealthUrl.port || 80) !== port
 ) {
-  failWithoutEvidence("--health-url must be loopback HTTP");
+  failWithoutEvidence("--health-url must be loopback HTTP on --port");
 }
 
 const checks = [];
@@ -138,10 +139,14 @@ check(
   finitePositive(service.TasksMax),
   `TasksMax=${service.TasksMax || "missing"}`,
 );
+const environmentFileMatches = systemdPathListContains(
+  service.EnvironmentFiles,
+  envFile,
+);
 check(
   "service.environment_file",
-  String(service.EnvironmentFiles || "").includes(envFile),
-  String(service.EnvironmentFiles || "").includes(envFile)
+  environmentFileMatches,
+  environmentFileMatches
     ? "expected environment file"
     : "unexpected environment file",
 );
@@ -261,7 +266,7 @@ if (profile === "http-only") {
   );
 
   const podmanInfo = JSON.parse(
-    run("podman", ["info", "--format", "json"]),
+    run(runnerBin, ["info", "--format", "json"]),
   );
   const podmanHost = podmanInfo.host || podmanInfo.Host || {};
   const podmanSecurity =
@@ -288,9 +293,9 @@ if (profile === "http-only") {
   if (!/^.+@sha256:[a-f0-9]{64}$/.test(requestedImage)) {
     failWithoutEvidence("--image must be an immutable digest reference");
   }
-  run("podman", ["image", "exists", requestedImage]);
+  run(runnerBin, ["image", "exists", requestedImage]);
   const imageInspect = JSON.parse(
-    run("podman", ["image", "inspect", requestedImage]),
+    run(runnerBin, ["image", "inspect", requestedImage]),
   )[0];
   const imageDigest = String(imageInspect.Digest || imageInspect.digest || "");
   const imageArchitecture = String(
@@ -424,9 +429,7 @@ const evidence = {
     memory_max: service.MemoryMax || "",
     tasks_max: service.TasksMax || "",
     read_write_paths: service.ReadWritePaths || "",
-    environment_file_matches: String(service.EnvironmentFiles || "").includes(
-      envFile,
-    ),
+    environment_file_matches: environmentFileMatches,
   },
   configuration: {
     env_file: envFile,
@@ -522,6 +525,13 @@ function parseEnvironmentFile(path) {
     values[key] = unquote(normalized.slice(separator + 1).trim());
   }
   return values;
+}
+
+function systemdPathListContains(value, expectedPath) {
+  const escaped = expectedPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|\\s)-?${escaped}(?=\\s|$)`).test(
+    String(value || ""),
+  );
 }
 
 function unquote(value) {

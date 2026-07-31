@@ -17,6 +17,10 @@ import {
 /** 注入工作循环的 MCP 工具数量上限（防上下文膨胀，尤其轻量通道） */
 const MAX_MCP_TOOLS = Number(process.env.AITEAM_MAX_MCP_TOOLS ?? 40);
 const TOOL_RESULT_LIMIT = 20000;
+const MAX_MCP_SCHEMA_BYTES = 16 * 1024;
+const MAX_MCP_SCHEMA_DEPTH = 8;
+const MAX_MCP_SCHEMA_NODES = 512;
+const MAX_MCP_SCHEMA_STRING_BYTES = 8 * 1024;
 /** 同参调用结果缓存：重复检索直接回缓存（零计费）。TTL 10 分钟，上限 200 条 */
 const CALL_CACHE_TTL = Number(process.env.AITEAM_MCP_CACHE_TTL_MS ?? 10 * 60_000);
 const callCache = new Map<string, { text: string; ts: number }>();
@@ -189,9 +193,93 @@ function productionSandboxedStdio(server: McpServer): boolean {
   return server.kind === "stdio" && process.env.NODE_ENV === "production";
 }
 
+/**
+ * MCP tool metadata is untrusted input that is relayed into the model context.
+ * Clone only bounded JSON values and fail closed instead of truncating a schema
+ * into different validation semantics.
+ */
+export function boundedMcpInputSchema(
+  value: unknown,
+): Record<string, unknown> | null {
+  let nodes = 0;
+  let stringBytes = 0;
+  const seen = new Set<object>();
+
+  function clone(candidate: unknown, depth: number): unknown {
+    nodes += 1;
+    if (nodes > MAX_MCP_SCHEMA_NODES || depth > MAX_MCP_SCHEMA_DEPTH) {
+      throw new Error("schema complexity limit exceeded");
+    }
+    if (
+      candidate === null ||
+      typeof candidate === "boolean" ||
+      typeof candidate === "number"
+    ) {
+      return candidate;
+    }
+    if (typeof candidate === "string") {
+      stringBytes += Buffer.byteLength(candidate);
+      if (stringBytes > MAX_MCP_SCHEMA_STRING_BYTES) {
+        throw new Error("schema string budget exceeded");
+      }
+      return candidate;
+    }
+    if (Array.isArray(candidate)) {
+      if (candidate.length > 128) throw new Error("schema array limit exceeded");
+      if (seen.has(candidate)) throw new Error("cyclic schema");
+      seen.add(candidate);
+      const result = candidate.map((child) => clone(child, depth + 1));
+      seen.delete(candidate);
+      return result;
+    }
+    if (candidate && typeof candidate === "object") {
+      if (seen.has(candidate)) throw new Error("cyclic schema");
+      seen.add(candidate);
+      const entries = Object.entries(candidate as Record<string, unknown>);
+      if (entries.length > 128) {
+        throw new Error("schema property limit exceeded");
+      }
+      const result: Record<string, unknown> = {};
+      for (const [key, child] of entries) {
+        if (Buffer.byteLength(key) > 128 || child === undefined) {
+          throw new Error("invalid schema member");
+        }
+        stringBytes += Buffer.byteLength(key);
+        if (stringBytes > MAX_MCP_SCHEMA_STRING_BYTES) {
+          throw new Error("schema string budget exceeded");
+        }
+        result[key] = clone(child, depth + 1);
+      }
+      seen.delete(candidate);
+      return result;
+    }
+    throw new Error("schema contains a non-JSON value");
+  }
+
+  try {
+    const cloned = clone(value, 0);
+    if (!cloned || typeof cloned !== "object" || Array.isArray(cloned)) {
+      return null;
+    }
+    const schema = cloned as Record<string, unknown>;
+    if (schema.type !== undefined && schema.type !== "object") return null;
+    if (Buffer.byteLength(JSON.stringify(schema)) > MAX_MCP_SCHEMA_BYTES) {
+      return null;
+    }
+    return schema;
+  } catch {
+    return null;
+  }
+}
+
+interface ConnectOptions {
+  metadataOnly?: boolean;
+}
+
 async function connect(
   server: McpServer,
   scope?: StdioSandboxScope,
+  options: ConnectOptions = {},
 ): Promise<Connection> {
   const client = new Client({ name: "aiteam", version: "1.0.0" });
   try {
@@ -214,12 +302,20 @@ async function connect(
       // 自定义环境变量（如 BOCHA_API_KEY）：runner 保留 SDK 安全默认环境，
       // 容器只注入 env_json 明确配置的键，避免把宿主 HOME/PATH 等隐式带入。
       let envExtra: Record<string, string> = {};
-      try {
-        const parsed = JSON.parse(decryptSecret(server.env_json || "{}") || "{}");
-        if (parsed && typeof parsed === "object") {
-          for (const [k, v] of Object.entries(parsed)) envExtra[k] = String(v);
+      if (!options.metadataOnly) {
+        try {
+          const parsed = JSON.parse(
+            decryptSecret(server.env_json || "{}") || "{}",
+          );
+          if (parsed && typeof parsed === "object") {
+            for (const [k, v] of Object.entries(parsed)) {
+              envExtra[k] = String(v);
+            }
+          }
+        } catch {
+          /* ignore */
         }
-      } catch { /* ignore */ }
+      }
       const env = { ...getDefaultEnvironment(), ...envExtra };
       if (process.env.NODE_ENV === "production") {
         const owner = currentOwnerOrNull();
@@ -228,11 +324,20 @@ async function connect(
             "MCP_STDIO_CONTEXT_REQUIRED: production stdio requires the current owner and a Mission/task execution scope",
           );
         }
+        const launchScope = options.metadataOnly
+          ? {
+              ownerId: scope.ownerId,
+              executionId: `metadata:${server.id}`,
+            }
+          : scope;
+        const requestedContainerEnvKeys = options.metadataOnly
+          ? []
+          : Object.keys(envExtra);
         const launch = buildStdioSandboxLaunch(
           server,
-          scope,
+          launchScope,
           env,
-          Object.keys(envExtra),
+          requestedContainerEnvKeys,
         );
         await withTimeout(
           client.connect(
@@ -353,16 +458,25 @@ export async function mcpToolDefs(
     ) {
       continue;
     }
-    const conn = await ensureConnection(server, scope);
+    const conn = productionSandboxedStdio(server)
+      ? await connect(server, scope, { metadataOnly: true })
+      : await ensureConnection(server, scope);
     if (!conn) continue;
     try {
       const prefix = `mcp__${sanitizeName(server.name)}__`;
       for (const t of conn.tools) {
         if (defs.length >= MAX_MCP_TOOLS) return defs;
+        const inputSchema = boundedMcpInputSchema(t.inputSchema);
+        if (!inputSchema) {
+          console.warn(
+            `[mcp] skipped ${server.name}:${t.name} because its input schema exceeds metadata limits`,
+          );
+          continue;
+        }
         defs.push({
           name: `${prefix}${t.name}`.slice(0, 128),
           description: `[${server.name}] ${t.description}`.slice(0, 1024),
-          input_schema: t.inputSchema,
+          input_schema: inputSchema as Anthropic.Tool.InputSchema,
         });
       }
     } finally {
