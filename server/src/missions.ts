@@ -13,6 +13,9 @@ import { missionActivityMetadata } from "./mission-activity.js";
 const DEFAULT_MISSION_TIMEOUT_MS = 60 * 60 * 1000;
 const MIN_MISSION_TIMEOUT_MS = 1000;
 const MAX_MISSION_TIMEOUT_MS = 7 * 24 * 60 * 60 * 1000;
+const DEFAULT_MISSION_EXPIRY_SWEEP_MS = 30_000;
+const MIN_MISSION_EXPIRY_SWEEP_MS = 1_000;
+const MAX_MISSION_EXPIRY_SWEEP_MS = 60_000;
 const DEFAULT_MISSION_MAX_ACTIVE_PER_ORGANIZATION = 2;
 const MIN_MISSION_MAX_ACTIVE_PER_ORGANIZATION = 1;
 const MAX_MISSION_MAX_ACTIVE_PER_ORGANIZATION = 32;
@@ -37,6 +40,23 @@ function configuredMissionTimeoutMs(): number {
 }
 
 const missionTimeoutMs = configuredMissionTimeoutMs();
+function configuredMissionExpirySweepMs(): number {
+  const raw = process.env.AITEAM_MISSION_EXPIRY_SWEEP_MS?.trim();
+  if (!raw) return DEFAULT_MISSION_EXPIRY_SWEEP_MS;
+  const parsed = Number(raw);
+  if (
+    !Number.isSafeInteger(parsed) ||
+    parsed < MIN_MISSION_EXPIRY_SWEEP_MS ||
+    parsed > MAX_MISSION_EXPIRY_SWEEP_MS
+  ) {
+    throw new Error(
+      `AITEAM_MISSION_EXPIRY_SWEEP_MS must be an integer between ${MIN_MISSION_EXPIRY_SWEEP_MS} and ${MAX_MISSION_EXPIRY_SWEEP_MS}`,
+    );
+  }
+  return parsed;
+}
+
+const missionExpirySweepMs = configuredMissionExpirySweepMs();
 function configuredMissionMaxActivePerOrganization(): number {
   const raw =
     process.env.AITEAM_MISSION_MAX_ACTIVE_PER_ORGANIZATION?.trim();
@@ -386,6 +406,21 @@ export function expireOverdueMissions(now = Date.now()): number {
     );
   }
   return overdue.length;
+}
+
+export function startMissionExpirySweep(): ReturnType<typeof setInterval> {
+  const timer = setInterval(() => {
+    try {
+      const expired = expireOverdueMissions();
+      if (expired) {
+        console.log(`[aiteam] 定时终止 ${expired} 个已超期 Mission`);
+      }
+    } catch (error) {
+      console.error("[aiteam] Mission expiry sweep failed:", error);
+    }
+  }, missionExpirySweepMs);
+  timer.unref();
+  return timer;
 }
 
 export function cancelMission(

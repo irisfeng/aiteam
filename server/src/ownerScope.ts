@@ -19,6 +19,14 @@ export function ownerFromUserId(userId: string): string {
   return `user:${userId}`;
 }
 
+/** Mission 服务调用按组织和用户共同隔离，避免不同组织复用同一外部用户 ID。 */
+export function ownerFromOrganizationUser(
+  organizationId: string,
+  userId: string,
+): string {
+  return `organization:${encodeURIComponent(organizationId)}:user:${encodeURIComponent(userId)}`;
+}
+
 export function withOwner<T>(ownerId: string, fn: () => T): T {
   return als.run({ ownerId }, fn);
 }

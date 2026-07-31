@@ -15,7 +15,8 @@ AITeam 已有按用户隔离的多智能体任务、依赖调度、独立复核�
 
 `research_report` Mission 映射到发起人的 AITeam 私有执行工作区：
 
-1. 使用 Coworker `requested_by` 建立 `user:<id>` owner 上下文。
+1. 使用 Coworker `organization_id + requested_by` 建立复合 owner 上下文；即使不同
+   组织意外复用了相同用户 ID，也不会共享执行工作区。
 2. 幂等播种该 owner 的默认团队和频道。
 3. 创建一个 AITeam Project，并建立“口径→资料→对比→报告”的四任务 DAG。
 4. 每个任务使用现有负责人、独立 reviewer、质量门、返工和文档版本机制。

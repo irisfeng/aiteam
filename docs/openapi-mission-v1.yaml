@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: AITeam Mission API
-  version: 0.9.0
+  version: 0.9.1
   description: Organization-scoped research execution and artifact contract used by Coworker.
 servers:
   - url: /aiteam/api/v1
@@ -286,6 +286,7 @@ components:
         requested_by:
           type: string
           minLength: 1
+          description: External requester id, isolated together with organization_id.
     CancelMissionRequest:
       type: object
       additionalProperties: false
@@ -307,6 +308,7 @@ components:
       required:
         - decision
         - resolved_by
+        - call_fingerprint
       properties:
         decision:
           type: string
@@ -315,6 +317,9 @@ components:
           type: string
           minLength: 1
           maxLength: 160
+        call_fingerprint:
+          type: string
+          pattern: ^[a-f0-9]{64}$
     Mission:
       type: object
       required:
@@ -392,12 +397,16 @@ components:
         - title
         - server_name
         - tool_name
+        - destination
+        - input_summary
+        - call_fingerprint
         - status
         - created_at
         - resolved_at
       description: >-
-        Sanitized decision metadata. Exact input, target URL, credentials,
-        fingerprints, task IDs and agent IDs never cross the Mission boundary.
+        Sanitized decision metadata. Only the credential-free destination,
+        bounded redacted input summary and exact call fingerprint cross the
+        Mission boundary; credentials, full input, task IDs and agent IDs do not.
       properties:
         id:
           type: string
@@ -414,6 +423,19 @@ components:
         tool_name:
           type: string
           maxLength: 120
+        destination:
+          type: string
+          minLength: 1
+          maxLength: 240
+        input_summary:
+          type: string
+          minLength: 1
+          maxLength: 1200
+          x-maxUtf8Bytes: 1200
+          description: UTF-8-safe redacted summary bounded to 1200 bytes.
+        call_fingerprint:
+          type: string
+          pattern: ^[a-f0-9]{64}$
         status:
           type: string
           enum: [pending, approved, rejected]

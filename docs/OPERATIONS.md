@@ -285,6 +285,7 @@ npm start
 | `AITEAM_DAILY_TOKEN_BUDGET` | `0`（不限） | 每日 token 预算，`>0` 启用 |
 | `AITEAM_TASK_TOKEN_BUDGET` | `0`（不限） | 单任务默认预算（加权计费 token）；触线任务自动暂停并开审批，批准后追加预算续跑 |
 | `AITEAM_MISSION_TIMEOUT_MS` | `3600000`（1 小时） | Mission 总执行期限（1000–604800000ms）；截止时间写入数据库，重启时先过期再恢复任务 |
+| `AITEAM_MISSION_EXPIRY_SWEEP_MS` | `30000`（30 秒） | 主动收口已超期 Mission 的扫描间隔（1000–60000ms） |
 | `AITEAM_MISSION_MAX_ACTIVE_PER_ORGANIZATION` | `2` | 单组织活跃 Mission 上限（1–32） |
 | `AITEAM_MISSION_MAX_ACTIVE_GLOBAL` | `4` | 单实例全局活跃 Mission 上限（1–64），不得小于单组织上限 |
 | `TASK_MAX_REVISIONS` | `1` | 验收返工上限 |
@@ -367,7 +368,7 @@ Podman/镜像准入统一使用 `scripts/preview-host-qualification.mjs`。首�
 ## 8. 测试与验证
 
 - `AITEAM_PROVIDER_TIMEOUT_MS`：OpenAI 兼容通道的**空闲超时**（毫秒，默认 120000）。连续这么久收不到任何字节才中止；流式长回复不受总时长限制。
-- `AITEAM_MISSION_TIMEOUT_MS`：Mission 的**总执行期限**（毫秒，默认 3600000）。它与单次 provider/MCP 空闲超时分离；截止时间随 Mission 持久化，服务重启会先把已超期 Mission 收口为 `failed`，再恢复仍有效的运行中任务。
+- `AITEAM_MISSION_TIMEOUT_MS`：Mission 的**总执行期限**（毫秒，默认 3600000）。它与单次 provider/MCP 空闲超时分离；截止时间随 Mission 持久化，服务重启会先把已超期 Mission 收口为 `failed`，运行中也会按 `AITEAM_MISSION_EXPIRY_SWEEP_MS` 主动收口，再恢复仍有效的任务。
 - `AITEAM_MISSION_MAX_ACTIVE_PER_ORGANIZATION` / `AITEAM_MISSION_MAX_ACTIVE_GLOBAL`：
   在 Mission 与首事件写入前，以 SQLite 立即事务原子检查组织/实例容量。
   活跃状态为 `queued/running/blocked`；终态和已收口的超时 Mission 释放名额。

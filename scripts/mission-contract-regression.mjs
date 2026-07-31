@@ -20,7 +20,16 @@ function assertIncludes(value, expected, label) {
   console.log(`✅ ${label}`);
 }
 
-assertIncludes(openapi, "version: 0.9.0", "OpenAPI publishes Mission API 0.9.0");
+function schemaBlock(name, nextName) {
+  const start = openapi.indexOf(`    ${name}:`);
+  const end = openapi.indexOf(`    ${nextName}:`, start + 1);
+  if (start < 0 || end < 0) {
+    throw new Error(`OpenAPI schema block missing: ${name}`);
+  }
+  return openapi.slice(start, end);
+}
+
+assertIncludes(openapi, "version: 0.9.1", "OpenAPI publishes Mission API 0.9.1");
 assertIncludes(
   openapi,
   "/missions/{missionId}/approvals:",
@@ -35,6 +44,43 @@ assertIncludes(
   openapi,
   "mission:approve",
   "OpenAPI publishes the least-privilege approval scope",
+);
+
+const approvalRequestSchema = schemaBlock(
+  "ResolveMissionNetworkApprovalRequest",
+  "Mission",
+);
+assertIncludes(
+  approvalRequestSchema,
+  "- call_fingerprint",
+  "OpenAPI requires the approval call fingerprint",
+);
+assertIncludes(
+  approvalRequestSchema,
+  "pattern: ^[a-f0-9]{64}$",
+  "OpenAPI constrains the approval call fingerprint",
+);
+
+const approvalSchema = schemaBlock(
+  "MissionNetworkApproval",
+  "MissionNetworkApprovalEnvelope",
+);
+for (const field of ["destination", "input_summary", "call_fingerprint"]) {
+  assertIncludes(
+    approvalSchema,
+    `- ${field}`,
+    `OpenAPI requires Mission approval field ${field}`,
+  );
+}
+assertIncludes(
+  approvalSchema,
+  "maxLength: 1200",
+  "OpenAPI publishes the Mission approval summary character ceiling",
+);
+assertIncludes(
+  approvalSchema,
+  "x-maxUtf8Bytes: 1200",
+  "OpenAPI publishes the Mission approval summary byte ceiling",
 );
 
 const errorCodes = [

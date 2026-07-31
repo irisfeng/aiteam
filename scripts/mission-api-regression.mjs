@@ -33,6 +33,7 @@ const child = spawn(process.execPath, [join(root, "server/dist/index.js")], {
     AITEAM_TEST_INSTANCE_ID: instanceId,
     AITEAM_SERVICE_JWT_SECRET: secret,
     AITEAM_SERVICE_JWT_KEYS: "",
+    AITEAM_MISSION_EXPIRY_SWEEP_MS: "1000",
   },
   stdio: ["ignore", "pipe", "pipe"],
 });
@@ -106,7 +107,52 @@ function sha256(value) {
     .digest("hex");
 }
 
-function seedMissionNetworkApproval(missionId, approvalId, query) {
+function missionExecutionOwner(missionId) {
+  const database = new Database(join(dataDir, "aiteam.db"), {
+    readonly: true,
+  });
+  try {
+    return database
+      .prepare("SELECT owner_id FROM mission_executions WHERE mission_id = ?")
+      .get(missionId)?.owner_id;
+  } finally {
+    database.close();
+  }
+}
+
+function expireMissionInDatabase(missionId) {
+  const database = new Database(join(dataDir, "aiteam.db"));
+  try {
+    database
+      .prepare("UPDATE missions SET deadline_at = ? WHERE id = ?")
+      .run(Date.now() - 1, missionId);
+  } finally {
+    database.close();
+  }
+}
+
+function missionStatusInDatabase(missionId) {
+  const database = new Database(join(dataDir, "aiteam.db"), {
+    readonly: true,
+  });
+  try {
+    return database.prepare("SELECT status FROM missions WHERE id = ?").get(missionId)
+      ?.status;
+  } finally {
+    database.close();
+  }
+}
+
+async function waitForCondition(predicate, timeoutMs = 2500) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return predicate();
+}
+
+function seedMissionNetworkApproval(missionId, approvalId, inputValue) {
   const database = new Database(join(dataDir, "aiteam.db"));
   try {
     const execution = database
@@ -142,7 +188,10 @@ function seedMissionNetworkApproval(missionId, approvalId, query) {
       .run({ ...server, created_at: Date.now() });
     const serverFingerprint = sha256(server);
     const tool = "mcp__mission_approval_network__search";
-    const input = canonicalJson({ query, api_token: "must-never-leave-aiteam" });
+    const input = canonicalJson({
+      ...inputValue,
+      api_token: "must-never-leave-aiteam",
+    });
     const grant = {
       v: 1,
       server_id: server.id,
@@ -294,6 +343,42 @@ try {
   assertEqual(createMission.status, 201, "A valid service request creates a mission");
   const createdBody = await createMission.json();
 
+  const secondOrganizationMission = await fetch(`${base}/missions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${serviceToken("org-beta")}`,
+      "Content-Type": "application/json",
+      "Idempotency-Key": "mission-owner-isolation-beta",
+    },
+    body: JSON.stringify({
+      ...missionBody,
+      organization_id: "org-beta",
+      title: "Second organization with the same requester id",
+    }),
+  });
+  assertEqual(
+    secondOrganizationMission.status,
+    201,
+    "Another organization can create a Mission for the same requester id",
+  );
+  const secondOrganizationMissionBody = await secondOrganizationMission.json();
+  assertEqual(
+    missionExecutionOwner(createdBody.data.id) !==
+      missionExecutionOwner(secondOrganizationMissionBody.data.id),
+    true,
+    "Mission execution workspaces include the organization boundary",
+  );
+  expireMissionInDatabase(secondOrganizationMissionBody.data.id);
+  assertEqual(
+    await waitForCondition(
+      () =>
+        missionStatusInDatabase(secondOrganizationMissionBody.data.id) ===
+        "failed",
+    ),
+    true,
+    "The runtime proactively fails an overdue Mission without another API read",
+  );
+
   const approvalMissionResponse = await fetch(`${base}/missions`, {
     method: "POST",
     headers: {
@@ -316,7 +401,15 @@ try {
   const seededApproval = seedMissionNetworkApproval(
     approvalMissionId,
     approvalId,
-    "private-query-that-must-not-be-returned",
+    {
+      query: "private-query-that-must-not-be-returned",
+      harmless: "sk-live-value-secret-1234567890",
+      callback:
+        "https://integration-user:integration-password@example.com/callback?token=query-secret-123456",
+      z_context: Array.from({ length: 8 }, (_, index) =>
+        `第${index + 1}段${"中文审批摘要".repeat(48)}`,
+      ),
+    },
   );
 
   const listApprovals = await fetch(
@@ -360,9 +453,23 @@ try {
     seededApproval.callFingerprint,
     "Mission approval listing binds the decision to the exact network call",
   );
+  assertEqual(
+    Buffer.byteLength(listApprovalsBody.data?.[0]?.input_summary ?? "") <= 1200,
+    true,
+    "Mission approval listing bounds UTF-8 input summaries to 1200 bytes",
+  );
+  assertEqual(
+    listApprovalsBody.data?.[0]?.input_summary?.includes("\uFFFD"),
+    false,
+    "Mission approval listing preserves valid Unicode at the byte boundary",
+  );
   const serializedApproval = JSON.stringify(listApprovalsBody);
   for (const secretValue of [
     "must-never-leave-aiteam",
+    "sk-live-value-secret-1234567890",
+    "integration-user",
+    "integration-password",
+    "query-secret-123456",
     seededApproval.taskId,
     "mission-approval-no-run-agent",
     "server_fingerprint",

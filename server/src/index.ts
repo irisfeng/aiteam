@@ -13,7 +13,7 @@ import { finalizeStaleStreaming } from "./db.js";
 import { isMock, recoverInFlightTasks, startScheduler } from "./agents/engine.js";
 import { assetsDir } from "./agents/images.js";
 import { missionRoutes } from "./mission-routes.js";
-import { expireOverdueMissions } from "./missions.js";
+import { expireOverdueMissions, startMissionExpirySweep } from "./missions.js";
 import { assertProductionStdioConfiguration } from "./agents/mcp.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -31,6 +31,7 @@ const expiredMissions = expireOverdueMissions();
 if (expiredMissions) {
   console.log(`[aiteam] 启动时终止 ${expiredMissions} 个已超期 Mission`);
 }
+startMissionExpirySweep();
 recoverInFlightTasks();
 
 const app = express();

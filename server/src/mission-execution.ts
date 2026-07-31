@@ -29,7 +29,7 @@ import {
   type MissionStageKey,
 } from "./mission-activity.js";
 import { summarizeMissionObservability } from "./mission-observability.js";
-import { ownerFromUserId, withOwner } from "./ownerScope.js";
+import { ownerFromOrganizationUser, withOwner } from "./ownerScope.js";
 import { seedForOwner } from "./seed.js";
 import type { Mission, MissionStatus } from "./missions.js";
 import { resolveApprovalWithSideEffects } from "./approval-resolution.js";
@@ -149,8 +149,8 @@ function publicNetworkApproval(
       server_name: grant.server_name.slice(0, 120),
       tool_name: toolName,
       destination: publicNetworkDestination(grant.server_target),
-      input_summary: JSON.stringify(redactNetworkInput(grant.input)).slice(
-        0,
+      input_summary: truncateUtf8(
+        JSON.stringify(redactNetworkInput(grant.input)),
         1200,
       ),
       call_fingerprint: grant.call_fingerprint,
@@ -179,6 +179,21 @@ function publicNetworkDestination(value: string): string {
   }
 }
 
+function truncateUtf8(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value) <= maxBytes) return value;
+  const suffix = "…";
+  const contentBudget = maxBytes - Buffer.byteLength(suffix);
+  let bytes = 0;
+  let end = 0;
+  for (const character of value) {
+    const characterBytes = Buffer.byteLength(character);
+    if (bytes + characterBytes > contentBudget) break;
+    bytes += characterBytes;
+    end += character.length;
+  }
+  return `${value.slice(0, end)}${suffix}`;
+}
+
 function redactNetworkInput(
   value: unknown,
   depth = 0,
@@ -188,7 +203,8 @@ function redactNetworkInput(
     return value;
   }
   if (typeof value === "string") {
-    return value.length > 240 ? `${value.slice(0, 240)}…` : value;
+    const redacted = redactSensitiveString(value);
+    return redacted.length > 240 ? `${redacted.slice(0, 240)}…` : redacted;
   }
   if (Array.isArray(value)) {
     const visible = value
@@ -215,6 +231,22 @@ function redactNetworkInput(
   return "[unsupported value]";
 }
 
+function redactSensitiveString(value: string): string {
+  return value
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+    .replace(/\b(?:sk|pk|rk|ghp|github_pat)[-_][A-Za-z0-9_-]{8,}\b/gi, "[redacted]")
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[redacted]")
+    .replace(/(https?:\/\/)[^/\s@]+@/gi, "$1[redacted]@")
+    .replace(
+      /([?&](?:access[_-]?token|api[_-]?key|key|password|secret|token)=)[^&#\s]*/gi,
+      "$1[redacted]",
+    )
+    .replace(
+      /\b(api[_-]?key|access[_-]?token|password|secret|token)\s*[:=]\s*[^\s,;&]+/gi,
+      "$1=[redacted]",
+    );
+}
+
 function pickAgent(
   agents: ReturnType<typeof listAgents>,
   patterns: RegExp[],
@@ -233,7 +265,10 @@ export function ensureMissionExecution(mission: Mission): MissionExecution {
   const existing = executionFor(mission.id, mission.organization_id);
   if (existing) return existing;
 
-  const ownerId = ownerFromUserId(mission.requested_by);
+  const ownerId = ownerFromOrganizationUser(
+    mission.organization_id,
+    mission.requested_by,
+  );
   return withOwner(ownerId, () => {
     seedForOwner();
     const agents = listAgents();
