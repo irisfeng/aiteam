@@ -78,7 +78,7 @@ npm run pack:verify --workspace desktop  # 将包内 Resources 复制到 /tmp �
 ## 4. 模型接入（不配则 Mock）
 
 - 不配任何 key = **Mock 模式**（启动日志标 `mock mode`），只能跑机制、不产出真内容。
-- 配置：登录后 **设置 → 模型**，添加 provider（BYOM，Anthropic 兼容端点）。例：DeepSeek `base_url=https://api.deepseek.com/anthropic`、强模型 `deepseek-v4-pro`、轻量 `deepseek-v4-flash`。或设 `ANTHROPIC_API_KEY` 走官方。
+- 配置：登录后 **设置 → 模型**，添加 provider（BYOM，Anthropic 兼容端点）。例：DeepSeek `base_url=https://api.deepseek.com/anthropic`、默认与轻量模型均用 `deepseek-v4-flash`。或设 `ANTHROPIC_API_KEY` 走官方。
 - provider 为**全局**配置（组织级），各成员工作区隔离。详见 GUIDE.md「第 1 步：接入模型」。
 
 ---

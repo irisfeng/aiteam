@@ -257,7 +257,7 @@ OpenAI 协议的供应商与本地运行时（Ollama / LM Studio / vLLM…）可
 
 **DeepSeek 接入速查（2026-06，V4）**：
 - Anthropic 兼容端点：`https://api.deepseek.com/anthropic`；
-- 模型：`deepseek-v4-pro`（旗舰）/ `deepseek-v4-flash`（轻量）；旧名 `deepseek-chat`/
+- 模型：默认统一使用 `deepseek-v4-flash`（0731 Agent 增强版）；`deepseek-v4-pro` 仅保留显式回退；旧名 `deepseek-chat`/
   `deepseek-reasoner` 是 V4 Flash 的兼容别名，2026-07-24 起废弃；
 - 该端点会把 `claude-opus*` 自动映射为 v4-pro、`claude-sonnet*/haiku*` 映射为 v4-flash；
 - 上下文 1M / 最大输出 384K（两档相同）—— 我们默认 max_tokens 16000 可直接用；

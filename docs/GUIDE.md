@@ -28,8 +28,8 @@ npm run dev                       # 本地开发，打开 http://localhost:5173/
 | 名称 | DeepSeek |
 | Base URL | `https://api.deepseek.com/anthropic` |
 | API Key | `sk-…` |
-| 默认模型 | `deepseek-v4-pro`（分析/创作） |
-| 轻量模型 | `deepseek-v4-flash`（重复执行，自动降本） |
+| 默认模型 | `deepseek-v4-flash`（0731 版，分析/创作） |
+| 轻量模型 | `deepseek-v4-flash`（重复执行，统一降本） |
 
 也可以直接点 **DeepSeek / SiliconFlow GLM / 百炼 DashScope** 预设卡自动填入协议路径和模型名。
 价格字段可选填输入/输出每百万 token 单价和币种，仅用于任务演练估算成本，不等同于供应商账单。

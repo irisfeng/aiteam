@@ -51,7 +51,7 @@ const PROVIDER_PRESETS = [
     name: "DeepSeek",
     desc: "Anthropic-compatible，适合先跑通工具调用和长任务线。",
     base_url: "https://api.deepseek.com/anthropic",
-    default_model: "deepseek-v4-pro",
+    default_model: "deepseek-v4-flash",
     light_model: "deepseek-v4-flash",
     web_tools: true,
     is_strong: true,
@@ -879,7 +879,7 @@ export function SettingsModal({
           <div className="flex gap-2">
             <div className="flex-1">
               <label className={labelCls}>默认模型（分析/创作）</label>
-              <input value={defaultModel} onChange={(e) => setDefaultModel(e.target.value)} placeholder="deepseek-v4-pro / zai-org/GLM-5.2 / qwen-plus" className={inputCls} />
+              <input value={defaultModel} onChange={(e) => setDefaultModel(e.target.value)} placeholder="deepseek-v4-flash / zai-org/GLM-5.2 / qwen-plus" className={inputCls} />
             </div>
             <div className="flex-1">
               <label className={labelCls}>轻量模型（重复性任务，可选）</label>

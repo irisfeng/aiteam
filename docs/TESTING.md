@@ -47,7 +47,7 @@
 
   | 供应商 | Base URL | 默认模型 | 轻量模型 | 备注 |
   |---|---|---|---|---|
-  | DeepSeek Anthropic | `https://api.deepseek.com/anthropic` | `deepseek-v4-pro` | `deepseek-v4-flash` | 可尝试勾选“服务端联网工具”，不支持会自动降级 |
+  | DeepSeek Anthropic | `https://api.deepseek.com/anthropic` | `deepseek-v4-flash` | `deepseek-v4-flash` | 可尝试勾选“服务端联网工具”，不支持会自动降级 |
   | SiliconFlow GLM | `https://api.siliconflow.com/v1` | `zai-org/GLM-5.2` 或控制台模型 ID | 选同供应商低成本模型 | OpenAI-compatible，联网优先用 MCP |
   | 百炼 / DashScope | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` 或控制台当前模型名 | `qwen-turbo` | OpenAI-compatible；生产可替换为工作空间专属域名 |
 
@@ -293,4 +293,4 @@
   「⭐ 用作强通道」即可让验收/汇总走它的默认模型（见 H4）。
 - DeepSeek 工具调用稳定性弱于 Claude，复杂项目偶发"不调工具/不交裁决"——
   引擎会强约束重试一轮；仍未提交结构化裁决时按 `revise` **fail-closed** 退回并留痕，
-  绝不默认通过。若频繁出现，换 `deepseek-v4-pro` 或反馈给我调提示词。
+  绝不默认通过。若频繁出现，请反馈给我调提示词或按专项评测决定是否临时回退 Pro。
